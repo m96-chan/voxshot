@@ -1,9 +1,13 @@
 export { ZeroVox } from "./zerovox.js";
-export type { SpeakOptions, VoiceSource, ZeroVoxOptions } from "./zerovox.js";
+export type { PlayOptions, SpeakOptions, VoiceSource, ZeroVoxOptions } from "./zerovox.js";
 
 export { SynthesizedAudio } from "./audio/synthesized-audio.js";
 export { normalizePeak, resample, toMono, trimSilence } from "./audio/pcm.js";
 export { encodeWav } from "./audio/wav.js";
+export { startSpeechPlayback } from "./audio/speech-playback.js";
+export type { SpeechPlayback, SpeechPlaybackInput } from "./audio/speech-playback.js";
+export { SynthesisCache } from "./audio/synthesis-cache.js";
+export type { SynthesisCacheOptions } from "./audio/synthesis-cache.js";
 
 export { resolveDevice } from "./device.js";
 export type { DevicePreference, ResolvedDevice } from "./device.js";
@@ -51,6 +55,7 @@ export {
   BrowserAudioDecoder,
   BrowserAudioPlayer,
   BrowserGpuProbe,
+  BrowserStreamingAudioPlayer,
   createBrowserPlatform,
 } from "./browser-platform.js";
 export type {
@@ -60,6 +65,8 @@ export type {
   GpuProbe,
   PcmAudio,
   Platform,
+  StreamingAudioPlayer,
+  StreamingPlayback,
 } from "./platform.js";
 
 export { normalizeText } from "./text/normalize.js";

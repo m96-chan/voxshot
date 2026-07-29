@@ -454,3 +454,180 @@ describe("ZeroVox defaults", () => {
     await tts.dispose();
   });
 });
+
+/** Streaming device that accepts everything immediately. */
+class AutoStreamingPlayback {
+  writes: Float32Array[] = [];
+  volumes: number[] = [];
+  ended = false;
+  stopped = false;
+
+  async write(samples: Float32Array): Promise<void> {
+    this.writes.push(samples);
+  }
+
+  async end(): Promise<void> {
+    this.ended = true;
+  }
+
+  async flush(): Promise<number> {
+    return 0;
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+  }
+
+  setVolume(volume: number): void {
+    this.volumes.push(volume);
+  }
+}
+
+describe("ZeroVox.play", () => {
+  let harness: Harness;
+  let playback: AutoStreamingPlayback;
+  let openedAt: number[];
+
+  beforeEach(() => {
+    harness = createHarness();
+    playback = new AutoStreamingPlayback();
+    openedAt = [];
+    (harness.platform as { streamingPlayer?: unknown }).streamingPlayer = {
+      open: async (sampleRate: number) => {
+        openedAt.push(sampleRate);
+        return playback;
+      },
+    };
+  });
+
+  const create = (overrides: Record<string, unknown> = {}) =>
+    ZeroVox.create({
+      engine: harness.engine,
+      platform: harness.platform,
+      voiceStore: new MemoryVoiceStore(),
+      ...overrides,
+    });
+
+  const createWithVoice = async (overrides: Record<string, unknown> = {}) => {
+    const tts = await create(overrides);
+    await tts.cloneVoice({ samples: speechAudio(), sampleRate: 16_000 });
+    return tts;
+  };
+
+  it("plays every chunk through the streaming player and resolves done", async () => {
+    const tts = await createWithVoice();
+
+    const speech = tts.play("First one. Second two.");
+    await speech.done;
+
+    expect(openedAt).toEqual([harness.engine.sampleRate]);
+    expect(harness.engine.requests.map((request) => request.text)).toEqual([
+      "First one.",
+      "Second two.",
+    ]);
+    expect(playback.writes).toHaveLength(2);
+    expect(playback.ended).toBe(true);
+  });
+
+  it("passes speed to the engine and volume to the device", async () => {
+    const tts = await createWithVoice();
+
+    await tts.play("Hello there.", { speed: 1.5, volume: 0.4 }).done;
+
+    expect(harness.engine.requests[0]?.speed).toBe(1.5);
+    expect(playback.volumes[0]).toBe(0.4);
+  });
+
+  it("stop() prevents further synthesis", async () => {
+    const tts = await createWithVoice();
+
+    const speech = tts.play("One. Two. Three.");
+    await speech.stop();
+    await speech.done;
+
+    expect(playback.stopped).toBe(true);
+  });
+
+  it("throws synchronously without a voice", async () => {
+    const tts = await create();
+
+    expect(() => tts.play("hello")).toThrow(NoVoiceError);
+  });
+
+  it("throws synchronously for empty text", async () => {
+    const tts = await createWithVoice();
+
+    expect(() => tts.play("   ")).toThrow(InvalidInputError);
+  });
+
+  it("throws when the platform has no streaming player", async () => {
+    delete (harness.platform as { streamingPlayer?: unknown }).streamingPlayer;
+    const tts = await createWithVoice();
+
+    expect(() => tts.play("hello")).toThrow(/streaming/i);
+  });
+
+  it("rejects after dispose", async () => {
+    const tts = await createWithVoice();
+    await tts.dispose();
+
+    expect(() => tts.play("hello")).toThrow(DisposedError);
+  });
+});
+
+describe("ZeroVox synthesis cache", () => {
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = createHarness();
+  });
+
+  const createWithVoice = async (overrides: Record<string, unknown> = {}) => {
+    const tts = await ZeroVox.create({
+      engine: harness.engine,
+      platform: harness.platform,
+      voiceStore: new MemoryVoiceStore(),
+      ...overrides,
+    });
+    await tts.cloneVoice({ samples: speechAudio(), sampleRate: 16_000 });
+    return tts;
+  };
+
+  it("reuses rendered audio for the same voice, text and speed", async () => {
+    const tts = await createWithVoice();
+
+    const first = await tts.speak("Hello world.");
+    const second = await tts.speak("Hello world.");
+
+    expect(harness.engine.requests).toHaveLength(1);
+    expect(Array.from(second.samples)).toEqual(Array.from(first.samples));
+  });
+
+  it("misses for a different speed", async () => {
+    const tts = await createWithVoice();
+
+    await tts.speak("Hello world.");
+    await tts.speak("Hello world.", { speed: 2 });
+
+    expect(harness.engine.requests).toHaveLength(2);
+  });
+
+  it("starts fresh after cloning a new voice", async () => {
+    const tts = await createWithVoice();
+
+    await tts.speak("Hello world.");
+    await tts.cloneVoice({ samples: speechAudio(), sampleRate: 16_000 });
+    await tts.speak("Hello world.");
+
+    expect(harness.engine.requests).toHaveLength(2);
+  });
+
+  it("can be disabled by passing null", async () => {
+    const tts = await createWithVoice({ synthesisCache: null });
+
+    await tts.speak("Hello world.");
+    await tts.speak("Hello world.");
+
+    expect(harness.engine.requests).toHaveLength(2);
+  });
+});
