@@ -137,7 +137,7 @@ export class ChatterboxEngine implements SynthesisEngine {
         return;
       } catch (cause) {
         failures.push(
-          `${plan.device}/${plan.dtype.model}: ${cause instanceof Error ? cause.message : String(cause)}`,
+          `${plan.device}/${plan.dtype.language_model}: ${cause instanceof Error ? cause.message : String(cause)}`,
         );
       }
     }

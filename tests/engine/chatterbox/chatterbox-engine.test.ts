@@ -57,7 +57,7 @@ function createModule(): ModuleHarness {
         const dtype = options.dtype as Record<string, string>;
         harness.attempts.push({ device: options.device as string, dtype });
         options.progress_callback?.({ status: "progress", file: modelId });
-        if (harness.failOn(options.device as string, dtype.model as string)) {
+        if (harness.failOn(options.device as string, dtype.language_model as string)) {
           throw new Error(`no ${options.device} support`);
         }
         return {
@@ -144,7 +144,7 @@ describe("ChatterboxEngine", () => {
         dtype: {
           embed_tokens: "fp32",
           speech_encoder: "fp32",
-          model: "q4f16",
+          language_model: "q4f16",
           conditional_decoder: "fp32",
         },
       });
@@ -155,7 +155,7 @@ describe("ChatterboxEngine", () => {
 
       await engine.load("webgpu");
 
-      expect(harness.attempts.map((attempt) => `${attempt.device}:${attempt.dtype.model}`)).toEqual([
+      expect(harness.attempts.map((attempt) => `${attempt.device}:${attempt.dtype.language_model}`)).toEqual([
         "webgpu:q4f16",
         "webgpu:q4",
       ]);
