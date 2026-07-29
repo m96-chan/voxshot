@@ -12,6 +12,14 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 
 > **Status:** 🚧 Early development (Proof of Concept)
 
+> **What works today (v0.1):** the full browser pipeline — reference audio
+> decoding, voice extraction, voice persistence, text chunking, streaming
+> synthesis and playback — behind a stable TypeScript API.
+> The bundled engine is a **placeholder** that renders speech-shaped audio, not
+> speech: it exists so the pipeline can ship and be tested while the ONNX
+> Runtime Web backend is built ([#2](https://github.com/m96-chan/zerovox/issues/2)).
+> Bring your own model today by implementing the `SynthesisEngine` interface.
+
 ---
 
 ## Features
@@ -85,26 +93,81 @@ A WASM fallback will be available for unsupported environments.
 
 ---
 
-## Planned API
+## API
 
 ```ts
 const tts = await ZeroVox.create({
-  device: "auto",
+  device: "auto",   // "auto" | "webgpu" | "wasm"
   model: "default"
 });
 
-await tts.cloneVoice(file);
+tts.device;          // the backend that was actually selected
+tts.sampleRate;      // sample rate of the audio this instance produces
 
-await tts.speak(text);
+await tts.cloneVoice(file);   // ArrayBuffer | Blob | File | typed array | { samples, sampleRate }
+await tts.speak(text);        // -> SynthesizedAudio
+await tts.speak(text, { speed: 1.2 });
 
-await tts.stream(text);
+for await (const chunk of tts.stream(text)) {
+  await chunk.play();         // play sentence by sentence, no need to wait for the rest
+}
 
 await tts.saveVoice("alice");
-
 await tts.useVoice("alice");
-
+await tts.listVoices();       // ["alice"]
 await tts.deleteVoice("alice");
+
+await tts.dispose();
 ```
+
+`speak()` and `stream()` return `SynthesizedAudio`:
+
+```ts
+audio.samples;     // Float32Array, mono
+audio.sampleRate;
+audio.duration;    // seconds
+audio.toWav();     // ArrayBuffer (16 bit PCM RIFF)
+audio.toBlob();    // Blob, type "audio/wav"
+await audio.play();
+```
+
+### Bring your own model
+
+Every part of the pipeline is injectable, so a real model only has to
+implement `SynthesisEngine`:
+
+```ts
+import { ZeroVox, type SynthesisEngine } from "zerovox";
+
+class MyOnnxEngine implements SynthesisEngine {
+  readonly name = "my-model";
+  readonly sampleRate = 24_000;
+
+  async load(device) { /* ... */ }
+  async embed(audio) { /* -> Float32Array speaker embedding */ }
+  async synthesize({ text, voice, speed }) { /* -> Float32Array samples */ }
+  async dispose() { /* ... */ }
+}
+
+const tts = await ZeroVox.create({ engine: new MyOnnxEngine() });
+```
+
+The voice store (`VoiceStore`) and the browser bindings (`Platform`:
+decoder / player / GPU probe) are injectable in the same way.
+
+---
+
+## Development
+
+```bash
+npm install
+npm test          # vitest + coverage (90% threshold, enforced)
+npm run typecheck
+npm run build
+```
+
+Contribution rules — TDD, coverage, and ticket-driven development — are in
+[CLAUDE.md](./CLAUDE.md).
 
 ---
 
