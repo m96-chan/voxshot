@@ -94,14 +94,65 @@ function mergeShortChunks(chunks: string[], minLength: number, maxLength: number
   return merged;
 }
 
-/** Split a single line after every run of sentence terminators. */
+/** Opening brackets / quotes mapped to their closing counterparts. */
+const BRACKET_PAIRS: Record<string, string> = {
+  "「": "」",
+  "『": "』",
+  "(": ")",
+  "（": "）",
+  "[": "]",
+  "［": "］",
+  "{": "}",
+  "｛": "｝",
+  "〈": "〉",
+  "《": "》",
+  "【": "】",
+  "“": "”",
+  "‘": "’",
+};
+
+/**
+ * Undirected quotes toggle like a switch. The ASCII single quote is left out
+ * on purpose: it doubles as an apostrophe (`don't`), which would otherwise
+ * suppress sentence splitting for the rest of the line.
+ */
+const TOGGLING_QUOTES = new Set(['"']);
+
+/**
+ * Split a single line after every run of sentence terminators.
+ *
+ * Terminators inside brackets or quotes do not end the sentence, so quoted
+ * speech like 「はい。そうです。」 stays attached to its surrounding sentence.
+ * An unmatched opener simply keeps the rest of the line together; depth can
+ * never go negative, so a stray closer is ignored.
+ */
 function splitLine(line: string): string[] {
   const sentences: string[] = [];
+  const closers: string[] = [];
   let start = 0;
   let index = 0;
 
   while (index < line.length) {
-    if (!isTerminator(line, index)) {
+    const char = line[index] as string;
+
+    if (closers[closers.length - 1] === char) {
+      closers.pop();
+      index += 1;
+      continue;
+    }
+    const closer = BRACKET_PAIRS[char];
+    if (closer !== undefined) {
+      closers.push(closer);
+      index += 1;
+      continue;
+    }
+    if (TOGGLING_QUOTES.has(char)) {
+      closers.push(char);
+      index += 1;
+      continue;
+    }
+
+    if (closers.length > 0 || !isTerminator(line, index)) {
       index += 1;
       continue;
     }

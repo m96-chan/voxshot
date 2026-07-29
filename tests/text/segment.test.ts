@@ -130,4 +130,60 @@ describe("splitSentences", () => {
       expect(() => splitSentences("hello", { minLength: -1 })).toThrow(/minLength/);
     });
   });
+
+  describe("brackets and quotes", () => {
+    it("does not split on terminators inside Japanese corner quotes", () => {
+      expect(splitSentences("「はい。そうです。」と言った。次の文。")).toEqual([
+        "「はい。そうです。」と言った。",
+        "次の文。",
+      ]);
+    });
+
+    it("does not split inside parentheses", () => {
+      expect(splitSentences("This works (see fig. 1). Next.")).toEqual([
+        "This works (see fig. 1).",
+        "Next.",
+      ]);
+      // NFKC in normalizeText folds full-width parentheses to ASCII.
+      expect(splitSentences("補足（詳細は後述。）を読む。おわり。")).toEqual([
+        "補足(詳細は後述。)を読む。",
+        "おわり。",
+      ]);
+    });
+
+    it("handles nested brackets", () => {
+      expect(splitSentences("『彼は「行く。」と言った。』と書いてある。他。")).toEqual([
+        "『彼は「行く。」と言った。』と書いてある。",
+        "他。",
+      ]);
+    });
+
+    it("does not split inside ASCII double quotes", () => {
+      expect(splitSentences('He said "Stop. Now." and left. Done.')).toEqual([
+        'He said "Stop. Now." and left.',
+        "Done.",
+      ]);
+    });
+
+    it("ignores an unmatched closing bracket", () => {
+      expect(splitSentences("済み)です。次。")).toEqual(["済み)です。", "次。"]);
+    });
+
+    it("keeps splitting normally after an unclosed bracket ends at the line break", () => {
+      expect(splitSentences("これは(未完\n次の行。おわり。")).toEqual([
+        "これは(未完",
+        "次の行。",
+        "おわり。",
+      ]);
+    });
+
+    it("still enforces maxLength inside brackets", () => {
+      const chunks = splitSentences("「ああああ、いいいい、うううう。」", { maxLength: 8 });
+
+      for (const chunk of chunks) {
+        expect(chunk.length).toBeLessThanOrEqual(8);
+      }
+      expect(chunks.join("")).toBe("「ああああ、いいいい、うううう。」");
+    });
+  });
 });
