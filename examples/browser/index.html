@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ZeroVox — Browser TTS Demo</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.6;
+      }
+      label {
+        display: block;
+        margin-top: 1rem;
+        font-weight: 600;
+      }
+      textarea,
+      select,
+      input[type="file"] {
+        width: 100%;
+        margin-top: 0.25rem;
+        font: inherit;
+        box-sizing: border-box;
+      }
+      textarea {
+        min-height: 5rem;
+        padding: 0.5rem;
+      }
+      button {
+        margin-top: 1rem;
+        padding: 0.5rem 2rem;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: wait;
+        opacity: 0.6;
+      }
+      #status {
+        margin-top: 1rem;
+        padding: 0.75rem;
+        background: #f4f4f5;
+        border-radius: 6px;
+        font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+        white-space: pre-wrap;
+        max-height: 16rem;
+        overflow-y: auto;
+      }
+      audio {
+        width: 100%;
+        margin-top: 1rem;
+      }
+      .hint {
+        font-weight: 400;
+        font-size: 0.85rem;
+        color: #666;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #18181b;
+          color: #e4e4e7;
+        }
+        #status {
+          background: #27272a;
+        }
+        .hint {
+          color: #a1a1aa;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ZeroVox Demo</h1>
+    <p>Type some text and press "Speak" to synthesize and play it.</p>
+
+    <label for="engine">Engine</label>
+    <select id="engine">
+      <option value="placeholder" selected>Placeholder (instant, no model)</option>
+      <option value="chatterbox">Chatterbox (real model, downloads on first use)</option>
+    </select>
+
+    <label for="reference" id="reference-label" hidden>
+      Reference audio (for Chatterbox)
+      <span class="hint">A few seconds of the voice to clone (wav / mp3 / ...)</span>
+    </label>
+    <input type="file" id="reference" accept="audio/*" hidden />
+
+    <label for="text">Text</label>
+    <textarea id="text">Hello from ZeroVox! This is a browser text to speech demo.</textarea>
+
+    <button id="speak">Speak</button>
+
+    <audio id="player" controls hidden></audio>
+    <pre id="status"></pre>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

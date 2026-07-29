@@ -232,6 +232,9 @@ npm run typecheck
 npm run build
 ```
 
+A runnable browser demo (text box → synthesize → play) lives in
+[`examples/browser`](./examples/browser). See its README for setup.
+
 Contribution rules — TDD, coverage, and ticket-driven development — are in
 [CLAUDE.md](./CLAUDE.md).
 
