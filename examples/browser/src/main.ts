@@ -131,13 +131,44 @@ async function prewarmModelCache(): Promise<void> {
       continue;
     }
     log(`Fetching ${file}…`);
-    const response = await fetch(url);
+    // no-store bypasses the HTTP disk cache entirely: aborted downloads can
+    // leave corrupt cache entries behind that wedge later fetches of the same
+    // URL, and we persist into transformers-cache ourselves anyway.
+    const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Downloading ${file} failed: HTTP ${response.status}`);
     }
-    await cache.put(url, response);
+    await cache.put(url, await withProgress(response, file));
   }
   log("All model files are in the browser cache.");
+}
+
+/** Re-materialise a response while logging download progress in 25% steps. */
+async function withProgress(response: Response, file: string): Promise<Response> {
+  const total = Number(response.headers.get("Content-Length") ?? 0);
+  if (!response.body || !Number.isFinite(total) || total <= 0) {
+    return response;
+  }
+
+  const reader = response.body.getReader();
+  const parts: BlobPart[] = [];
+  let received = 0;
+  let lastStep = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    parts.push(value as BlobPart);
+    received += value.length;
+    const step = Math.floor((received / total) * 4);
+    if (step > lastStep) {
+      lastStep = step;
+      log(`Fetching ${file}: ${Math.min(100, step * 25)}%`);
+    }
+  }
+
+  return new Response(new Blob(parts), { status: 200, headers: response.headers });
 }
 
 async function createInstance(kind: EngineKind): Promise<ZeroVox> {
