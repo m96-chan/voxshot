@@ -14,4 +14,9 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ["@huggingface/transformers"],
   },
+  // The TTS worker lazy-imports transformers (code splitting), which the
+  // default iife worker format cannot express.
+  worker: {
+    format: "es",
+  },
 });

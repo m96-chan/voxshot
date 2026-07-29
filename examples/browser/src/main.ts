@@ -1,5 +1,5 @@
 import {
-  ChatterboxEngine,
+  WorkerSynthesisEngine,
   ZeroVox,
   isZeroVoxError,
   type LoadProgress,
@@ -48,9 +48,10 @@ function syntheticReference(sampleRate: number): PcmAudio {
 }
 
 /** Log download progress once per file per 25% step to keep the log readable. */
-function createProgressLogger(): (progress: LoadProgress) => void {
+function createProgressLogger(): (progress: Record<string, unknown>) => void {
   const lastStep = new Map<string, number>();
-  return (progress) => {
+  return (raw) => {
+    const progress = raw as unknown as LoadProgress;
     if (progress.status === "progress" && progress.file && progress.progress !== undefined) {
       const step = Math.floor(progress.progress / 25);
       if (step > (lastStep.get(progress.file) ?? -1)) {
@@ -76,10 +77,77 @@ function getInstance(kind: EngineKind): Promise<ZeroVox> {
   return instance;
 }
 
+const MODEL_ID = "onnx-community/chatterbox-ONNX";
+const MODEL_BASE = `https://huggingface.co/${MODEL_ID}/resolve/main/`;
+
+/** WebGPU types ship separately, so declare the slice the dtype check needs. */
+interface GpuNavigator {
+  gpu?: {
+    requestAdapter(): Promise<{ features: { has(name: string): boolean } } | null>;
+  };
+}
+
+/** Mirrors the engine's plan: q4f16 needs the adapter to run f16 shaders. */
+async function pickLanguageModelDtype(): Promise<"q4f16" | "q4"> {
+  try {
+    const adapter = await (navigator as GpuNavigator).gpu?.requestAdapter();
+    return adapter?.features.has("shader-f16") ? "q4f16" : "q4";
+  } catch {
+    return "q4";
+  }
+}
+
+/**
+ * Fetch every model file into transformers-cache while the page is idle.
+ *
+ * `from_pretrained` initialises each ONNX session as soon as that session's
+ * file arrives, and session init blocks the thread that is also consuming the
+ * remaining download streams — the unread stream backs up until the server
+ * resets it. Pre-warming the cache means the engine later loads everything
+ * from cache and no live download is left to kill.
+ */
+async function prewarmModelCache(): Promise<void> {
+  const dtype = await pickLanguageModelDtype();
+  const files = [
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "onnx/embed_tokens.onnx",
+    "onnx/embed_tokens.onnx_data",
+    "onnx/speech_encoder.onnx",
+    "onnx/speech_encoder.onnx_data",
+    "onnx/conditional_decoder.onnx",
+    "onnx/conditional_decoder.onnx_data",
+    `onnx/language_model_${dtype}.onnx`,
+    `onnx/language_model_${dtype}.onnx_data`,
+  ];
+
+  const cache = await caches.open("transformers-cache");
+  for (const file of files) {
+    const url = MODEL_BASE + file;
+    if (await cache.match(url)) {
+      continue;
+    }
+    log(`Fetching ${file}…`);
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Downloading ${file} failed: HTTP ${response.status}`);
+    }
+    await cache.put(url, response);
+  }
+  log("All model files are in the browser cache.");
+}
+
 async function createInstance(kind: EngineKind): Promise<ZeroVox> {
   if (kind === "chatterbox") {
-    log("Loading the Chatterbox model… (first run downloads a few hundred MB)");
-    const engine = new ChatterboxEngine({ onProgress: createProgressLogger() });
+    log("Preparing the Chatterbox model… (first run downloads ~1.5 GB)");
+    await prewarmModelCache();
+    // Inference runs in a Web Worker so the page stays responsive during
+    // model load, cloning and synthesis.
+    const worker = new Worker(new URL("./tts.worker.ts", import.meta.url), { type: "module" });
+    const engine = new WorkerSynthesisEngine(worker, { onProgress: createProgressLogger() });
     const tts = await ZeroVox.create({ engine });
     log(`Chatterbox ready (device: ${tts.device})`);
     return tts;
