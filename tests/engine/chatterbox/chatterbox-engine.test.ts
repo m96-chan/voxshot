@@ -117,13 +117,13 @@ describe("ChatterboxEngine", () => {
       expect(engine.name).toBe("chatterbox");
     });
 
-    it("defaults to the multilingual ONNX model", () => {
-      expect(engine.modelId).toBe("onnx-community/chatterbox-multilingual-ONNX");
+    it("defaults to the English ONNX model, the only repo from_pretrained can load", () => {
+      expect(engine.modelId).toBe("onnx-community/chatterbox-ONNX");
     });
 
     it("accepts a custom model id", () => {
-      expect(createEngine({ modelId: "onnx-community/chatterbox-ONNX" }).modelId).toBe(
-        "onnx-community/chatterbox-ONNX",
+      expect(createEngine({ modelId: "onnx-community/chatterbox-multilingual-ONNX" }).modelId).toBe(
+        "onnx-community/chatterbox-multilingual-ONNX",
       );
     });
   });
@@ -182,7 +182,7 @@ describe("ChatterboxEngine", () => {
 
       expect(onProgress).toHaveBeenCalledWith({
         status: "progress",
-        file: "onnx-community/chatterbox-multilingual-ONNX",
+        file: "onnx-community/chatterbox-ONNX",
       });
     });
 

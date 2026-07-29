@@ -23,7 +23,13 @@ import type {
  */
 export const CHATTERBOX_SAMPLE_RATE = 24_000;
 
-const DEFAULT_MODEL_ID = "onnx-community/chatterbox-multilingual-ONNX";
+/**
+ * The English repo, not the multilingual one: as of 2026-07,
+ * `onnx-community/chatterbox-multilingual-ONNX` ships no `config.json` /
+ * `preprocessor_config.json` (its `library_name` is the Python `chatterbox`),
+ * so Transformers.js `from_pretrained` cannot load it.
+ */
+const DEFAULT_MODEL_ID = "onnx-community/chatterbox-ONNX";
 const DEFAULT_MAX_NEW_TOKENS = 256;
 const DEFAULT_EXAGGERATION = 0.5;
 const MIN_SPEED = 0.25;
@@ -41,7 +47,7 @@ export interface ChatterboxEngineOptions {
   /**
    * Hugging Face model id.
    *
-   * @defaultValue "onnx-community/chatterbox-multilingual-ONNX"
+   * @defaultValue "onnx-community/chatterbox-ONNX"
    */
   modelId?: string;
   /** Override the per-session quantization chosen for the device. */
