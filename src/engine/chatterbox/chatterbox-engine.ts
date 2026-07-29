@@ -66,6 +66,14 @@ export interface ChatterboxEngineOptions {
    * pin your own build of the library.
    */
   loadModule?: TransformersModuleLoader;
+  /**
+   * Whether the WebGPU adapter can run f16 shaders. Only consulted when the
+   * resolved device is `webgpu`. Defaults to asking `navigator.gpu` for an
+   * adapter and checking `features.has("shader-f16")` — an f16 model on a
+   * device without it loads fine and then fails at the first inference, so
+   * the check must happen before the load plans are built.
+   */
+  supportsFp16?: () => boolean | Promise<boolean>;
 }
 
 /**
@@ -90,6 +98,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   readonly #exaggeration: number;
   readonly #onProgress: ((progress: LoadProgress) => void) | undefined;
   readonly #loadModule: TransformersModuleLoader;
+  readonly #supportsFp16: () => boolean | Promise<boolean>;
 
   #module: TransformersModule | undefined;
   #model: ChatterboxModelLike | undefined;
@@ -103,6 +112,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     this.#exaggeration = options.exaggeration ?? DEFAULT_EXAGGERATION;
     this.#onProgress = options.onProgress;
     this.#loadModule = options.loadModule ?? defaultModuleLoader;
+    this.#supportsFp16 = options.supportsFp16 ?? webGpuSupportsFp16;
   }
 
   /** The device / dtype combination that actually loaded, once `load` ran. */
@@ -122,7 +132,8 @@ export class ChatterboxEngine implements SynthesisEngine {
     }
 
     const transformers = (this.#module ??= await this.#importModule());
-    const plans = buildLoadPlans(device, this.#dtypeOverrides);
+    const fp16 = device === "webgpu" ? await this.#supportsFp16() : true;
+    const plans = buildLoadPlans(device, this.#dtypeOverrides, fp16);
     const failures: string[] = [];
 
     for (const plan of plans) {
@@ -268,6 +279,35 @@ function toVoiceTensor(tensor: TensorLike): VoiceTensor {
         ? BigInt64Array.from(tensor.data)
         : Float32Array.from(tensor.data),
   };
+}
+
+/**
+ * Structural subset of `navigator.gpu`, declared locally because WebGPU types
+ * ship in a separate package (same approach as `browser-platform.ts`).
+ */
+interface GpuNavigator {
+  gpu?: {
+    requestAdapter(): Promise<{ features?: { has(name: string): boolean } } | null>;
+  };
+}
+
+/**
+ * Default f16 probe, mirroring Transformers.js' internal
+ * `isWebGpuFp16Supported`. When `navigator.gpu` is absent the environment is
+ * not a browser running real WebGPU (tests, custom hosts), so the plans are
+ * left untouched rather than silently degraded.
+ */
+async function webGpuSupportsFp16(): Promise<boolean> {
+  const gpu = (globalThis.navigator as GpuNavigator | undefined)?.gpu;
+  if (!gpu) {
+    return true;
+  }
+  try {
+    const adapter = await gpu.requestAdapter();
+    return adapter?.features?.has("shader-f16") ?? false;
+  } catch {
+    return false;
+  }
 }
 
 /**
