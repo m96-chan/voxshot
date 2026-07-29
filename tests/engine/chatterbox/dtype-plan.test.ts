@@ -10,7 +10,7 @@ describe("buildLoadPlans", () => {
     expect(first?.dtype).toEqual({
       embed_tokens: "fp32",
       speech_encoder: "fp32",
-      model: "q4f16",
+      language_model: "q4f16",
       conditional_decoder: "fp32",
     });
   });
@@ -19,7 +19,7 @@ describe("buildLoadPlans", () => {
     const plans = buildLoadPlans("webgpu");
 
     expect(plans[1]?.device).toBe("webgpu");
-    expect(plans[1]?.dtype.model).toBe("q4");
+    expect(plans[1]?.dtype.language_model).toBe("q4");
   });
 
   it("ends on wasm so an unsupported GPU still loads", () => {
@@ -27,7 +27,7 @@ describe("buildLoadPlans", () => {
     const last = plans[plans.length - 1];
 
     expect(last?.device).toBe("wasm");
-    expect(last?.dtype.model).toBe("q4");
+    expect(last?.dtype.language_model).toBe("q4");
   });
 
   it("never proposes webgpu when wasm was requested", () => {
@@ -38,9 +38,9 @@ describe("buildLoadPlans", () => {
   });
 
   it("applies a dtype override to every plan", () => {
-    const plans = buildLoadPlans("webgpu", { model: "fp32" });
+    const plans = buildLoadPlans("webgpu", { language_model: "fp32" });
 
-    expect(plans.every((plan) => plan.dtype.model === "fp32")).toBe(true);
+    expect(plans.every((plan) => plan.dtype.language_model === "fp32")).toBe(true);
   });
 
   it("keeps the non overridden sessions untouched", () => {
@@ -49,7 +49,7 @@ describe("buildLoadPlans", () => {
     expect(first?.dtype).toEqual({
       embed_tokens: "fp32",
       speech_encoder: "fp32",
-      model: "q4",
+      language_model: "q4",
       conditional_decoder: "q8",
     });
   });

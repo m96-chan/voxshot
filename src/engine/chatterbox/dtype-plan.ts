@@ -1,7 +1,17 @@
 import type { ResolvedDevice } from "../../device.js";
 
-/** The four ONNX sessions a Chatterbox model is split into. */
-export type ChatterboxSession = "embed_tokens" | "speech_encoder" | "model" | "conditional_decoder";
+/**
+ * The four ONNX sessions a Chatterbox model is split into, named by their
+ * *file* names: Transformers.js resolves per-session `dtype` entries against
+ * the ONNX file name (`language_model`), not the session key (`model`) — a
+ * mismatched key is silently ignored and the device default (fp32 on WebGPU,
+ * 2 GB for the language model) loads instead.
+ */
+export type ChatterboxSession =
+  | "embed_tokens"
+  | "speech_encoder"
+  | "language_model"
+  | "conditional_decoder";
 
 /** Per-session quantization, as accepted by `from_pretrained({ dtype })`. */
 export type DtypeConfig = Record<ChatterboxSession, string>;
@@ -18,13 +28,13 @@ export interface LoadPlan {
  * (embed_tokens / speech_encoder / conditional_decoder fp32, language model
  * q4f16 on WebGPU and q4 on WASM).
  */
-function plan(device: ResolvedDevice, model: string): LoadPlan {
+function plan(device: ResolvedDevice, languageModel: string): LoadPlan {
   return {
     device,
     dtype: {
       embed_tokens: "fp32",
       speech_encoder: "fp32",
-      model,
+      language_model: languageModel,
       conditional_decoder: "fp32",
     },
   };
