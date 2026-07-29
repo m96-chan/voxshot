@@ -1,5 +1,5 @@
 import { ZeroVoxError } from "../errors.js";
-import type { VoiceEmbedding, VoiceStore } from "./types.js";
+import type { VoiceEmbedding, VoiceStore, VoiceTensor } from "./types.js";
 import { assertEmbedding, assertVoiceName, cloneEmbedding } from "./validate.js";
 
 const DEFAULT_DATABASE_NAME = "zerovox";
@@ -20,6 +20,8 @@ interface VoiceRecord {
   vector: Float32Array;
   sampleRate: number;
   createdAt: number;
+  engine?: string;
+  tensors?: Record<string, VoiceTensor>;
 }
 
 /**
@@ -50,6 +52,12 @@ export class IndexedDbVoiceStore implements VoiceStore {
       sampleRate: copy.sampleRate,
       createdAt: copy.createdAt,
     };
+    if (copy.engine !== undefined) {
+      record.engine = copy.engine;
+    }
+    if (copy.tensors) {
+      record.tensors = copy.tensors as Record<string, VoiceTensor>;
+    }
 
     await this.#withStore("readwrite", (store) => store.put(record));
   }
@@ -62,11 +70,7 @@ export class IndexedDbVoiceStore implements VoiceStore {
     if (!record) {
       return undefined;
     }
-    return {
-      vector: Float32Array.from(record.vector),
-      sampleRate: record.sampleRate,
-      createdAt: record.createdAt,
-    };
+    return cloneEmbedding(record);
   }
 
   async list(): Promise<string[]> {

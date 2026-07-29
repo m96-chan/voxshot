@@ -47,6 +47,14 @@ export interface ZeroVoxOptions {
    * @defaultValue 120
    */
   maxChunkLength?: number;
+  /**
+   * Shortest chunk, in characters. Shorter chunks are merged with their
+   * neighbours, because very short prompts make neural TTS models unstable.
+   * `0` disables merging.
+   *
+   * @defaultValue 0
+   */
+  minChunkLength?: number;
   /** Clock used for embedding timestamps. Injectable for deterministic tests. */
   now?: () => number;
 }
@@ -75,6 +83,7 @@ export class ZeroVox {
   readonly #platform: Platform;
   readonly #store: VoiceStore;
   readonly #maxChunkLength: number;
+  readonly #minChunkLength: number;
   readonly #now: () => number;
   readonly #device: ResolvedDevice;
 
@@ -87,6 +96,7 @@ export class ZeroVox {
     platform: Platform,
     store: VoiceStore,
     maxChunkLength: number,
+    minChunkLength: number,
     now: () => number,
   ) {
     this.#device = device;
@@ -94,6 +104,7 @@ export class ZeroVox {
     this.#platform = platform;
     this.#store = store;
     this.#maxChunkLength = maxChunkLength;
+    this.#minChunkLength = minChunkLength;
     this.#now = now;
   }
 
@@ -110,6 +121,10 @@ export class ZeroVox {
     if (!Number.isFinite(maxChunkLength) || maxChunkLength <= 0) {
       throw new InvalidInputError("maxChunkLength must be a positive finite number.");
     }
+    const minChunkLength = options.minChunkLength ?? 0;
+    if (!Number.isFinite(minChunkLength) || minChunkLength < 0) {
+      throw new InvalidInputError("minChunkLength must be a non negative finite number.");
+    }
 
     const platform = options.platform ?? createBrowserPlatform();
     const engine = options.engine ?? new PlaceholderEngine();
@@ -118,7 +133,15 @@ export class ZeroVox {
     const device = await resolveDevice(options.device, platform.gpu);
     await engine.load(device);
 
-    return new ZeroVox(device, engine, platform, store, maxChunkLength, options.now ?? Date.now);
+    return new ZeroVox(
+      device,
+      engine,
+      platform,
+      store,
+      maxChunkLength,
+      minChunkLength,
+      options.now ?? Date.now,
+    );
   }
 
   /** The backend inference actually runs on. */
@@ -147,9 +170,17 @@ export class ZeroVox {
 
     const pcm = await this.#toPcm(source);
     const prepared = this.#prepareReference(pcm);
-    const vector = await this.#engine.embed(prepared);
+    const embedded = await this.#engine.embed(prepared);
+    const { vector, tensors } =
+      embedded instanceof Float32Array ? { vector: embedded, tensors: undefined } : embedded;
 
-    this.#voice = { vector, sampleRate: prepared.sampleRate, createdAt: this.#now() };
+    this.#voice = {
+      vector,
+      sampleRate: prepared.sampleRate,
+      createdAt: this.#now(),
+      engine: this.#engine.name,
+      ...(tensors ? { tensors } : {}),
+    };
     return this.#voice;
   }
 
@@ -177,7 +208,10 @@ export class ZeroVox {
       throw new NoVoiceError();
     }
 
-    const chunks = splitSentences(text, { maxLength: this.#maxChunkLength });
+    const chunks = splitSentences(text, {
+      maxLength: this.#maxChunkLength,
+      minLength: this.#minChunkLength,
+    });
     if (chunks.length === 0) {
       throw new InvalidInputError("text must contain at least one speakable character.");
     }

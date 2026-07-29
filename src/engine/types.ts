@@ -1,6 +1,6 @@
 import type { ResolvedDevice } from "../device.js";
 import type { PcmAudio } from "../platform.js";
-import type { VoiceEmbedding } from "../voice/types.js";
+import type { VoiceEmbedding, VoiceTensor } from "../voice/types.js";
 
 /** Everything an engine needs to render one chunk of speech. */
 export interface SynthesisRequest {
@@ -10,6 +10,18 @@ export interface SynthesisRequest {
   readonly voice: VoiceEmbedding;
   /** Playback rate multiplier; `1` is the engine's natural pace. */
   readonly speed: number;
+}
+
+/**
+ * What an engine extracts from reference audio.
+ *
+ * Engines whose speaker representation is a single vector may return that
+ * `Float32Array` directly; models that need several tensors (Chatterbox keeps
+ * four) return them alongside it.
+ */
+export interface EmbedResult {
+  readonly vector: Float32Array;
+  readonly tensors?: Readonly<Record<string, VoiceTensor>>;
 }
 
 /**
@@ -26,7 +38,7 @@ export interface SynthesisEngine {
   /** Prepare weights for the given device. Called once before use. */
   load(device: ResolvedDevice): Promise<void>;
   /** Extract a speaker embedding from mono reference audio. */
-  embed(audio: PcmAudio): Promise<Float32Array>;
+  embed(audio: PcmAudio): Promise<Float32Array | EmbedResult>;
   /** Render one chunk of speech. */
   synthesize(request: SynthesisRequest): Promise<Float32Array>;
   /** Release any resources held by the engine. */

@@ -91,4 +91,43 @@ describe("splitSentences", () => {
   it("rejects a non positive maxLength", () => {
     expect(() => splitSentences("hello", { maxLength: 0 })).toThrow(/maxLength/);
   });
+
+  describe("minLength", () => {
+    it("merges short sentences into the following chunk", () => {
+      expect(splitSentences("はい。なぜですか?それは仕様だからです。", { minLength: 10 })).toEqual([
+        "はい。なぜですか?",
+        "それは仕様だからです。",
+      ]);
+    });
+
+    it("merges a trailing short sentence into the previous chunk", () => {
+      expect(splitSentences("これは十分に長い文章です。はい。", { minLength: 10 })).toEqual([
+        "これは十分に長い文章です。はい。",
+      ]);
+    });
+
+    it("keeps a lone short sentence rather than dropping it", () => {
+      expect(splitSentences("はい。", { minLength: 10 })).toEqual(["はい。"]);
+    });
+
+    it("never merges past maxLength", () => {
+      const chunks = splitSentences("ああ。いい。うう。ええ。おお。", {
+        minLength: 10,
+        maxLength: 8,
+      });
+
+      for (const chunk of chunks) {
+        expect(chunk.length).toBeLessThanOrEqual(8);
+      }
+      expect(chunks.join("")).toBe("ああ。いい。うう。ええ。おお。");
+    });
+
+    it("does not merge anything by default", () => {
+      expect(splitSentences("はい。いいえ。")).toEqual(["はい。", "いいえ。"]);
+    });
+
+    it("rejects a negative minLength", () => {
+      expect(() => splitSentences("hello", { minLength: -1 })).toThrow(/minLength/);
+    });
+  });
 });

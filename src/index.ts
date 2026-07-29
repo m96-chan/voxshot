@@ -10,7 +10,30 @@ export type { DevicePreference, ResolvedDevice } from "./device.js";
 
 export { PlaceholderEngine, VOICE_EMBEDDING_SIZE } from "./engine/placeholder-engine.js";
 export type { PlaceholderEngineOptions } from "./engine/placeholder-engine.js";
-export type { SynthesisEngine, SynthesisRequest } from "./engine/types.js";
+export type { EmbedResult, SynthesisEngine, SynthesisRequest } from "./engine/types.js";
+
+export {
+  CHATTERBOX_SAMPLE_RATE,
+  ChatterboxEngine,
+} from "./engine/chatterbox/chatterbox-engine.js";
+export type { ChatterboxEngineOptions } from "./engine/chatterbox/chatterbox-engine.js";
+export { buildLoadPlans } from "./engine/chatterbox/dtype-plan.js";
+export type {
+  ChatterboxSession,
+  DtypeConfig,
+  LoadPlan,
+} from "./engine/chatterbox/dtype-plan.js";
+export type {
+  LoadProgress,
+  TransformersModule,
+  TransformersModuleLoader,
+} from "./engine/chatterbox/transformers-module.js";
+
+export { WorkerSynthesisEngine } from "./worker/worker-engine.js";
+export type { WorkerSynthesisEngineOptions } from "./worker/worker-engine.js";
+export { exposeEngine } from "./worker/expose.js";
+export { PROTOCOL_VERSION } from "./worker/protocol.js";
+export type { RpcEndpoint } from "./worker/protocol.js";
 
 export {
   AudioDecodeError,
@@ -46,4 +69,9 @@ export type { SplitSentencesOptions } from "./text/segment.js";
 export { MemoryVoiceStore } from "./voice/memory-store.js";
 export { IndexedDbVoiceStore } from "./voice/indexeddb-store.js";
 export type { IndexedDbVoiceStoreOptions } from "./voice/indexeddb-store.js";
-export type { VoiceEmbedding, VoiceStore } from "./voice/types.js";
+export type {
+  VoiceEmbedding,
+  VoiceStore,
+  VoiceTensor,
+  VoiceTensorType,
+} from "./voice/types.js";

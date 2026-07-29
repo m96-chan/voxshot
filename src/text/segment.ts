@@ -18,6 +18,16 @@ export interface SplitSentencesOptions {
    * @defaultValue 120
    */
   maxLength?: number;
+  /**
+   * Chunks shorter than this are merged with their neighbours, as long as the
+   * merge stays within `maxLength`.
+   *
+   * Very short prompts ("はい", "なぜ?") make neural TTS models unstable, so
+   * engines that suffer from it can ask for a floor. `0` disables merging.
+   *
+   * @defaultValue 0
+   */
+  minLength?: number;
 }
 
 /**
@@ -31,6 +41,10 @@ export function splitSentences(text: string, options: SplitSentencesOptions = {}
   if (!Number.isFinite(maxLength) || maxLength <= 0) {
     throw new InvalidInputError("maxLength must be a positive finite number.");
   }
+  const minLength = options.minLength ?? 0;
+  if (!Number.isFinite(minLength) || minLength < 0) {
+    throw new InvalidInputError("minLength must be a non negative finite number.");
+  }
 
   const chunks: string[] = [];
   for (const line of text.split(/[\r\n]+/)) {
@@ -41,7 +55,43 @@ export function splitSentences(text: string, options: SplitSentencesOptions = {}
       }
     }
   }
-  return chunks;
+  return minLength > 0 ? mergeShortChunks(chunks, minLength, maxLength) : chunks;
+}
+
+/**
+ * Merge chunks that fall below `minLength` into their neighbours, never
+ * producing anything longer than `maxLength`.
+ *
+ * Only *adjacent short* chunks are merged, so a chunk that already clears the
+ * floor is left alone. A trailing short chunk has nothing left to absorb, so
+ * it is folded back into its predecessor instead.
+ */
+function mergeShortChunks(chunks: string[], minLength: number, maxLength: number): string[] {
+  const merged: string[] = [];
+
+  for (const chunk of chunks) {
+    const previous = merged[merged.length - 1];
+    const bothShort =
+      previous !== undefined && previous.length < minLength && chunk.length < minLength;
+
+    if (bothShort && (previous as string).length + chunk.length <= maxLength) {
+      merged[merged.length - 1] = previous + chunk;
+    } else {
+      merged.push(chunk);
+    }
+  }
+
+  const last = merged[merged.length - 1];
+  const beforeLast = merged[merged.length - 2];
+  if (
+    last !== undefined &&
+    beforeLast !== undefined &&
+    last.length < minLength &&
+    beforeLast.length + last.length <= maxLength
+  ) {
+    merged.splice(merged.length - 2, 2, beforeLast + last);
+  }
+  return merged;
 }
 
 /** Split a single line after every run of sentence terminators. */
