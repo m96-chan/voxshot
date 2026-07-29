@@ -1,11 +1,20 @@
 import { normalizePeak, resample, toMono, trimSilence } from "./audio/pcm.js";
+import type { SpeechPlayback } from "./audio/speech-playback.js";
+import { startSpeechPlayback } from "./audio/speech-playback.js";
+import { SynthesisCache } from "./audio/synthesis-cache.js";
 import { SynthesizedAudio } from "./audio/synthesized-audio.js";
 import { createBrowserPlatform } from "./browser-platform.js";
 import type { DevicePreference, ResolvedDevice } from "./device.js";
 import { resolveDevice } from "./device.js";
 import { PlaceholderEngine } from "./engine/placeholder-engine.js";
 import type { SynthesisEngine } from "./engine/types.js";
-import { DisposedError, InvalidInputError, NoVoiceError, VoiceNotFoundError } from "./errors.js";
+import {
+  DisposedError,
+  InvalidInputError,
+  NoVoiceError,
+  VoiceNotFoundError,
+  ZeroVoxError,
+} from "./errors.js";
 import type { PcmAudio, Platform } from "./platform.js";
 import { normalizeText } from "./text/normalize.js";
 import { splitSentences } from "./text/segment.js";
@@ -57,6 +66,13 @@ export interface ZeroVoxOptions {
   minChunkLength?: number;
   /** Clock used for embedding timestamps. Injectable for deterministic tests. */
   now?: () => number;
+  /**
+   * Cache of rendered audio, keyed by voice, text and speed. Pass your own
+   * to tune its size, or `null` to disable caching entirely.
+   *
+   * @defaultValue a `SynthesisCache` with its default capacity
+   */
+  synthesisCache?: SynthesisCache | null;
 }
 
 export interface SpeakOptions {
@@ -66,6 +82,15 @@ export interface SpeakOptions {
    * @defaultValue 1
    */
   speed?: number;
+}
+
+export interface PlayOptions extends SpeakOptions {
+  /**
+   * Initial playback gain, non negative.
+   *
+   * @defaultValue 1
+   */
+  volume?: number;
 }
 
 /**
@@ -86,6 +111,7 @@ export class ZeroVox {
   readonly #minChunkLength: number;
   readonly #now: () => number;
   readonly #device: ResolvedDevice;
+  readonly #cache: SynthesisCache | undefined;
 
   #voice: VoiceEmbedding | undefined;
   #disposed = false;
@@ -98,6 +124,7 @@ export class ZeroVox {
     maxChunkLength: number,
     minChunkLength: number,
     now: () => number,
+    cache: SynthesisCache | undefined,
   ) {
     this.#device = device;
     this.#engine = engine;
@@ -106,6 +133,7 @@ export class ZeroVox {
     this.#maxChunkLength = maxChunkLength;
     this.#minChunkLength = minChunkLength;
     this.#now = now;
+    this.#cache = cache;
   }
 
   /** Resolve the device, load the engine and return a ready instance. */
@@ -141,6 +169,7 @@ export class ZeroVox {
       maxChunkLength,
       minChunkLength,
       options.now ?? Date.now,
+      options.synthesisCache === null ? undefined : (options.synthesisCache ?? new SynthesisCache()),
     );
   }
 
@@ -218,9 +247,65 @@ export class ZeroVox {
 
     const speed = options.speed ?? 1;
     for (const chunk of chunks) {
-      const samples = await this.#engine.synthesize({ text: chunk, voice, speed });
+      const samples = await this.#synthesizeChunk(chunk, voice, speed);
       yield new SynthesizedAudio(samples, this.#engine.sampleRate, this.#platform.player);
     }
+  }
+
+  /**
+   * Speak through the platform's gapless streaming output.
+   *
+   * Unlike {@link speak}, playback starts as soon as the first chunk is
+   * rendered, the next chunk is synthesized while the current one plays, and
+   * the returned handle can stop, skip and change volume mid-utterance.
+   */
+  play(text: string, options: PlayOptions = {}): SpeechPlayback {
+    this.#assertUsable();
+
+    if (typeof text !== "string") {
+      throw new InvalidInputError("text must be a string.");
+    }
+    const voice = this.#voice;
+    if (!voice) {
+      throw new NoVoiceError();
+    }
+    const streaming = this.#platform.streamingPlayer;
+    if (!streaming) {
+      throw new ZeroVoxError(
+        "This platform has no streaming audio player. Provide platform.streamingPlayer, or use speak() instead.",
+      );
+    }
+
+    const chunks = splitSentences(text, {
+      maxLength: this.#maxChunkLength,
+      minLength: this.#minChunkLength,
+    });
+    if (chunks.length === 0) {
+      throw new InvalidInputError("text must contain at least one speakable character.");
+    }
+
+    const speed = options.speed ?? 1;
+    return startSpeechPlayback({
+      chunks,
+      synthesize: (chunk) => this.#synthesizeChunk(chunk, voice, speed),
+      open: () => streaming.open(this.#engine.sampleRate),
+      ...(options.volume !== undefined ? { volume: options.volume } : {}),
+    });
+  }
+
+  /** Render one chunk, going through the synthesis cache when enabled. */
+  async #synthesizeChunk(
+    chunk: string,
+    voice: VoiceEmbedding,
+    speed: number,
+  ): Promise<Float32Array> {
+    const cached = this.#cache?.get(voice, chunk, speed);
+    if (cached) {
+      return cached;
+    }
+    const samples = await this.#engine.synthesize({ text: chunk, voice, speed });
+    this.#cache?.set(voice, chunk, speed, samples);
+    return samples;
   }
 
   /** Persist the active voice under `name`. */

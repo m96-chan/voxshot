@@ -35,8 +35,8 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 * 📦 Simple npm package
 * 🧩 Framework agnostic
 * 💾 Voice embedding cache
-* 🔊 Audio streaming support (planned)
-* 🇯🇵 Japanese text normalization (planned)
+* 🔊 Gapless streaming playback (AudioWorklet)
+* 🇯🇵 Japanese reading conversion (`toJapaneseReading`)
 * 🌍 Multilingual support (planned)
 
 ---
@@ -134,6 +134,46 @@ audio.toWav();     // ArrayBuffer (16 bit PCM RIFF)
 audio.toBlob();    // Blob, type "audio/wav"
 await audio.play();
 ```
+
+### Gapless streaming playback
+
+`play()` streams chunks into an AudioWorklet ring buffer, so sentences play
+back to back with no scheduling gaps. The next chunk is synthesized while the
+current one plays (one chunk of lookahead), and rendered audio is cached per
+voice + text + speed, so repeating a phrase is instant.
+
+```ts
+const speech = tts.play("Long text. It starts playing before it is fully rendered.", {
+  speed: 1.0,
+  volume: 0.8,
+});
+
+speech.setVolume(0.5);  // live volume control
+await speech.skip();    // jump past the chunk currently playing
+await speech.stop();    // stop and discard everything
+await speech.done;      // resolves when playback finished or was stopped
+```
+
+Like everything else, the output device is injectable: `play()` uses
+`platform.streamingPlayer`, and the default browser implementation
+(`BrowserStreamingAudioPlayer`) loads its worklet from an inline blob — no
+extra asset to serve. Tune or disable the cache with
+`ZeroVox.create({ synthesisCache: new SynthesisCache({ maxEntriesPerVoice: 8 }) })`
+or `synthesisCache: null`.
+
+### Japanese reading conversion
+
+```ts
+import { toJapaneseReading } from "zerovox";
+
+toJapaneseReading("1,000円");             // "せんえん"
+toJapaneseReading("会議は3月4日の14:00"); // "会議はさんがつよっかのじゅうよじ"
+toJapaneseReading("AIが50%");             // "エーアイがごじゅうパーセント"
+```
+
+Numbers, dates, clock times, units, numeric symbols and upper-case acronyms
+become kana readings. It is opt-in — run it before `speak()`/`play()` for
+Japanese text; other languages should skip it.
 
 ### Real voice cloning with Chatterbox
 
