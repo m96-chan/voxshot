@@ -46,14 +46,19 @@ function plan(device: ResolvedDevice, languageModel: string): LoadPlan {
  * fp16 support varies by GPU, so a WebGPU request degrades to integer-only
  * weights before giving up on the GPU entirely and landing on WASM. A WASM
  * request has nothing to fall back to and yields a single plan.
+ *
+ * Pass `fp16: false` when the adapter lacks `shader-f16`: an f16 plan on such
+ * a device *loads* fine and only fails at the first inference, which the
+ * load-time fallback can no longer catch.
  */
 export function buildLoadPlans(
   device: ResolvedDevice,
   overrides?: Partial<DtypeConfig>,
+  fp16 = true,
 ): LoadPlan[] {
   const plans =
     device === "webgpu"
-      ? [plan("webgpu", "q4f16"), plan("webgpu", "q4"), plan("wasm", "q4")]
+      ? [...(fp16 ? [plan("webgpu", "q4f16")] : []), plan("webgpu", "q4"), plan("wasm", "q4")]
       : [plan("wasm", "q4")];
 
   if (!overrides) {

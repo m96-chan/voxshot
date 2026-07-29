@@ -170,6 +170,80 @@ describe("ChatterboxEngine", () => {
       expect(engine.loadedPlan?.device).toBe("wasm");
     });
 
+    it("skips f16 plans when the injected probe denies shader-f16", async () => {
+      await createEngine({ supportsFp16: async () => false }).load("webgpu");
+
+      expect(harness.attempts[0]).toEqual({
+        device: "webgpu",
+        dtype: {
+          embed_tokens: "fp32",
+          speech_encoder: "fp32",
+          language_model: "q4",
+          conditional_decoder: "fp32",
+        },
+      });
+    });
+
+    it("keeps f16 plans when the injected probe confirms shader-f16", async () => {
+      await createEngine({ supportsFp16: () => true }).load("webgpu");
+
+      expect(harness.attempts[0]?.dtype.language_model).toBe("q4f16");
+    });
+
+    it("never probes f16 support for a wasm device", async () => {
+      const supportsFp16 = vi.fn(async () => false);
+      await createEngine({ supportsFp16 }).load("wasm");
+
+      expect(supportsFp16).not.toHaveBeenCalled();
+      expect(harness.attempts[0]?.dtype.language_model).toBe("q4");
+    });
+
+    describe("default f16 probe", () => {
+      const loadWithAdapter = async (navigator: unknown) => {
+        vi.stubGlobal("navigator", navigator);
+        try {
+          await createEngine().load("webgpu");
+        } finally {
+          vi.unstubAllGlobals();
+        }
+        return harness.attempts[0]?.dtype.language_model;
+      };
+
+      it("asks the adapter for shader-f16 and keeps f16 plans when present", async () => {
+        const dtype = await loadWithAdapter({
+          gpu: { requestAdapter: async () => ({ features: new Set(["shader-f16"]) }) },
+        });
+
+        expect(dtype).toBe("q4f16");
+      });
+
+      it("drops f16 plans when the adapter lacks shader-f16", async () => {
+        const dtype = await loadWithAdapter({
+          gpu: { requestAdapter: async () => ({ features: new Set() }) },
+        });
+
+        expect(dtype).toBe("q4");
+      });
+
+      it("drops f16 plans when the adapter cannot be requested", async () => {
+        const dtype = await loadWithAdapter({
+          gpu: {
+            requestAdapter: async () => {
+              throw new Error("gpu unavailable");
+            },
+          },
+        });
+
+        expect(dtype).toBe("q4");
+      });
+
+      it("leaves plans untouched when navigator.gpu does not exist", async () => {
+        const dtype = await loadWithAdapter({});
+
+        expect(dtype).toBe("q4f16");
+      });
+    });
+
     it("throws when every plan fails", async () => {
       harness.failOn = () => true;
 

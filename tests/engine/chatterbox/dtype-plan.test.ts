@@ -53,4 +53,25 @@ describe("buildLoadPlans", () => {
       conditional_decoder: "q8",
     });
   });
+
+  it("skips f16 plans when the device cannot run f16 shaders", () => {
+    const plans = buildLoadPlans("webgpu", undefined, false);
+
+    expect(plans.map((plan) => `${plan.device}:${plan.dtype.language_model}`)).toEqual([
+      "webgpu:q4",
+      "wasm:q4",
+    ]);
+  });
+
+  it("keeps f16 plans when f16 support is unknown", () => {
+    expect(buildLoadPlans("webgpu")[0]?.dtype.language_model).toBe("q4f16");
+    expect(buildLoadPlans("webgpu", undefined, true)[0]?.dtype.language_model).toBe("q4f16");
+  });
+
+  it("ignores the f16 flag on wasm, which never ran f16 plans", () => {
+    const plans = buildLoadPlans("wasm", undefined, false);
+
+    expect(plans).toHaveLength(1);
+    expect(plans[0]?.dtype.language_model).toBe("q4");
+  });
 });
