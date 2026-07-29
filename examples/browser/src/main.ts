@@ -2,6 +2,7 @@ import {
   WorkerSynthesisEngine,
   ZeroVox,
   isZeroVoxError,
+  toJapaneseReading,
   type LoadProgress,
   type PcmAudio,
 } from "zerovox";
@@ -17,6 +18,7 @@ function element<T extends HTMLElement>(id: string): T {
 }
 
 const textInput = element<HTMLTextAreaElement>("text");
+const jaReadingInput = element<HTMLInputElement>("ja-reading");
 const engineSelect = element<HTMLSelectElement>("engine");
 const referenceInput = element<HTMLInputElement>("reference");
 const referenceLabel = element<HTMLLabelElement>("reference-label");
@@ -214,10 +216,17 @@ async function ensureVoice(kind: EngineKind, tts: ZeroVox): Promise<boolean> {
 
 async function speak(): Promise<void> {
   const kind = engineSelect.value as EngineKind;
-  const text = textInput.value.trim();
+  let text = textInput.value.trim();
   if (!text) {
     log("Please enter some text.");
     return;
+  }
+  if (jaReadingInput.checked) {
+    const reading = toJapaneseReading(text);
+    if (reading !== text) {
+      log(`Japanese reading: ${reading}`);
+    }
+    text = reading;
   }
 
   const tts = await getInstance(kind);
@@ -241,6 +250,19 @@ async function speak(): Promise<void> {
   await audio.play();
   log("Playback finished");
 }
+
+const DEFAULT_SAMPLE = "Hello from ZeroVox! This is a browser text to speech demo.";
+const JAPANESE_SAMPLE = "会議は3月4日の14:00からです。参加費は1,000円で、AIが50%の確率で答えます。";
+
+jaReadingInput.addEventListener("change", () => {
+  // Make the toggle self-explanatory: swap the untouched default sample for a
+  // Japanese one (and back), but never overwrite text the user typed.
+  if (jaReadingInput.checked && textInput.value === DEFAULT_SAMPLE) {
+    textInput.value = JAPANESE_SAMPLE;
+  } else if (!jaReadingInput.checked && textInput.value === JAPANESE_SAMPLE) {
+    textInput.value = DEFAULT_SAMPLE;
+  }
+});
 
 engineSelect.addEventListener("change", () => {
   const isChatterbox = engineSelect.value === "chatterbox";

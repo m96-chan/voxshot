@@ -60,6 +60,13 @@
         font-size: 0.85rem;
         color: #666;
       }
+      .inline {
+        font-weight: 400;
+      }
+      .inline input {
+        width: auto;
+        margin-right: 0.4rem;
+      }
       @media (prefers-color-scheme: dark) {
         body {
           background: #18181b;
@@ -92,6 +99,16 @@
 
     <label for="text">Text</label>
     <textarea id="text">Hello from ZeroVox! This is a browser text to speech demo.</textarea>
+
+    <label class="inline">
+      <input type="checkbox" id="ja-reading" />
+      Japanese reading
+      <span class="hint">
+        convert numbers / dates / units to kana with toJapaneseReading before synthesis
+        (the bundled Chatterbox model is English-only, so this demonstrates the text
+        pipeline rather than Japanese voice quality)
+      </span>
+    </label>
 
     <button id="speak">Speak</button>
 
