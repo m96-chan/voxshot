@@ -14,8 +14,9 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 
 > **What works today:** the full browser pipeline — reference audio decoding,
 > voice extraction, voice persistence, text chunking, streaming synthesis and
-> playback — plus a real zero-shot engine: **Chatterbox Multilingual ONNX via
-> Transformers.js v4**, running on WebGPU with a WASM fallback, optionally
+> playback — plus a real zero-shot engine: **Chatterbox ONNX via
+> Transformers.js v4** (English; the multilingual repo is not yet loadable by
+> Transformers.js), running on WebGPU with a WASM fallback, optionally
 > inside a Web Worker.
 >
 > A dependency-free `PlaceholderEngine` (speech-shaped audio, not speech) is
@@ -144,7 +145,8 @@ npm install zerovox @huggingface/transformers
 import { ChatterboxEngine, ZeroVox } from "zerovox";
 
 const engine = new ChatterboxEngine({
-  // "onnx-community/chatterbox-multilingual-ONNX" by default
+  // "onnx-community/chatterbox-ONNX" (English) by default — the multilingual
+  // repo currently lacks the config files Transformers.js needs to load it
   onProgress: (p) => console.log(p.status, p.file, p.progress),
 });
 
