@@ -7,7 +7,7 @@ import {
   type PcmAudio,
 } from "zerovox";
 
-type EngineKind = "placeholder" | "chatterbox";
+type EngineKind = "placeholder" | "chatterbox" | "chatterbox-multilingual";
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -186,13 +186,35 @@ async function createInstance(kind: EngineKind): Promise<ZeroVox> {
     return tts;
   }
 
+  if (kind === "chatterbox-multilingual") {
+    // Probe the file the download script fetches last: Vite answers missing
+    // paths with index.html (HTTP 200), which would otherwise surface as a
+    // baffling "protobuf parsing failed" from ONNX Runtime.
+    const probe = await fetch("/models/chatterbox-multilingual/onnx/language_model_q4.onnx_data", {
+      method: "HEAD",
+    });
+    if (!probe.ok || (probe.headers.get("Content-Type") ?? "").includes("text/html")) {
+      throw new Error(
+        "Local multilingual model not found (or the download is still running). Run: bash scripts/download-multilingual.sh (in examples/browser) to completion, then reload.",
+      );
+    }
+    log("Loading the local Chatterbox Multilingual model…");
+    const worker = new Worker(new URL("./tts-multilingual.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    const engine = new WorkerSynthesisEngine(worker, { onProgress: createProgressLogger() });
+    const tts = await ZeroVox.create({ engine });
+    log(`Chatterbox Multilingual ready (device: ${tts.device})`);
+    return tts;
+  }
+
   const tts = await ZeroVox.create();
   log(`Placeholder engine ready (device: ${tts.device})`);
   return tts;
 }
 
 async function ensureVoice(kind: EngineKind, tts: ZeroVox): Promise<boolean> {
-  if (kind === "chatterbox") {
+  if (kind !== "placeholder") {
     const file = referenceInput.files?.[0];
     if (!file) {
       log("Chatterbox needs reference audio. Please choose an audio file.");
@@ -265,9 +287,9 @@ jaReadingInput.addEventListener("change", () => {
 });
 
 engineSelect.addEventListener("change", () => {
-  const isChatterbox = engineSelect.value === "chatterbox";
-  referenceLabel.hidden = !isChatterbox;
-  referenceInput.hidden = !isChatterbox;
+  const needsReference = engineSelect.value !== "placeholder";
+  referenceLabel.hidden = !needsReference;
+  referenceInput.hidden = !needsReference;
 });
 
 speakButton.addEventListener("click", () => {
