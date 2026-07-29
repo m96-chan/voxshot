@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { InvalidInputError } from "../../src/errors.js";
 import type { VoiceEmbedding, VoiceStore } from "../../src/voice/types.js";
+import { toArray } from "../helpers/tensor.js";
 
 export function embedding(values: number[], sampleRate = 16_000): VoiceEmbedding {
   return { vector: Float32Array.from(values), sampleRate, createdAt: 1_700_000_000_000 };
@@ -30,6 +31,47 @@ export function describeVoiceStoreContract(name: string, createStore: () => Voic
         expect.closeTo(0.2, 6),
         expect.closeTo(0.3, 6),
       ]);
+    });
+
+    it("round trips engine specific tensors", async () => {
+      const store = createStore();
+      await store.save("alice", {
+        ...embedding([0.1]),
+        engine: "chatterbox",
+        tensors: {
+          speaker_embeddings: {
+            type: "float32",
+            dims: [1, 2],
+            data: Float32Array.from([0.25, -0.75]),
+          },
+          audio_tokens: { type: "int64", dims: [1, 2], data: BigInt64Array.from([7n, 9n]) },
+        },
+      });
+
+      const loaded = await store.load("alice");
+
+      expect(loaded?.engine).toBe("chatterbox");
+      expect(loaded?.tensors?.speaker_embeddings?.dims).toEqual([1, 2]);
+      expect(toArray(loaded?.tensors?.speaker_embeddings?.data)).toEqual([
+        expect.closeTo(0.25, 6),
+        expect.closeTo(-0.75, 6),
+      ]);
+      expect(loaded?.tensors?.audio_tokens?.type).toBe("int64");
+      expect(toArray(loaded?.tensors?.audio_tokens?.data)).toEqual([7n, 9n]);
+    });
+
+    it("does not alias engine specific tensors", async () => {
+      const store = createStore();
+      const data = Float32Array.from([0.5]);
+      await store.save("alice", {
+        ...embedding([0.1]),
+        tensors: { speaker_embeddings: { type: "float32", dims: [1], data } },
+      });
+
+      data[0] = 9;
+
+      const loaded = await store.load("alice");
+      expect(loaded?.tensors?.speaker_embeddings?.data[0]).toBeCloseTo(0.5, 6);
     });
 
     it("overwrites a voice saved under the same name", async () => {

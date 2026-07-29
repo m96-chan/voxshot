@@ -12,13 +12,16 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 
 > **Status:** 🚧 Early development (Proof of Concept)
 
-> **What works today (v0.1):** the full browser pipeline — reference audio
-> decoding, voice extraction, voice persistence, text chunking, streaming
-> synthesis and playback — behind a stable TypeScript API.
-> The bundled engine is a **placeholder** that renders speech-shaped audio, not
-> speech: it exists so the pipeline can ship and be tested while the ONNX
-> Runtime Web backend is built ([#2](https://github.com/m96-chan/zerovox/issues/2)).
-> Bring your own model today by implementing the `SynthesisEngine` interface.
+> **What works today:** the full browser pipeline — reference audio decoding,
+> voice extraction, voice persistence, text chunking, streaming synthesis and
+> playback — plus a real zero-shot engine: **Chatterbox Multilingual ONNX via
+> Transformers.js v4**, running on WebGPU with a WASM fallback, optionally
+> inside a Web Worker.
+>
+> A dependency-free `PlaceholderEngine` (speech-shaped audio, not speech) is
+> still bundled as the default, so the library works with nothing installed.
+> The Chatterbox engine has **not yet been verified against the real model in a
+> browser** — see [#2](https://github.com/m96-chan/zerovox/issues/2).
 
 ---
 
@@ -130,6 +133,67 @@ audio.toWav();     // ArrayBuffer (16 bit PCM RIFF)
 audio.toBlob();    // Blob, type "audio/wav"
 await audio.play();
 ```
+
+### Real voice cloning with Chatterbox
+
+```bash
+npm install zerovox @huggingface/transformers
+```
+
+```ts
+import { ChatterboxEngine, ZeroVox } from "zerovox";
+
+const engine = new ChatterboxEngine({
+  // "onnx-community/chatterbox-multilingual-ONNX" by default
+  onProgress: (p) => console.log(p.status, p.file, p.progress),
+});
+
+const tts = await ZeroVox.create({
+  engine,
+  minChunkLength: 20,   // very short prompts destabilise the model
+});
+
+await tts.cloneVoice(referenceAudioFile);   // 5-15s of clean speech
+await (await tts.speak("こんにちは、世界。")).play();
+```
+
+* `@huggingface/transformers` is an **optional peer dependency**, imported
+  lazily. Nothing is downloaded unless you actually construct the engine.
+* Model weights are cached by Transformers.js in the browser's Cache Storage
+  (`env.useBrowserCache`), so only the first load pays the download.
+* Device and quantization are chosen for you and degrade automatically:
+  WebGPU `q4f16` → WebGPU `q4` → WASM `q4`. Override per session with `dtype`.
+* Output is 24 kHz — the S3Gen vocoder's rate.
+* `speed` is applied by resampling the rendered waveform, so it shifts pitch
+  like a playback-rate change. Chatterbox exposes no duration control.
+
+### Keeping inference off the UI thread
+
+```ts
+// tts.worker.ts
+import { ChatterboxEngine, exposeEngine, type RpcEndpoint } from "zerovox";
+
+const engine = new ChatterboxEngine({ onProgress: (p) => serve.emitProgress(p) });
+const serve = exposeEngine(engine, self as unknown as RpcEndpoint);
+```
+
+```ts
+// main thread
+import { WorkerSynthesisEngine, ZeroVox } from "zerovox";
+
+const worker = new Worker(new URL("./tts.worker.ts", import.meta.url), { type: "module" });
+const engine = new WorkerSynthesisEngine(worker, {
+  onProgress: (p) => updateProgressBar(p),
+});
+
+const tts = await ZeroVox.create({ engine });
+```
+
+Audio crosses the boundary as a transferable buffer, always as a copy, so the
+caller's `Float32Array` is never detached. The transport is a small typed
+`postMessage` protocol — no Comlink dependency required, though Comlink works
+equally well if you prefer it: `exposeEngine` only needs an object with
+`postMessage` / `addEventListener`.
 
 ### Bring your own model
 

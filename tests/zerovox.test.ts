@@ -11,6 +11,8 @@ import {
 } from "../src/errors.js";
 import type { AudioPlayer, DecodedAudio, PcmAudio, Platform } from "../src/platform.js";
 import { MemoryVoiceStore } from "../src/voice/memory-store.js";
+import type { VoiceTensor } from "../src/voice/types.js";
+import { toArray } from "./helpers/tensor.js";
 import { ZeroVox } from "../src/zerovox.js";
 
 /** Engine double that records what it was asked to do. */
@@ -22,14 +24,15 @@ class FakeEngine implements SynthesisEngine {
   disposed = false;
   embedded: PcmAudio[] = [];
   requests: SynthesisRequest[] = [];
+  embedResult: { vector: Float32Array; tensors?: Record<string, VoiceTensor> } | undefined;
 
   async load(device: string): Promise<void> {
     this.loadedOn = device;
   }
 
-  async embed(audio: PcmAudio): Promise<Float32Array> {
+  async embed(audio: PcmAudio): Promise<Float32Array | { vector: Float32Array }> {
     this.embedded.push(audio);
-    return Float32Array.from([audio.samples.length, audio.sampleRate]);
+    return this.embedResult ?? Float32Array.from([audio.samples.length, audio.sampleRate]);
   }
 
   async synthesize(request: SynthesisRequest): Promise<Float32Array> {
@@ -118,6 +121,18 @@ describe("ZeroVox.create", () => {
 
   it("rejects a non positive chunk length", async () => {
     await expect(create({ maxChunkLength: 0 })).rejects.toBeInstanceOf(InvalidInputError);
+  });
+
+  it("merges chunks shorter than minChunkLength", async () => {
+    const tts = await create({ minChunkLength: 10 });
+    await tts.cloneVoice(new ArrayBuffer(16));
+
+    await tts.speak("はい。なぜですか?それは仕様だからです。");
+
+    expect(harness.engine.requests.map((request) => request.text)).toEqual([
+      "はい。なぜですか?",
+      "それは仕様だからです。",
+    ]);
   });
 
   it("honours a custom chunk length", async () => {
@@ -225,6 +240,26 @@ describe("ZeroVox", () => {
 
     it("rejects an unsupported source", async () => {
       await expect(tts.cloneVoice(42 as never)).rejects.toBeInstanceOf(InvalidInputError);
+    });
+
+    it("records which engine produced the voice", async () => {
+      const voice = await tts.cloneVoice(new ArrayBuffer(16));
+
+      expect(voice.engine).toBe("fake");
+    });
+
+    it("keeps engine specific tensors returned by the engine", async () => {
+      harness.engine.embedResult = {
+        vector: Float32Array.from([1, 2]),
+        tensors: {
+          speaker_embeddings: { type: "float32", dims: [1, 2], data: Float32Array.from([3, 4]) },
+        },
+      };
+
+      const voice = await tts.cloneVoice(new ArrayBuffer(16));
+
+      expect(Array.from(voice.vector)).toEqual([1, 2]);
+      expect(toArray(voice.tensors?.speaker_embeddings?.data)).toEqual([3, 4]);
     });
   });
 

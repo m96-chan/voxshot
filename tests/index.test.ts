@@ -41,4 +41,16 @@ describe("public API", () => {
   it("exports the embedding size of the built in engine", () => {
     expect(zerovox.VOICE_EMBEDDING_SIZE).toBe(4);
   });
+
+  it("exports the Chatterbox engine and its load planning", () => {
+    expect(typeof zerovox.ChatterboxEngine).toBe("function");
+    expect(zerovox.CHATTERBOX_SAMPLE_RATE).toBe(24_000);
+    expect(zerovox.buildLoadPlans("wasm")).toHaveLength(1);
+  });
+
+  it("exports the worker transport", () => {
+    expect(typeof zerovox.WorkerSynthesisEngine).toBe("function");
+    expect(typeof zerovox.exposeEngine).toBe("function");
+    expect(zerovox.PROTOCOL_VERSION).toBe(1);
+  });
 });
