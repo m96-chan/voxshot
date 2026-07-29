@@ -63,6 +63,7 @@ export type {
 } from "./platform.js";
 
 export { normalizeText } from "./text/normalize.js";
+export { toJapaneseReading } from "./text/japanese.js";
 export { splitSentences } from "./text/segment.js";
 export type { SplitSentencesOptions } from "./text/segment.js";
 
