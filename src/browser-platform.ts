@@ -58,7 +58,9 @@ export class BrowserAudioPlayer implements AudioPlayer {
     }
 
     const buffer = context.createBuffer(1, audio.samples.length, audio.sampleRate);
-    buffer.copyToChannel(audio.samples, 0);
+    // `copyToChannel` is typed against ArrayBuffer-backed views only; the call
+    // is safe for any backing buffer because it copies out of `samples`.
+    buffer.copyToChannel(audio.samples as Float32Array<ArrayBuffer>, 0);
 
     const source = context.createBufferSource();
     source.buffer = buffer;
