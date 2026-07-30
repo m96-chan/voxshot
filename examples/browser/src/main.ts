@@ -55,8 +55,16 @@ function syntheticReference(sampleRate: number): PcmAudio {
 function createProgressLogger(): (progress: Record<string, unknown>) => void {
   const lastStep = new Map<string, number>();
   return (raw) => {
-    const progress = raw as unknown as LoadProgress;
-    if (progress.status === "progress" && progress.file && progress.progress !== undefined) {
+    const progress = raw as unknown as LoadProgress & { plan?: string; reason?: string };
+    // Engine milestones: which plan is being tried, and which one won. The
+    // dtype fallback used to be invisible from out here.
+    if (progress.status === "load-start") {
+      log(`Trying ${progress.plan}…`);
+    } else if (progress.status === "load-fallback") {
+      log(`⚠ ${progress.plan} failed (${progress.reason}); falling back.`);
+    } else if (progress.status === "load-ready") {
+      log(`Model up on ${progress.plan}`);
+    } else if (progress.status === "progress" && progress.file && progress.progress !== undefined) {
       const step = Math.floor(progress.progress / 25);
       if (step > (lastStep.get(progress.file) ?? -1)) {
         lastStep.set(progress.file, step);

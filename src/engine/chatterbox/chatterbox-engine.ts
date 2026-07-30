@@ -52,6 +52,36 @@ const SPEAKER_TENSOR_NAMES = [
   "speaker_features",
 ] as const;
 
+/**
+ * Engine-level load milestones, emitted on the same channel as the file
+ * progress forwarded from Transformers.js.
+ *
+ * The `load-` prefix keeps them distinct from the library's own statuses
+ * (`initiate` / `download` / `progress` / `progress_total` / `done` / `ready`)
+ * and from the generic `ready` that {@link exposeEngine} emits for any engine.
+ *
+ * Note there is deliberately no "downloads finished / compiling now" event.
+ * Detecting that transition needs a trustworthy count of the files a load will
+ * touch, and Transformers.js cannot supply one for this model: `chatterbox` is
+ * absent from its `MODEL_TYPE_MAPPING`, so its expected-file list resolves to a
+ * single-file encoder-only layout that does not exist in the repo. Emitting a
+ * milestone inferred from silence would just move the consumer's guess into the
+ * library and dress it up as a fact.
+ */
+export interface ChatterboxLifecycleEvent {
+  readonly status: "load-start" | "load-fallback" | "load-ready";
+  /** The plan this event concerns, as `device/dtype` — e.g. `webgpu/q4f16`. */
+  readonly plan: string;
+  readonly device: ResolvedDevice;
+  /** Quantization of the language model, the only session that varies. */
+  readonly dtype: string;
+  /** Why the plan was abandoned. Only present on `load-fallback`. */
+  readonly reason?: string;
+}
+
+/** Everything {@link ChatterboxEngineOptions.onProgress} may receive. */
+export type ChatterboxLoadEvent = LoadProgress | ChatterboxLifecycleEvent;
+
 export interface ChatterboxEngineOptions {
   /**
    * Hugging Face model id.
@@ -74,8 +104,11 @@ export interface ChatterboxEngineOptions {
    * @defaultValue 0.5
    */
   exaggeration?: number;
-  /** Called with model download / load progress events. */
-  onProgress?: (progress: LoadProgress) => void;
+  /**
+   * Called with model download progress forwarded from Transformers.js, and
+   * with the engine's own {@link ChatterboxLifecycleEvent} milestones.
+   */
+  onProgress?: (progress: ChatterboxLoadEvent) => void;
   /**
    * Reject {@link ChatterboxEngine.load} when it produces no progress for this
    * long. The clock is reset by every progress event, so it measures silence
@@ -124,7 +157,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   readonly #dtypeOverrides: Partial<DtypeConfig> | undefined;
   readonly #maxNewTokens: number;
   readonly #exaggeration: number;
-  readonly #onProgress: ((progress: LoadProgress) => void) | undefined;
+  readonly #onProgress: ((progress: ChatterboxLoadEvent) => void) | undefined;
   readonly #loadModule: TransformersModuleLoader;
   readonly #supportsFp16: () => boolean | Promise<boolean>;
   readonly #stallTimeoutMs: number;
@@ -167,6 +200,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     const failures: string[] = [];
 
     for (const plan of plans) {
+      this.#announce("load-start", plan);
       try {
         await this.#withStallGuard(async (notice) => {
           this.#model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
@@ -182,6 +216,7 @@ export class ChatterboxEngine implements SynthesisEngine {
           this.#processor = await transformers.AutoProcessor.from_pretrained(this.modelId);
         });
         this.#plan = plan;
+        this.#announce("load-ready", plan);
         return;
       } catch (cause) {
         // A stall is a transfer problem, not a device problem, so the
@@ -190,9 +225,9 @@ export class ChatterboxEngine implements SynthesisEngine {
         if (cause instanceof LoadStalledError) {
           throw cause;
         }
-        failures.push(
-          `${plan.device}/${plan.dtype.language_model}: ${cause instanceof Error ? cause.message : String(cause)}`,
-        );
+        const reason = cause instanceof Error ? cause.message : String(cause);
+        this.#announce("load-fallback", plan, reason);
+        failures.push(`${describePlan(plan)}: ${reason}`);
       }
     }
 
@@ -287,6 +322,17 @@ export class ChatterboxEngine implements SynthesisEngine {
     await model?.dispose();
   }
 
+  /** Emit one engine-level milestone, if anyone is listening. */
+  #announce(status: ChatterboxLifecycleEvent["status"], plan: LoadPlan, reason?: string): void {
+    this.#onProgress?.({
+      status,
+      plan: describePlan(plan),
+      device: plan.device,
+      dtype: plan.dtype.language_model,
+      ...(reason === undefined ? {} : { reason }),
+    });
+  }
+
   /**
    * Run `operation`, rejecting with {@link LoadStalledError} if it goes quiet.
    *
@@ -353,6 +399,11 @@ export class ChatterboxEngine implements SynthesisEngine {
     }
     return { model: this.#model, processor: this.#processor, transformers: this.#module };
   }
+}
+
+/** Render a plan as `device/dtype`, the form used in events and error text. */
+function describePlan(plan: LoadPlan): string {
+  return `${plan.device}/${plan.dtype.language_model}`;
 }
 
 /** Copy a library tensor into a storable, structured-cloneable one. */
