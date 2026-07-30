@@ -7,6 +7,8 @@ import {
   type PcmAudio,
 } from "voxshot";
 
+import { prewarmModelCache } from "./model-cache.js";
+
 type EngineKind = "placeholder" | "chatterbox" | "chatterbox-multilingual";
 
 function element<T extends HTMLElement>(id: string): T {
@@ -79,9 +81,6 @@ function getInstance(kind: EngineKind): Promise<VoxShot> {
   return instance;
 }
 
-const MODEL_ID = "onnx-community/chatterbox-ONNX";
-const MODEL_BASE = `https://huggingface.co/${MODEL_ID}/resolve/main/`;
-
 /** WebGPU types ship separately, so declare the slice the dtype check needs. */
 interface GpuNavigator {
   gpu?: {
@@ -99,87 +98,17 @@ async function pickLanguageModelDtype(): Promise<"q4f16" | "q4"> {
   }
 }
 
-/**
- * Fetch every model file into transformers-cache while the page is idle.
- *
- * `from_pretrained` initialises each ONNX session as soon as that session's
- * file arrives, and session init blocks the thread that is also consuming the
- * remaining download streams — the unread stream backs up until the server
- * resets it. Pre-warming the cache means the engine later loads everything
- * from cache and no live download is left to kill.
- */
-async function prewarmModelCache(): Promise<void> {
-  const dtype = await pickLanguageModelDtype();
-  const files = [
-    "config.json",
-    "generation_config.json",
-    "preprocessor_config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "onnx/embed_tokens.onnx",
-    "onnx/embed_tokens.onnx_data",
-    "onnx/speech_encoder.onnx",
-    "onnx/speech_encoder.onnx_data",
-    "onnx/conditional_decoder.onnx",
-    "onnx/conditional_decoder.onnx_data",
-    `onnx/language_model_${dtype}.onnx`,
-    `onnx/language_model_${dtype}.onnx_data`,
-  ];
-
-  const cache = await caches.open("transformers-cache");
-  for (const file of files) {
-    const url = MODEL_BASE + file;
-    if (await cache.match(url)) {
-      continue;
-    }
-    log(`Fetching ${file}…`);
-    // no-store bypasses the HTTP disk cache entirely: aborted downloads can
-    // leave corrupt cache entries behind that wedge later fetches of the same
-    // URL, and we persist into transformers-cache ourselves anyway.
-    const response = await fetch(url, { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`Downloading ${file} failed: HTTP ${response.status}`);
-    }
-    await cache.put(url, await withProgress(response, file));
-  }
-  log("All model files are in the browser cache.");
-}
-
-/** Re-materialise a response while logging download progress in 25% steps. */
-async function withProgress(response: Response, file: string): Promise<Response> {
-  const total = Number(response.headers.get("Content-Length") ?? 0);
-  if (!response.body || !Number.isFinite(total) || total <= 0) {
-    return response;
-  }
-
-  const reader = response.body.getReader();
-  const parts: BlobPart[] = [];
-  let received = 0;
-  let lastStep = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    parts.push(value as BlobPart);
-    received += value.length;
-    const step = Math.floor((received / total) * 4);
-    if (step > lastStep) {
-      lastStep = step;
-      log(`Fetching ${file}: ${Math.min(100, step * 25)}%`);
-    }
-  }
-
-  return new Response(new Blob(parts), { status: 200, headers: response.headers });
-}
-
 const seconds = (fromMs: number) => ((performance.now() - fromMs) / 1000).toFixed(1);
 
 async function createInstance(kind: EngineKind): Promise<VoxShot> {
   if (kind === "chatterbox") {
     log("Preparing the Chatterbox model… (first run downloads ~1.5 GB)");
     const downloadStart = performance.now();
-    await prewarmModelCache();
+    await prewarmModelCache({
+      dtype: await pickLanguageModelDtype(),
+      log,
+      cacheStorage: globalThis.caches,
+    });
     log(
       `Downloads / cache check took ${seconds(downloadStart)}s. Initializing the model (loading weights, compiling kernels)… this can take a minute or two.`,
     );

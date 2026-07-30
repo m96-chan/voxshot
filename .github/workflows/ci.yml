@@ -33,3 +33,13 @@ jobs:
       - run: npm test
 
       - run: npm run build
+
+      # examples/browser has its own unit tests for the demo's model-cache
+      # logic. It depends on the library via file:../.., so build dist first
+      # (done above) before typechecking the example.
+      - name: Test examples/browser
+        working-directory: examples/browser
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
