@@ -15,8 +15,10 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 
 🎮 **[Try the live demo →](https://voxshot.m96-chan.dev/)**
 
-> **Status:** 🌱 Usable, API not frozen yet. **npm publication pending** under
-> the new name — see [Renamed from zerovox](#renamed-from-zerovox) below.
+> **Status:** 🌱 Usable, API not frozen yet. Published on npm as
+> [`voxshot`](https://www.npmjs.com/package/voxshot). Until `1.0.0`, breaking
+> changes ship in minor releases — if you moved from the old name, see
+> [Renamed from zerovox](#renamed-from-zerovox) below.
 
 > **Verified end to end in a browser:** reference audio decoding, voice
 > cloning, voice persistence, text chunking, streaming synthesis and gapless
