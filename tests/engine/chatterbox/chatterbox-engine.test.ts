@@ -1,11 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CHATTERBOX_SAMPLE_RATE, ChatterboxEngine } from "../../../src/engine/chatterbox/chatterbox-engine.js";
 import type {
   TensorLike,
   TransformersModule,
 } from "../../../src/engine/chatterbox/transformers-module.js";
-import { InvalidInputError, VoxShotError } from "../../../src/errors.js";
+import { InvalidInputError, LoadStalledError, VoxShotError } from "../../../src/errors.js";
 import type { VoiceEmbedding } from "../../../src/voice/types.js";
 import { toArray } from "../../helpers/tensor.js";
 
@@ -26,6 +26,10 @@ interface ModuleHarness {
   processorCalls: string[];
   disposeCalls: number;
   failOn: (device: string, modelDtype: string) => boolean;
+  /** When true for a plan, `from_pretrained` returns a promise that never settles. */
+  hangOn: (device: string, modelDtype: string) => boolean;
+  /** Last `progress_callback` handed to `from_pretrained`, so tests can drive it. */
+  lastProgressCallback: ((progress: Record<string, unknown>) => void) | undefined;
   waveform: Float32Array;
   progressEvents: unknown[];
 }
@@ -38,6 +42,8 @@ function createModule(): ModuleHarness {
     processorCalls: [],
     disposeCalls: 0,
     failOn: () => false,
+    hangOn: () => false,
+    lastProgressCallback: undefined,
     waveform: Float32Array.from([0, 0.5, -0.5, 0.25]),
     progressEvents: [],
     module: undefined as unknown as TransformersModule,
@@ -56,7 +62,15 @@ function createModule(): ModuleHarness {
       async from_pretrained(modelId, options) {
         const dtype = options.dtype as Record<string, string>;
         harness.attempts.push({ device: options.device as string, dtype });
+        harness.lastProgressCallback = options.progress_callback as
+          | ((progress: Record<string, unknown>) => void)
+          | undefined;
         options.progress_callback?.({ status: "progress", file: modelId });
+        if (harness.hangOn(options.device as string, dtype.language_model as string)) {
+          // Models the reported bug: a dangling transfer leaves `from_pretrained`
+          // pending forever — it neither resolves nor rejects.
+          return new Promise(() => {});
+        }
         if (harness.failOn(options.device as string, dtype.language_model as string)) {
           throw new Error(`no ${options.device} support`);
         }
@@ -268,6 +282,129 @@ describe("ChatterboxEngine", () => {
       });
 
       await expect(broken.load("wasm")).rejects.toThrow(/@huggingface\/transformers/);
+    });
+
+    /**
+     * Regression coverage for #43: a transfer that hangs used to leave `load()`
+     * pending forever, so consumers had no error to catch and no way to tell
+     * "still loading" from "dead".
+     */
+    describe("stall timeout", () => {
+      beforeEach(() => {
+        vi.useFakeTimers();
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it("rejects with a LoadStalledError when a transfer produces no progress", async () => {
+        harness.hangOn = () => true;
+        const stalling = createEngine({ stallTimeoutMs: 1000 });
+
+        const load = stalling.load("wasm");
+        const assertion = expect(load).rejects.toBeInstanceOf(LoadStalledError);
+        await vi.advanceTimersByTimeAsync(1000);
+
+        await assertion;
+      });
+
+      it("tags the stall error with a machine readable code", async () => {
+        harness.hangOn = () => true;
+        const stalling = createEngine({ stallTimeoutMs: 1000 });
+
+        const load = stalling.load("wasm");
+        const assertion = expect(load).rejects.toMatchObject({ code: "LOAD_STALLED" });
+        await vi.advanceTimersByTimeAsync(1000);
+
+        await assertion;
+      });
+
+      it("keeps waiting while progress events keep arriving", async () => {
+        harness.hangOn = () => true;
+        const stalling = createEngine({ stallTimeoutMs: 1000 });
+        const load = stalling.load("wasm");
+        const settled = vi.fn();
+        load.then(settled, settled);
+
+        // Three quiet stretches, each shorter than the timeout, separated by
+        // progress. A total-elapsed cap would have fired by now; a stall
+        // timer must not.
+        for (let tick = 0; tick < 3; tick += 1) {
+          await vi.advanceTimersByTimeAsync(900);
+          harness.lastProgressCallback?.({ status: "progress", file: "weights" });
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(settled).not.toHaveBeenCalled();
+
+        // Drain the still-pending load so the rejection is observed.
+        await vi.advanceTimersByTimeAsync(1000);
+        await expect(load).rejects.toBeInstanceOf(LoadStalledError);
+      });
+
+      it("abandons the whole load instead of stalling once per remaining plan", async () => {
+        harness.hangOn = () => true;
+        const stalling = createEngine({ stallTimeoutMs: 1000 });
+
+        const load = stalling.load("webgpu");
+        const assertion = expect(load).rejects.toBeInstanceOf(LoadStalledError);
+        await vi.advanceTimersByTimeAsync(1000);
+        await assertion;
+
+        // A hang is a transfer problem, not a device problem, so retrying the
+        // remaining plans would only burn another timeout each.
+        expect(harness.attempts).toHaveLength(1);
+      });
+
+      it("still falls through the plans when a device genuinely fails", async () => {
+        harness.failOn = (device) => device === "webgpu";
+        const stalling = createEngine({ stallTimeoutMs: 1000 });
+
+        await stalling.load("webgpu");
+
+        expect(harness.attempts.map((attempt) => attempt.device)).toEqual([
+          "webgpu",
+          "webgpu",
+          "wasm",
+        ]);
+      });
+
+      it("waits indefinitely when the timeout is disabled", async () => {
+        harness.hangOn = () => true;
+        const stalling = createEngine({ stallTimeoutMs: 0 });
+        const settled = vi.fn();
+        stalling.load("wasm").then(settled, settled);
+
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+        expect(settled).not.toHaveBeenCalled();
+      });
+
+      it("does not fire once the model has loaded", async () => {
+        const stalling = createEngine({ stallTimeoutMs: 1000 });
+        await stalling.load("wasm");
+
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+        // The timer must be cleared on success; a late fire would reject a
+        // promise nobody is holding any more.
+        expect(stalling.loadedPlan?.device).toBe("wasm");
+      });
+
+      it("guards against a load that is silent from the very first moment", async () => {
+        // No progress callback is ever invoked here, so the timer only has
+        // load() itself as its starting point.
+        harness.module.ChatterboxModel.from_pretrained = (async () =>
+          new Promise(() => {})) as unknown as typeof harness.module.ChatterboxModel.from_pretrained;
+        const stalling = createEngine({ stallTimeoutMs: 1000 });
+
+        const load = stalling.load("wasm");
+        const assertion = expect(load).rejects.toBeInstanceOf(LoadStalledError);
+        await vi.advanceTimersByTimeAsync(1000);
+
+        await assertion;
+      });
     });
   });
 

@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SynthesisEngine, SynthesisRequest } from "../../src/engine/types.js";
-import { InvalidInputError, NoVoiceError, VoxShotError } from "../../src/errors.js";
+import {
+  InvalidInputError,
+  LoadStalledError,
+  NoVoiceError,
+  VoxShotError,
+} from "../../src/errors.js";
 import type { PcmAudio } from "../../src/platform.js";
 import type { VoiceEmbedding } from "../../src/voice/types.js";
 import { exposeEngine } from "../../src/worker/expose.js";
@@ -182,6 +187,24 @@ describe("WorkerSynthesisEngine", () => {
     await expect(failure).rejects.toMatchObject({
       code: "INVALID_INPUT",
       message: "bad reference audio",
+    });
+  });
+
+  /**
+   * The path consumers actually use (#43): the stall guard lives in the
+   * engine inside the worker, so its failure has to survive serialization
+   * for a caller to branch on it.
+   */
+  it("carries a stalled load across the worker boundary as LOAD_STALLED", async () => {
+    const { engine, worker } = wire();
+    worker.failure = new LoadStalledError(300_000);
+
+    const failure = engine.load("webgpu");
+
+    await expect(failure).rejects.toBeInstanceOf(VoxShotError);
+    await expect(failure).rejects.toMatchObject({
+      code: "LOAD_STALLED",
+      name: "LoadStalledError",
     });
   });
 

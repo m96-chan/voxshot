@@ -8,6 +8,7 @@ export type VoxShotErrorCode =
   | "VOICE_NOT_FOUND"
   | "INVALID_INPUT"
   | "AUDIO_DECODE_FAILED"
+  | "LOAD_STALLED"
   | "DISPOSED";
 
 /**
@@ -69,6 +70,29 @@ export class AudioDecodeError extends VoxShotError {
   constructor(message: string, options?: ErrorOptions) {
     super(`Failed to decode audio: ${message}`, "AUDIO_DECODE_FAILED", options);
     this.name = "AudioDecodeError";
+  }
+}
+
+/**
+ * Model loading produced no progress for the configured stall timeout.
+ *
+ * A hung transfer does not reject on its own — the underlying promise simply
+ * never settles — so without this the caller would wait forever with no way to
+ * tell "still loading" from "dead".
+ */
+export class LoadStalledError extends VoxShotError {
+  /** The stall threshold that was exceeded, in milliseconds. */
+  readonly stallTimeoutMs: number;
+
+  constructor(stallTimeoutMs: number, options?: ErrorOptions) {
+    super(
+      `Model loading produced no progress for ${stallTimeoutMs} ms and was abandoned. ` +
+        "The transfer most likely stalled; retrying resumes from whatever is already cached.",
+      "LOAD_STALLED",
+      options,
+    );
+    this.name = "LoadStalledError";
+    this.stallTimeoutMs = stallTimeoutMs;
   }
 }
 

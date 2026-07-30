@@ -1,6 +1,6 @@
 import { resample } from "../../audio/pcm.js";
 import type { ResolvedDevice } from "../../device.js";
-import { InvalidInputError, VoxShotError } from "../../errors.js";
+import { InvalidInputError, LoadStalledError, VoxShotError } from "../../errors.js";
 import type { PcmAudio } from "../../platform.js";
 import type { VoiceTensor, VoiceTensorType } from "../../voice/types.js";
 import type { EmbedResult, SynthesisEngine, SynthesisRequest } from "../types.js";
@@ -32,6 +32,15 @@ export const CHATTERBOX_SAMPLE_RATE = 24_000;
 const DEFAULT_MODEL_ID = "onnx-community/chatterbox-ONNX";
 const DEFAULT_MAX_NEW_TOKENS = 256;
 const DEFAULT_EXAGGERATION = 0.5;
+/**
+ * How long loading may stay silent before it is declared stalled.
+ *
+ * Deliberately generous: session creation legitimately emits nothing while it
+ * runs, measured at roughly 35 s on an idle machine and over two minutes on a
+ * loaded one, so a tighter default would abandon healthy loads. This is a
+ * backstop against hanging forever, not a latency target.
+ */
+const DEFAULT_STALL_TIMEOUT_MS = 300_000;
 const MIN_SPEED = 0.25;
 const MAX_SPEED = 4;
 
@@ -67,6 +76,19 @@ export interface ChatterboxEngineOptions {
   exaggeration?: number;
   /** Called with model download / load progress events. */
   onProgress?: (progress: LoadProgress) => void;
+  /**
+   * Reject {@link ChatterboxEngine.load} when it produces no progress for this
+   * long. The clock is reset by every progress event, so it measures silence
+   * rather than total elapsed time — a total cap would abandon healthy loads,
+   * because a 1.5 GB download legitimately takes minutes.
+   *
+   * A hung transfer never rejects on its own, so without this `load()` stays
+   * pending forever and the caller has no error to catch. Set `0` to wait
+   * indefinitely.
+   *
+   * @defaultValue 300000
+   */
+  stallTimeoutMs?: number;
   /**
    * How to obtain `@huggingface/transformers`. Replace it in tests, or to
    * pin your own build of the library.
@@ -105,6 +127,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   readonly #onProgress: ((progress: LoadProgress) => void) | undefined;
   readonly #loadModule: TransformersModuleLoader;
   readonly #supportsFp16: () => boolean | Promise<boolean>;
+  readonly #stallTimeoutMs: number;
 
   #module: TransformersModule | undefined;
   #model: ChatterboxModelLike | undefined;
@@ -119,6 +142,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     this.#onProgress = options.onProgress;
     this.#loadModule = options.loadModule ?? defaultModuleLoader;
     this.#supportsFp16 = options.supportsFp16 ?? webGpuSupportsFp16;
+    this.#stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
   }
 
   /** The device / dtype combination that actually loaded, once `load` ran. */
@@ -144,15 +168,28 @@ export class ChatterboxEngine implements SynthesisEngine {
 
     for (const plan of plans) {
       try {
-        this.#model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
-          device: plan.device,
-          dtype: plan.dtype,
-          ...(this.#onProgress ? { progress_callback: this.#onProgress } : {}),
+        await this.#withStallGuard(async (notice) => {
+          this.#model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
+            device: plan.device,
+            dtype: plan.dtype,
+            // Always supplied, even without an `onProgress` consumer: the
+            // stall guard needs these events to know the transfer is alive.
+            progress_callback: (progress: LoadProgress) => {
+              notice();
+              this.#onProgress?.(progress);
+            },
+          });
+          this.#processor = await transformers.AutoProcessor.from_pretrained(this.modelId);
         });
-        this.#processor = await transformers.AutoProcessor.from_pretrained(this.modelId);
         this.#plan = plan;
         return;
       } catch (cause) {
+        // A stall is a transfer problem, not a device problem, so the
+        // remaining plans would only stall in turn — give up immediately
+        // rather than burning one timeout per plan.
+        if (cause instanceof LoadStalledError) {
+          throw cause;
+        }
         failures.push(
           `${plan.device}/${plan.dtype.language_model}: ${cause instanceof Error ? cause.message : String(cause)}`,
         );
@@ -248,6 +285,50 @@ export class ChatterboxEngine implements SynthesisEngine {
     this.#processor = undefined;
     this.#plan = undefined;
     await model?.dispose();
+  }
+
+  /**
+   * Run `operation`, rejecting with {@link LoadStalledError} if it goes quiet.
+   *
+   * `operation` receives a `notice` callback and must invoke it whenever the
+   * work makes observable progress; each call restarts the clock. The
+   * operation itself cannot be cancelled — Transformers.js exposes no handle
+   * for that — so on a stall it is abandoned rather than aborted, and any
+   * rejection it produces later is swallowed instead of surfacing as an
+   * unhandled rejection.
+   */
+  async #withStallGuard<T>(operation: (notice: () => void) => Promise<T>): Promise<T> {
+    if (this.#stallTimeoutMs <= 0) {
+      return operation(() => {});
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let declareStalled: ((reason: unknown) => void) | undefined;
+
+    const restart = (): void => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        declareStalled?.(new LoadStalledError(this.#stallTimeoutMs));
+      }, this.#stallTimeoutMs);
+    };
+
+    const stalled = new Promise<never>((_, reject) => {
+      declareStalled = reject;
+    });
+
+    restart();
+    const running = operation(restart);
+    running.catch(() => {});
+
+    try {
+      return await Promise.race([running, stalled]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   async #importModule(): Promise<TransformersModule> {
