@@ -173,17 +173,23 @@ async function withProgress(response: Response, file: string): Promise<Response>
   return new Response(new Blob(parts), { status: 200, headers: response.headers });
 }
 
+const seconds = (fromMs: number) => ((performance.now() - fromMs) / 1000).toFixed(1);
+
 async function createInstance(kind: EngineKind): Promise<ZeroVox> {
   if (kind === "chatterbox") {
     log("Preparing the Chatterbox model… (first run downloads ~1.5 GB)");
+    const downloadStart = performance.now();
     await prewarmModelCache();
-    log("Initializing the model (loading weights, compiling kernels)… this can take a minute or two.");
+    log(
+      `Downloads / cache check took ${seconds(downloadStart)}s. Initializing the model (loading weights, compiling kernels)… this can take a minute or two.`,
+    );
+    const initStart = performance.now();
     // Inference runs in a Web Worker so the page stays responsive during
     // model load, cloning and synthesis.
     const worker = new Worker(new URL("./tts.worker.ts", import.meta.url), { type: "module" });
     const engine = new WorkerSynthesisEngine(worker, { onProgress: createProgressLogger() });
     const tts = await ZeroVox.create({ engine });
-    log(`Chatterbox ready (device: ${tts.device})`);
+    log(`Chatterbox ready (device: ${tts.device}, init ${seconds(initStart)}s)`);
     return tts;
   }
 
@@ -202,12 +208,13 @@ async function createInstance(kind: EngineKind): Promise<ZeroVox> {
     log(
       "Loading the local Chatterbox Multilingual model (loading weights, compiling kernels)… this can take a minute or two.",
     );
+    const initStart = performance.now();
     const worker = new Worker(new URL("./tts-multilingual.worker.ts", import.meta.url), {
       type: "module",
     });
     const engine = new WorkerSynthesisEngine(worker, { onProgress: createProgressLogger() });
     const tts = await ZeroVox.create({ engine });
-    log(`Chatterbox Multilingual ready (device: ${tts.device})`);
+    log(`Chatterbox Multilingual ready (device: ${tts.device}, init ${seconds(initStart)}s)`);
     return tts;
   }
 
@@ -295,9 +302,20 @@ jaReadingInput.addEventListener("change", () => {
 });
 
 engineSelect.addEventListener("change", () => {
-  const needsReference = engineSelect.value !== "placeholder";
+  const kind = engineSelect.value as EngineKind;
+  const needsReference = kind !== "placeholder";
   referenceLabel.hidden = !needsReference;
   referenceInput.hidden = !needsReference;
+
+  // Start loading the selected engine right away, so the minute of session
+  // initialization overlaps with the user picking a reference file and
+  // typing, instead of starting only when Speak is pressed.
+  if (kind !== "placeholder") {
+    getInstance(kind).catch((cause) => {
+      log(`Error: ${cause instanceof Error ? cause.message : String(cause)}`);
+      console.error(cause);
+    });
+  }
 });
 
 speakButton.addEventListener("click", () => {
