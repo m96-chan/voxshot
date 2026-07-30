@@ -57,13 +57,13 @@ export interface StreamingAudioPlayer {
 }
 
 /**
- * Every browser capability ZeroVox depends on, bundled behind interfaces so
+ * Every browser capability VoxShot depends on, bundled behind interfaces so
  * that tests (and non browser hosts) can supply their own implementations.
  */
 export interface Platform {
   readonly decoder: AudioDecoder;
   readonly player: AudioPlayer;
   readonly gpu: GpuProbe;
-  /** Gapless streaming output; `ZeroVox.play()` requires it. */
+  /** Gapless streaming output; `VoxShot.play()` requires it. */
   readonly streamingPlayer?: StreamingAudioPlayer;
 }

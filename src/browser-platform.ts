@@ -1,4 +1,4 @@
-import { AudioDecodeError, ZeroVoxError } from "./errors.js";
+import { AudioDecodeError, VoxShotError } from "./errors.js";
 import type {
   AudioDecoder,
   AudioPlayer,
@@ -23,7 +23,7 @@ interface GpuNavigator {
 function requireAudioContext(): typeof AudioContext {
   const ctor = (globalThis as { AudioContext?: typeof AudioContext }).AudioContext;
   if (!ctor) {
-    throw new ZeroVoxError(
+    throw new VoxShotError(
       "The Web Audio API is not available in this environment. Provide a custom platform instead.",
     );
   }
@@ -105,7 +105,7 @@ export class BrowserGpuProbe implements GpuProbe {
 }
 
 /** Name under which the streaming processor registers itself. */
-const STREAM_PROCESSOR_NAME = "zerovox-stream-player";
+const STREAM_PROCESSOR_NAME = "voxshot-stream-player";
 
 /**
  * The AudioWorklet processor, shipped as source text and loaded through a
@@ -120,7 +120,7 @@ const STREAM_PROCESSOR_NAME = "zerovox-stream-player";
 const STREAM_PROCESSOR_CODE = `
 const LOW_WATER_SECONDS = 0.2;
 
-class ZeroVoxStreamPlayer extends AudioWorkletProcessor {
+class VoxShotStreamPlayer extends AudioWorkletProcessor {
   constructor() {
     super();
     this.chunks = [];
@@ -188,7 +188,7 @@ class ZeroVoxStreamPlayer extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor("${STREAM_PROCESSOR_NAME}", ZeroVoxStreamPlayer);
+registerProcessor("${STREAM_PROCESSOR_NAME}", VoxShotStreamPlayer);
 `;
 
 let streamProcessorUrl: string | undefined;
@@ -237,7 +237,7 @@ export class BrowserStreamingAudioPlayer implements StreamingAudioPlayer {
     const context = new ContextCtor({ sampleRate }) as unknown as StreamingContextLike;
     if (!NodeCtor || !context.audioWorklet) {
       await context.close();
-      throw new ZeroVoxError(
+      throw new VoxShotError(
         "AudioWorklet is not available in this environment. Provide a custom streaming player instead.",
       );
     }

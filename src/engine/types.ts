@@ -25,7 +25,7 @@ export interface EmbedResult {
 }
 
 /**
- * The seam between the ZeroVox facade and an actual model.
+ * The seam between the VoxShot facade and an actual model.
  *
  * Swapping in an ONNX Runtime Web backend means implementing this interface —
  * nothing above it needs to change.

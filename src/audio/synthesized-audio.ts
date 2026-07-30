@@ -1,4 +1,4 @@
-import { InvalidInputError, ZeroVoxError } from "../errors.js";
+import { InvalidInputError, VoxShotError } from "../errors.js";
 import type { AudioPlayer } from "../platform.js";
 import { encodeWav } from "./wav.js";
 
@@ -39,14 +39,14 @@ export class SynthesizedAudio {
   /** Play the signal, resolving once playback has finished. */
   async play(): Promise<void> {
     if (!this.#player) {
-      throw new ZeroVoxError(
-        "This audio has no player attached. Create it through ZeroVox, or pass a player explicitly.",
+      throw new VoxShotError(
+        "This audio has no player attached. Create it through VoxShot, or pass a player explicitly.",
       );
     }
     await this.#player.play({ samples: this.samples, sampleRate: this.sampleRate });
   }
 
-  /** Join consecutive chunks — typically the output of `ZeroVox.stream()`. */
+  /** Join consecutive chunks — typically the output of `VoxShot.stream()`. */
   static concat(chunks: readonly SynthesizedAudio[]): SynthesizedAudio {
     const first = chunks[0];
     if (!first) {

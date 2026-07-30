@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   resolve: {
-    // zerovox is linked via file:../.., so its lazy
+    // voxshot is linked via file:../.., so its lazy
     // import("@huggingface/transformers") would otherwise resolve from the
     // repository root (where the optional peer is not installed) and end up
     // as an empty stub. Dedupe forces resolution from this example's

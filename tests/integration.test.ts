@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PcmAudio, Platform } from "../src/platform.js";
 import { MemoryVoiceStore } from "../src/voice/memory-store.js";
-import { ZeroVox } from "../src/zerovox.js";
+import { VoxShot } from "../src/voxshot.js";
 
 /** Reference audio: a 180 Hz tone with a little breathy jitter. */
 function referenceAudio(sampleRate = 16_000, seconds = 1): PcmAudio {
@@ -30,14 +30,14 @@ function testPlatform(played: PcmAudio[]): Platform {
 
 describe("end to end with the built in engine", () => {
   const createInstance = (played: PcmAudio[] = []) =>
-    ZeroVox.create({ platform: testPlatform(played), voiceStore: new MemoryVoiceStore() });
+    VoxShot.create({ platform: testPlatform(played), voiceStore: new MemoryVoiceStore() });
 
   it("clones a voice, speaks and plays the result", async () => {
     const played: PcmAudio[] = [];
     const tts = await createInstance(played);
 
     await tts.cloneVoice(referenceAudio());
-    const audio = await tts.speak("Hello there. This is ZeroVox.");
+    const audio = await tts.speak("Hello there. This is VoxShot.");
 
     expect(audio.duration).toBeGreaterThan(0.5);
     expect(audio.sampleRate).toBe(24_000);
@@ -78,10 +78,10 @@ describe("end to end with the built in engine", () => {
     await tts.cloneVoice(referenceAudio());
 
     const streamed: number[] = [];
-    for await (const chunk of tts.stream("Hello there. This is ZeroVox.")) {
+    for await (const chunk of tts.stream("Hello there. This is VoxShot.")) {
       streamed.push(...chunk.samples);
     }
-    const spoken = await tts.speak("Hello there. This is ZeroVox.");
+    const spoken = await tts.speak("Hello there. This is VoxShot.");
 
     expect(streamed).toEqual(Array.from(spoken.samples));
 
@@ -92,13 +92,13 @@ describe("end to end with the built in engine", () => {
     const store = new MemoryVoiceStore();
     const platform = testPlatform([]);
 
-    const first = await ZeroVox.create({ platform, voiceStore: store });
+    const first = await VoxShot.create({ platform, voiceStore: store });
     await first.cloneVoice(referenceAudio());
     await first.saveVoice("alice");
     const original = await first.speak("Hello.");
     await first.dispose();
 
-    const second = await ZeroVox.create({ platform, voiceStore: store });
+    const second = await VoxShot.create({ platform, voiceStore: store });
     await second.useVoice("alice");
     const restored = await second.speak("Hello.");
     await second.dispose();

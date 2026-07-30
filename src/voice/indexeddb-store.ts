@@ -1,15 +1,15 @@
-import { ZeroVoxError } from "../errors.js";
+import { VoxShotError } from "../errors.js";
 import type { VoiceEmbedding, VoiceStore, VoiceTensor } from "./types.js";
 import { assertEmbedding, assertVoiceName, cloneEmbedding } from "./validate.js";
 
-const DEFAULT_DATABASE_NAME = "zerovox";
+const DEFAULT_DATABASE_NAME = "voxshot";
 const OBJECT_STORE_NAME = "voices";
 
 export interface IndexedDbVoiceStoreOptions {
   /**
    * Database name, so applications can isolate voices per user or profile.
    *
-   * @defaultValue "zerovox"
+   * @defaultValue "voxshot"
    */
   databaseName?: string;
 }
@@ -117,7 +117,7 @@ export class IndexedDbVoiceStore implements VoiceStore {
       return this.#database;
     }
     if (!IndexedDbVoiceStore.isSupported()) {
-      throw new ZeroVoxError(
+      throw new VoxShotError(
         "IndexedDB is not available in this environment. Use MemoryVoiceStore instead.",
       );
     }
@@ -137,7 +137,7 @@ export class IndexedDbVoiceStore implements VoiceStore {
   }
 }
 
-function wrap(cause: unknown, message: string): ZeroVoxError {
+function wrap(cause: unknown, message: string): VoxShotError {
   const detail = cause instanceof Error ? `: ${cause.message}` : "";
-  return new ZeroVoxError(`${message}${detail}`, "UNKNOWN", { cause });
+  return new VoxShotError(`${message}${detail}`, "UNKNOWN", { cause });
 }

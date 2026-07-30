@@ -1,5 +1,5 @@
 {
-  "name": "zerovox-example-browser",
+  "name": "voxshot-example-browser",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "zerovox": "file:../.."
+    "voxshot": "file:../.."
   },
   "devDependencies": {
     "typescript": "^5.7.2",

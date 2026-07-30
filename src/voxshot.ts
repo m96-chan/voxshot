@@ -13,7 +13,7 @@ import {
   InvalidInputError,
   NoVoiceError,
   VoiceNotFoundError,
-  ZeroVoxError,
+  VoxShotError,
 } from "./errors.js";
 import type { PcmAudio, Platform } from "./platform.js";
 import { normalizeText } from "./text/normalize.js";
@@ -31,7 +31,7 @@ const REFERENCE_PEAK = 0.95;
 /** Anything that can be turned into reference audio. */
 export type VoiceSource = ArrayBuffer | ArrayBufferView | Blob | PcmAudio;
 
-export interface ZeroVoxOptions {
+export interface VoxShotOptions {
   /**
    * Which backend to run inference on.
    *
@@ -94,16 +94,16 @@ export interface PlayOptions extends SpeakOptions {
 }
 
 /**
- * The ZeroVox facade: clone a voice, then speak with it.
+ * The VoxShot facade: clone a voice, then speak with it.
  *
  * ```ts
- * const tts = await ZeroVox.create();
+ * const tts = await VoxShot.create();
  * await tts.cloneVoice(referenceAudioFile);
  * const audio = await tts.speak("Hello!");
  * await audio.play();
  * ```
  */
-export class ZeroVox {
+export class VoxShot {
   readonly #engine: SynthesisEngine;
   readonly #platform: Platform;
   readonly #store: VoiceStore;
@@ -137,7 +137,7 @@ export class ZeroVox {
   }
 
   /** Resolve the device, load the engine and return a ready instance. */
-  static async create(options: ZeroVoxOptions = {}): Promise<ZeroVox> {
+  static async create(options: VoxShotOptions = {}): Promise<VoxShot> {
     const model = options.model ?? "default";
     if (!KNOWN_MODELS.has(model)) {
       throw new InvalidInputError(
@@ -161,7 +161,7 @@ export class ZeroVox {
     const device = await resolveDevice(options.device, platform.gpu);
     await engine.load(device);
 
-    return new ZeroVox(
+    return new VoxShot(
       device,
       engine,
       platform,
@@ -271,7 +271,7 @@ export class ZeroVox {
     }
     const streaming = this.#platform.streamingPlayer;
     if (!streaming) {
-      throw new ZeroVoxError(
+      throw new VoxShotError(
         "This platform has no streaming audio player. Provide platform.streamingPlayer, or use speak() instead.",
       );
     }

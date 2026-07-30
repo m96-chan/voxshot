@@ -2,12 +2,12 @@ import "fake-indexeddb/auto";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ZeroVoxError } from "../../src/errors.js";
+import { VoxShotError } from "../../src/errors.js";
 import { IndexedDbVoiceStore } from "../../src/voice/indexeddb-store.js";
 import { describeVoiceStoreContract, embedding } from "./store-contract.js";
 
 let counter = 0;
-const uniqueDatabaseName = (): string => `zerovox-test-${(counter += 1)}`;
+const uniqueDatabaseName = (): string => `voxshot-test-${(counter += 1)}`;
 
 describeVoiceStoreContract(
   "IndexedDbVoiceStore",
@@ -60,12 +60,12 @@ describe("IndexedDbVoiceStore", () => {
     expect(IndexedDbVoiceStore.isSupported()).toBe(false);
   });
 
-  it("throws a ZeroVoxError when IndexedDB is unavailable", async () => {
+  it("throws a VoxShotError when IndexedDB is unavailable", async () => {
     vi.stubGlobal("indexedDB", undefined);
 
     await expect(
       new IndexedDbVoiceStore({ databaseName: uniqueDatabaseName() }).list(),
-    ).rejects.toBeInstanceOf(ZeroVoxError);
+    ).rejects.toBeInstanceOf(VoxShotError);
   });
 
   it("treats a null indexedDB as unsupported", () => {
@@ -74,7 +74,7 @@ describe("IndexedDbVoiceStore", () => {
     expect(IndexedDbVoiceStore.isSupported()).toBe(false);
   });
 
-  it("surfaces a failing request as a ZeroVoxError", async () => {
+  it("surfaces a failing request as a VoxShotError", async () => {
     const failingRequest: Record<string, unknown> = { error: new Error("read failed") };
     const database = {
       transaction: () => ({
@@ -97,10 +97,10 @@ describe("IndexedDbVoiceStore", () => {
 
     await expect(
       new IndexedDbVoiceStore({ databaseName: uniqueDatabaseName() }).list(),
-    ).rejects.toBeInstanceOf(ZeroVoxError);
+    ).rejects.toBeInstanceOf(VoxShotError);
   });
 
-  it("surfaces an open failure as a ZeroVoxError", async () => {
+  it("surfaces an open failure as a VoxShotError", async () => {
     vi.stubGlobal("indexedDB", {
       open: () => {
         const request: Record<string, unknown> = { error: new Error("quota"), result: null };
@@ -111,6 +111,6 @@ describe("IndexedDbVoiceStore", () => {
 
     await expect(
       new IndexedDbVoiceStore({ databaseName: uniqueDatabaseName() }).list(),
-    ).rejects.toBeInstanceOf(ZeroVoxError);
+    ).rejects.toBeInstanceOf(VoxShotError);
   });
 });

@@ -1,7 +1,7 @@
 /**
- * Machine readable identifiers attached to every {@link ZeroVoxError}.
+ * Machine readable identifiers attached to every {@link VoxShotError}.
  */
-export type ZeroVoxErrorCode =
+export type VoxShotErrorCode =
   | "UNKNOWN"
   | "DEVICE_UNAVAILABLE"
   | "NO_VOICE"
@@ -11,23 +11,23 @@ export type ZeroVoxErrorCode =
   | "DISPOSED";
 
 /**
- * Base class for every error thrown by ZeroVox.
+ * Base class for every error thrown by VoxShot.
  *
- * Consumers can branch on {@link ZeroVoxError.code} instead of matching
+ * Consumers can branch on {@link VoxShotError.code} instead of matching
  * message strings, which keeps error handling stable across releases.
  */
-export class ZeroVoxError extends Error {
-  readonly code: ZeroVoxErrorCode;
+export class VoxShotError extends Error {
+  readonly code: VoxShotErrorCode;
 
-  constructor(message: string, code: ZeroVoxErrorCode = "UNKNOWN", options?: ErrorOptions) {
+  constructor(message: string, code: VoxShotErrorCode = "UNKNOWN", options?: ErrorOptions) {
     super(message, options);
-    this.name = "ZeroVoxError";
+    this.name = "VoxShotError";
     this.code = code;
   }
 }
 
 /** The requested inference device is not available in this environment. */
-export class DeviceUnavailableError extends ZeroVoxError {
+export class DeviceUnavailableError extends VoxShotError {
   readonly device: string;
 
   constructor(device: string, options?: ErrorOptions) {
@@ -38,7 +38,7 @@ export class DeviceUnavailableError extends ZeroVoxError {
 }
 
 /** Synthesis was requested before a voice was cloned or selected. */
-export class NoVoiceError extends ZeroVoxError {
+export class NoVoiceError extends VoxShotError {
   constructor(options?: ErrorOptions) {
     super("No voice is active. Call cloneVoice() or useVoice() first.", "NO_VOICE", options);
     this.name = "NoVoiceError";
@@ -46,7 +46,7 @@ export class NoVoiceError extends ZeroVoxError {
 }
 
 /** A saved voice was requested but does not exist in the voice store. */
-export class VoiceNotFoundError extends ZeroVoxError {
+export class VoiceNotFoundError extends VoxShotError {
   readonly voiceName: string;
 
   constructor(voiceName: string, options?: ErrorOptions) {
@@ -57,7 +57,7 @@ export class VoiceNotFoundError extends ZeroVoxError {
 }
 
 /** An argument did not satisfy the documented contract. */
-export class InvalidInputError extends ZeroVoxError {
+export class InvalidInputError extends VoxShotError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, "INVALID_INPUT", options);
     this.name = "InvalidInputError";
@@ -65,22 +65,22 @@ export class InvalidInputError extends ZeroVoxError {
 }
 
 /** Reference audio could not be decoded into PCM samples. */
-export class AudioDecodeError extends ZeroVoxError {
+export class AudioDecodeError extends VoxShotError {
   constructor(message: string, options?: ErrorOptions) {
     super(`Failed to decode audio: ${message}`, "AUDIO_DECODE_FAILED", options);
     this.name = "AudioDecodeError";
   }
 }
 
-/** The instance was used after {@link ZeroVox.dispose} was called. */
-export class DisposedError extends ZeroVoxError {
+/** The instance was used after {@link VoxShot.dispose} was called. */
+export class DisposedError extends VoxShotError {
   constructor(options?: ErrorOptions) {
-    super("This ZeroVox instance has been disposed.", "DISPOSED", options);
+    super("This VoxShot instance has been disposed.", "DISPOSED", options);
     this.name = "DisposedError";
   }
 }
 
-/** Type guard narrowing an unknown thrown value to a {@link ZeroVoxError}. */
-export function isZeroVoxError(value: unknown): value is ZeroVoxError {
-  return value instanceof ZeroVoxError;
+/** Type guard narrowing an unknown thrown value to a {@link VoxShotError}. */
+export function isVoxShotError(value: unknown): value is VoxShotError {
+  return value instanceof VoxShotError;
 }

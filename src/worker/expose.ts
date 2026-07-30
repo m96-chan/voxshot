@@ -1,5 +1,5 @@
 import type { SynthesisEngine } from "../engine/types.js";
-import { ZeroVoxError, isZeroVoxError } from "../errors.js";
+import { VoxShotError, isVoxShotError } from "../errors.js";
 import type {
   EngineDescription,
   RequestMessage,
@@ -16,7 +16,7 @@ import { PROTOCOL_VERSION, isRequestMessage } from "./protocol.js";
  *
  * ```ts
  * // tts.worker.ts
- * import { ChatterboxEngine, exposeEngine } from "zerovox";
+ * import { ChatterboxEngine, exposeEngine } from "voxshot";
  *
  * const engine = new ChatterboxEngine({
  *   onProgress: (progress) => emitProgress(progress),
@@ -32,7 +32,7 @@ export function exposeEngine(
   endpoint: RpcEndpoint,
 ): (() => void) & { emitProgress: (progress: Record<string, unknown>) => void } {
   const emitProgress = (progress: Record<string, unknown>): void => {
-    endpoint.postMessage({ zerovox: PROTOCOL_VERSION, progress });
+    endpoint.postMessage({ voxshot: PROTOCOL_VERSION, progress });
   };
 
   const listener = (event: { data: unknown }): void => {
@@ -99,12 +99,12 @@ async function handle(
       }
       default: {
         const { method } = request as { method: string };
-        throw new ZeroVoxError(`Unknown worker method "${method}".`);
+        throw new VoxShotError(`Unknown worker method "${method}".`);
       }
     }
   } catch (cause) {
     const message: ResponseMessage = {
-      zerovox: PROTOCOL_VERSION,
+      voxshot: PROTOCOL_VERSION,
       id: request.id,
       ok: false,
       error: serializeError(cause),
@@ -119,12 +119,12 @@ function reply(
   result: unknown,
   transfer?: Transferable[],
 ): void {
-  const message: ResponseMessage = { zerovox: PROTOCOL_VERSION, id, ok: true, result };
+  const message: ResponseMessage = { voxshot: PROTOCOL_VERSION, id, ok: true, result };
   endpoint.postMessage(message, transfer);
 }
 
 function serializeError(cause: unknown): SerializedError {
-  if (isZeroVoxError(cause)) {
+  if (isVoxShotError(cause)) {
     return { name: cause.name, message: cause.message, code: cause.code };
   }
   if (cause instanceof Error) {

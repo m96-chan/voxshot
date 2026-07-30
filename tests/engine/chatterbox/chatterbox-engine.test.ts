@@ -5,7 +5,7 @@ import type {
   TensorLike,
   TransformersModule,
 } from "../../../src/engine/chatterbox/transformers-module.js";
-import { InvalidInputError, ZeroVoxError } from "../../../src/errors.js";
+import { InvalidInputError, VoxShotError } from "../../../src/errors.js";
 import type { VoiceEmbedding } from "../../../src/voice/types.js";
 import { toArray } from "../../helpers/tensor.js";
 
@@ -247,7 +247,7 @@ describe("ChatterboxEngine", () => {
     it("throws when every plan fails", async () => {
       harness.failOn = () => true;
 
-      await expect(engine.load("wasm")).rejects.toBeInstanceOf(ZeroVoxError);
+      await expect(engine.load("wasm")).rejects.toBeInstanceOf(VoxShotError);
     });
 
     it("reports load progress", async () => {
@@ -311,7 +311,7 @@ describe("ChatterboxEngine", () => {
     });
 
     it("requires the engine to be loaded", async () => {
-      await expect(createEngine().embed(audio(1_000))).rejects.toBeInstanceOf(ZeroVoxError);
+      await expect(createEngine().embed(audio(1_000))).rejects.toBeInstanceOf(VoxShotError);
     });
 
     it("fails clearly when the speech encoder omits a tensor", async () => {
@@ -436,7 +436,7 @@ describe("ChatterboxEngine", () => {
     it("requires the engine to be loaded", async () => {
       await expect(
         createEngine().synthesize({ text: "hi", voice, speed: 1 }),
-      ).rejects.toBeInstanceOf(ZeroVoxError);
+      ).rejects.toBeInstanceOf(VoxShotError);
     });
   });
 

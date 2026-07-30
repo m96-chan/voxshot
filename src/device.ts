@@ -4,7 +4,7 @@ import type { GpuProbe } from "./platform.js";
 /** What the caller asks for. */
 export type DevicePreference = "auto" | "webgpu" | "wasm";
 
-/** What ZeroVox actually runs on after probing the environment. */
+/** What VoxShot actually runs on after probing the environment. */
 export type ResolvedDevice = "webgpu" | "wasm";
 
 /**

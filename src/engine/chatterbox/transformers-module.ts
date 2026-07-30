@@ -1,5 +1,5 @@
 /**
- * The slice of `@huggingface/transformers` that ZeroVox depends on.
+ * The slice of `@huggingface/transformers` that VoxShot depends on.
  *
  * Declaring it structurally keeps the package an *optional* peer dependency:
  * consumers who bring their own engine never have to install it, and tests can

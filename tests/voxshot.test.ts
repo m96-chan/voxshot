@@ -13,7 +13,7 @@ import type { AudioPlayer, DecodedAudio, PcmAudio, Platform } from "../src/platf
 import { MemoryVoiceStore } from "../src/voice/memory-store.js";
 import type { VoiceTensor } from "../src/voice/types.js";
 import { toArray } from "./helpers/tensor.js";
-import { ZeroVox } from "../src/zerovox.js";
+import { VoxShot } from "../src/voxshot.js";
 
 /** Engine double that records what it was asked to do. */
 class FakeEngine implements SynthesisEngine {
@@ -79,7 +79,7 @@ function createHarness(): Harness {
   return { engine: new FakeEngine(), platform, player, decoded, gpuAvailable };
 }
 
-describe("ZeroVox.create", () => {
+describe("VoxShot.create", () => {
   let harness: Harness;
 
   beforeEach(() => {
@@ -87,7 +87,7 @@ describe("ZeroVox.create", () => {
   });
 
   const create = (overrides: Record<string, unknown> = {}) =>
-    ZeroVox.create({
+    VoxShot.create({
       engine: harness.engine,
       platform: harness.platform,
       voiceStore: new MemoryVoiceStore(),
@@ -149,19 +149,19 @@ describe("ZeroVox.create", () => {
   });
 
   it("accepts the default model name", async () => {
-    await expect(create({ model: "default" })).resolves.toBeInstanceOf(ZeroVox);
+    await expect(create({ model: "default" })).resolves.toBeInstanceOf(VoxShot);
   });
 });
 
-describe("ZeroVox", () => {
+describe("VoxShot", () => {
   let harness: Harness;
-  let tts: ZeroVox;
+  let tts: VoxShot;
   let store: MemoryVoiceStore;
 
   beforeEach(async () => {
     harness = createHarness();
     store = new MemoryVoiceStore();
-    tts = await ZeroVox.create({
+    tts = await VoxShot.create({
       engine: harness.engine,
       platform: harness.platform,
       voiceStore: store,
@@ -348,7 +348,7 @@ describe("ZeroVox", () => {
     });
 
     it("requires an active voice", async () => {
-      const fresh = await ZeroVox.create({
+      const fresh = await VoxShot.create({
         engine: new FakeEngine(),
         platform: harness.platform,
         voiceStore: new MemoryVoiceStore(),
@@ -381,7 +381,7 @@ describe("ZeroVox", () => {
       await tts.saveVoice("alice");
       const saved = tts.currentVoice;
 
-      const other = await ZeroVox.create({
+      const other = await VoxShot.create({
         engine: harness.engine,
         platform: harness.platform,
         voiceStore: store,
@@ -444,9 +444,9 @@ describe("ZeroVox", () => {
   });
 });
 
-describe("ZeroVox defaults", () => {
+describe("VoxShot defaults", () => {
   it("falls back to the built in engine, store and platform", async () => {
-    const tts = await ZeroVox.create({ device: "wasm" });
+    const tts = await VoxShot.create({ device: "wasm" });
 
     expect(tts.sampleRate).toBe(24_000);
     expect(await tts.listVoices()).toEqual([]);
@@ -483,7 +483,7 @@ class AutoStreamingPlayback {
   }
 }
 
-describe("ZeroVox.play", () => {
+describe("VoxShot.play", () => {
   let harness: Harness;
   let playback: AutoStreamingPlayback;
   let openedAt: number[];
@@ -501,7 +501,7 @@ describe("ZeroVox.play", () => {
   });
 
   const create = (overrides: Record<string, unknown> = {}) =>
-    ZeroVox.create({
+    VoxShot.create({
       engine: harness.engine,
       platform: harness.platform,
       voiceStore: new MemoryVoiceStore(),
@@ -575,7 +575,7 @@ describe("ZeroVox.play", () => {
   });
 });
 
-describe("ZeroVox synthesis cache", () => {
+describe("VoxShot synthesis cache", () => {
   let harness: Harness;
 
   beforeEach(() => {
@@ -583,7 +583,7 @@ describe("ZeroVox synthesis cache", () => {
   });
 
   const createWithVoice = async (overrides: Record<string, unknown> = {}) => {
-    const tts = await ZeroVox.create({
+    const tts = await VoxShot.create({
       engine: harness.engine,
       platform: harness.platform,
       voiceStore: new MemoryVoiceStore(),

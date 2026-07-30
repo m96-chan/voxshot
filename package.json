@@ -1,5 +1,5 @@
 {
-  "name": "zerovox",
+  "name": "voxshot",
   "version": "0.1.0",
   "description": "Browser-first Zero-Shot Text-to-Speech for JavaScript and TypeScript",
   "type": "module",
@@ -26,11 +26,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/m96-chan/zerovox.git"
+    "url": "git+https://github.com/m96-chan/voxshot.git"
   },
-  "homepage": "https://github.com/m96-chan/zerovox#readme",
+  "homepage": "https://github.com/m96-chan/voxshot#readme",
   "bugs": {
-    "url": "https://github.com/m96-chan/zerovox/issues"
+    "url": "https://github.com/m96-chan/voxshot/issues"
   },
   "keywords": [
     "tts",

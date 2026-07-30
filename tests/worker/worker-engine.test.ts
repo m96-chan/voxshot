@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SynthesisEngine, SynthesisRequest } from "../../src/engine/types.js";
-import { InvalidInputError, NoVoiceError, ZeroVoxError } from "../../src/errors.js";
+import { InvalidInputError, NoVoiceError, VoxShotError } from "../../src/errors.js";
 import type { PcmAudio } from "../../src/platform.js";
 import type { VoiceEmbedding } from "../../src/voice/types.js";
 import { exposeEngine } from "../../src/worker/expose.js";
@@ -178,14 +178,14 @@ describe("WorkerSynthesisEngine", () => {
 
     const failure = engine.embed({ samples: new Float32Array(4), sampleRate: 16_000 });
 
-    await expect(failure).rejects.toBeInstanceOf(ZeroVoxError);
+    await expect(failure).rejects.toBeInstanceOf(VoxShotError);
     await expect(failure).rejects.toMatchObject({
       code: "INVALID_INPUT",
       message: "bad reference audio",
     });
   });
 
-  it("propagates a plain error as an unknown ZeroVoxError", async () => {
+  it("propagates a plain error as an unknown VoxShotError", async () => {
     const { engine, worker } = wire();
     await engine.load("wasm");
     worker.failure = new Error("out of memory");
@@ -226,7 +226,7 @@ describe("WorkerSynthesisEngine", () => {
     const channel = new MessageChannel();
     const engine = new WorkerSynthesisEngine(channel.port1);
 
-    channel.port2.postMessage({ zerovox: 1, id: 999, ok: true, result: null });
+    channel.port2.postMessage({ voxshot: 1, id: 999, ok: true, result: null });
     channel.port2.postMessage("not a protocol message");
     await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -245,7 +245,7 @@ describe("WorkerSynthesisEngine", () => {
 
     const stalled = engine.synthesize({ text: "hi", voice, speed: 1 });
     engine.disconnect();
-    await expect(stalled).rejects.toBeInstanceOf(ZeroVoxError);
+    await expect(stalled).rejects.toBeInstanceOf(VoxShotError);
   });
 
   it("rejects pending calls when the connection is dropped", async () => {
@@ -255,14 +255,14 @@ describe("WorkerSynthesisEngine", () => {
 
     engine.disconnect();
 
-    await expect(pending).rejects.toBeInstanceOf(ZeroVoxError);
+    await expect(pending).rejects.toBeInstanceOf(VoxShotError);
   });
 
   it("refuses to send after disconnecting", async () => {
     const { engine } = wire();
     engine.disconnect();
 
-    await expect(engine.load("wasm")).rejects.toBeInstanceOf(ZeroVoxError);
+    await expect(engine.load("wasm")).rejects.toBeInstanceOf(VoxShotError);
   });
 });
 
@@ -294,7 +294,7 @@ describe("exposeEngine", () => {
     );
     channel.port1.start();
 
-    channel.port1.postMessage({ zerovox: 1, id: 7, method: "teleport" });
+    channel.port1.postMessage({ voxshot: 1, id: 7, method: "teleport" });
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(responses[0]).toMatchObject({ id: 7, ok: false });
@@ -310,7 +310,7 @@ describe("exposeEngine", () => {
     stop();
 
     const engine = new WorkerSynthesisEngine(channel.port1, { timeoutMs: 50 });
-    await expect(engine.load("wasm")).rejects.toBeInstanceOf(ZeroVoxError);
+    await expect(engine.load("wasm")).rejects.toBeInstanceOf(VoxShotError);
 
     engine.disconnect();
     channel.port1.close();
@@ -318,7 +318,7 @@ describe("exposeEngine", () => {
   });
 });
 
-describe("worker errors that are not ZeroVoxError instances", () => {
+describe("worker errors that are not VoxShotError instances", () => {
   it("keeps the NoVoiceError code intact", async () => {
     const { engine, worker } = wire();
     await engine.load("wasm");
