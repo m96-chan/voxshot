@@ -20,7 +20,11 @@ export {
   CHATTERBOX_SAMPLE_RATE,
   ChatterboxEngine,
 } from "./engine/chatterbox/chatterbox-engine.js";
-export type { ChatterboxEngineOptions } from "./engine/chatterbox/chatterbox-engine.js";
+export type {
+  ChatterboxEngineOptions,
+  ChatterboxLifecycleEvent,
+  ChatterboxLoadEvent,
+} from "./engine/chatterbox/chatterbox-engine.js";
 export { buildLoadPlans } from "./engine/chatterbox/dtype-plan.js";
 export type {
   ChatterboxSession,

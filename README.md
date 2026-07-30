@@ -244,6 +244,33 @@ await (await tts.speak("Cloned from a few seconds of reference audio.")).play();
   speech needs the multilingual checkpoint —
   [#25](https://github.com/m96-chan/voxshot/issues/25).
 
+#### Following what the load is doing
+
+`onProgress` receives the file-level progress forwarded from Transformers.js and,
+alongside it, the engine's own milestones. The engine tries `q4f16`, then `q4`,
+then WASM, and these events are the only way to tell which plan actually won —
+or that a fallback happened at all.
+
+```ts
+new ChatterboxEngine({
+  onProgress: (event) => {
+    switch (event.status) {
+      case "load-start":    return show(`Trying ${event.plan}…`);
+      case "load-fallback": return warn(`${event.plan} failed: ${event.reason}`);
+      case "load-ready":    return show(`Running on ${event.plan}`);
+      default:              return updateFileProgress(event);   // "progress", "done", …
+    }
+  },
+});
+```
+
+`plan` reads as `device/dtype`, e.g. `webgpu/q4f16`. There is deliberately **no**
+"downloads finished, compiling now" event: detecting that transition needs a
+trustworthy count of the files a load will touch, and Transformers.js cannot
+supply one for this model
+([#45](https://github.com/m96-chan/voxshot/issues/45)). Inferring it from silence
+would be a guess dressed up as a fact, so the library does not pretend to know.
+
 #### Handling a stalled load
 
 The first load transfers roughly 1.5 GB. A transfer that hangs does not reject

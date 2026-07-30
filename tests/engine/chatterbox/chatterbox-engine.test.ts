@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CHATTERBOX_SAMPLE_RATE, ChatterboxEngine } from "../../../src/engine/chatterbox/chatterbox-engine.js";
 import type {
+  ChatterboxLifecycleEvent,
+  ChatterboxLoadEvent,
+} from "../../../src/engine/chatterbox/chatterbox-engine.js";
+import type {
   TensorLike,
   TransformersModule,
 } from "../../../src/engine/chatterbox/transformers-module.js";
@@ -282,6 +286,103 @@ describe("ChatterboxEngine", () => {
       });
 
       await expect(broken.load("wasm")).rejects.toThrow(/@huggingface\/transformers/);
+    });
+
+    /**
+     * #44: the winning plan used to be invisible. `buildLoadPlans` silently
+     * degrades q4f16 -> q4 -> WASM, and a consumer had no way to tell which
+     * plan won, or that a fallback had happened at all.
+     */
+    describe("lifecycle events", () => {
+      const capture = () => {
+        const events: ChatterboxLoadEvent[] = [];
+        return { events, onProgress: (event: ChatterboxLoadEvent) => events.push(event) };
+      };
+
+      const isLifecycle = (event: ChatterboxLoadEvent): event is ChatterboxLifecycleEvent =>
+        event.status.startsWith("load-");
+
+      const lifecycle = (events: ChatterboxLoadEvent[]) => events.filter(isLifecycle);
+
+      it("announces the plan before each attempt", async () => {
+        const { events, onProgress } = capture();
+
+        await createEngine({ onProgress }).load("wasm");
+
+        expect(lifecycle(events)[0]).toMatchObject({
+          status: "load-start",
+          plan: "wasm/q4",
+          device: "wasm",
+          dtype: "q4",
+        });
+      });
+
+      it("reports the winning plan when the model is up", async () => {
+        const { events, onProgress } = capture();
+
+        await createEngine({ onProgress }).load("webgpu");
+
+        expect(lifecycle(events).at(-1)).toMatchObject({
+          status: "load-ready",
+          plan: "webgpu/q4f16",
+          device: "webgpu",
+          dtype: "q4f16",
+        });
+      });
+
+      it("surfaces each abandoned plan with the reason it failed", async () => {
+        harness.failOn = (device) => device === "webgpu";
+        const { events, onProgress } = capture();
+
+        await createEngine({ onProgress }).load("webgpu");
+
+        expect(lifecycle(events).map((event) => [event.status, event.plan])).toEqual([
+          ["load-start", "webgpu/q4f16"],
+          ["load-fallback", "webgpu/q4f16"],
+          ["load-start", "webgpu/q4"],
+          ["load-fallback", "webgpu/q4"],
+          ["load-start", "wasm/q4"],
+          ["load-ready", "wasm/q4"],
+        ]);
+      });
+
+      it("explains why a plan was abandoned", async () => {
+        harness.failOn = (device) => device === "webgpu";
+        const { events, onProgress } = capture();
+
+        await createEngine({ onProgress }).load("webgpu");
+
+        const fallback = lifecycle(events).find((event) => event.status === "load-fallback");
+        expect(fallback?.reason).toContain("no webgpu support");
+      });
+
+      it("never claims readiness when every plan fails", async () => {
+        harness.failOn = () => true;
+        const { events, onProgress } = capture();
+
+        await expect(createEngine({ onProgress }).load("wasm")).rejects.toBeInstanceOf(VoxShotError);
+
+        expect(lifecycle(events).map((event) => event.status)).toEqual([
+          "load-start",
+          "load-fallback",
+        ]);
+      });
+
+      it("keeps forwarding the library's own file progress alongside them", async () => {
+        const { events, onProgress } = capture();
+
+        await createEngine({ onProgress }).load("wasm");
+
+        expect(events.map((event) => event.status)).toEqual([
+          "load-start",
+          "progress",
+          "load-ready",
+        ]);
+      });
+
+      it("loads normally when nobody is listening", async () => {
+        await expect(createEngine().load("wasm")).resolves.toBeUndefined();
+      });
     });
 
     /**
