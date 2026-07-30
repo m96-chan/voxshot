@@ -34,6 +34,17 @@ export interface LoadProgress {
   readonly progress?: number;
 }
 
+/**
+ * A model's `config.json`, as returned by `AutoConfig.from_pretrained`.
+ *
+ * Only `architectures` is named because that is the field the engine has to
+ * repair; everything else is carried through untouched.
+ */
+export interface PretrainedConfigLike {
+  architectures?: string[];
+  [key: string]: unknown;
+}
+
 export interface FromPretrainedOptions {
   device?: string;
   dtype?: Record<string, string> | string;
@@ -65,6 +76,12 @@ export interface TransformersModule {
       modelId: string,
       options: FromPretrainedOptions,
     ): Promise<ChatterboxModelLike>;
+  };
+  readonly AutoConfig: {
+    from_pretrained(
+      modelId: string,
+      options?: FromPretrainedOptions,
+    ): Promise<PretrainedConfigLike>;
   };
   readonly AutoProcessor: {
     from_pretrained(

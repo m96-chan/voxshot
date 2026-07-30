@@ -24,7 +24,10 @@ class FakeTensor implements TensorLike {
 
 interface ModuleHarness {
   module: TransformersModule;
-  attempts: { device: string; dtype: Record<string, string> }[];
+  attempts: { device: string; dtype: Record<string, string>; config?: unknown }[];
+  /** What the repo's `config.json` contains before the engine touches it. */
+  repoConfig: Record<string, unknown>;
+  configLoads: number;
   encodeCalls: TensorLike[];
   generateCalls: Record<string, unknown>[];
   processorCalls: string[];
@@ -41,6 +44,10 @@ interface ModuleHarness {
 function createModule(): ModuleHarness {
   const harness: ModuleHarness = {
     attempts: [],
+    // Mirrors the real repo: model_type only, no architectures — which is
+    // exactly why resolve_model_type falls back (#45).
+    repoConfig: { model_type: "chatterbox", text_config: { hidden: 1 } },
+    configLoads: 0,
     encodeCalls: [],
     generateCalls: [],
     processorCalls: [],
@@ -65,7 +72,11 @@ function createModule(): ModuleHarness {
     ChatterboxModel: {
       async from_pretrained(modelId, options) {
         const dtype = options.dtype as Record<string, string>;
-        harness.attempts.push({ device: options.device as string, dtype });
+        harness.attempts.push({
+          device: options.device as string,
+          dtype,
+          config: options.config,
+        });
         harness.lastProgressCallback = options.progress_callback as
           | ((progress: Record<string, unknown>) => void)
           | undefined;
@@ -91,6 +102,12 @@ function createModule(): ModuleHarness {
             harness.disposeCalls += 1;
           },
         };
+      },
+    },
+    AutoConfig: {
+      async from_pretrained() {
+        harness.configLoads += 1;
+        return { ...harness.repoConfig };
       },
     },
     AutoProcessor: {
@@ -157,7 +174,7 @@ describe("ChatterboxEngine", () => {
     it("uses the WebGPU plan first", async () => {
       await engine.load("webgpu");
 
-      expect(harness.attempts[0]).toEqual({
+      expect(harness.attempts[0]).toMatchObject({
         device: "webgpu",
         dtype: {
           embed_tokens: "fp32",
@@ -191,7 +208,7 @@ describe("ChatterboxEngine", () => {
     it("skips f16 plans when the injected probe denies shader-f16", async () => {
       await createEngine({ supportsFp16: async () => false }).load("webgpu");
 
-      expect(harness.attempts[0]).toEqual({
+      expect(harness.attempts[0]).toMatchObject({
         device: "webgpu",
         dtype: {
           embed_tokens: "fp32",
@@ -286,6 +303,58 @@ describe("ChatterboxEngine", () => {
       });
 
       await expect(broken.load("wasm")).rejects.toThrow(/@huggingface\/transformers/);
+    });
+
+    /**
+     * #45: the repo's config.json carries `model_type: "chatterbox"` and no
+     * `architectures`, but Transformers.js registers the type under the class
+     * name `ChatterboxModel`. Its `resolve_model_type` only consults
+     * `architectures` and `model_type`, so it fell back to an encoder-only
+     * single-file layout, probed `onnx/model_quantized.onnx`, and 404'd twice.
+     */
+    describe("model architecture", () => {
+      const configOf = (attempt: { config?: unknown }) =>
+        attempt.config as { architectures?: string[]; model_type?: string } | undefined;
+
+      it("names the architecture so the model type resolves", async () => {
+        await engine.load("wasm");
+
+        expect(configOf(harness.attempts[0]!)?.architectures).toEqual(["ChatterboxModel"]);
+      });
+
+      it("keeps the rest of the repo config intact", async () => {
+        await engine.load("wasm");
+
+        expect(configOf(harness.attempts[0]!)).toMatchObject({
+          model_type: "chatterbox",
+          text_config: { hidden: 1 },
+        });
+      });
+
+      it("leaves an architecture the repo already declares alone", async () => {
+        harness.repoConfig = { model_type: "chatterbox", architectures: ["SomethingElse"] };
+
+        await engine.load("wasm");
+
+        expect(configOf(harness.attempts[0]!)?.architectures).toEqual(["SomethingElse"]);
+      });
+
+      it("replaces an empty architecture list", async () => {
+        harness.repoConfig = { model_type: "chatterbox", architectures: [] };
+
+        await engine.load("wasm");
+
+        expect(configOf(harness.attempts[0]!)?.architectures).toEqual(["ChatterboxModel"]);
+      });
+
+      it("reads the config once and reuses it across plan fallbacks", async () => {
+        harness.failOn = (device) => device === "webgpu";
+
+        await engine.load("webgpu");
+
+        expect(harness.attempts).toHaveLength(3);
+        expect(harness.configLoads).toBe(1);
+      });
     });
 
     /**
