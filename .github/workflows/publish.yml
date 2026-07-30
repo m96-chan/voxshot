@@ -1,0 +1,48 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  # Manual re-run, e.g. when a publish failed after the release was created.
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm provenance: the OIDC token proves the package was
+      # built by this workflow from this repository.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # A release tag must match the version being published, otherwise the
+      # tag and the registry disagree about what "v1.2.3" contains.
+      - name: Verify the tag matches package.json
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p 'require("./package.json").version')"
+          if [ "$tag" != "$version" ]; then
+            echo "Release tag ($tag) does not match package.json version ($version)." >&2
+            exit 1
+          fi
+
+      # prepublishOnly runs the build, so dist/ is produced here.
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

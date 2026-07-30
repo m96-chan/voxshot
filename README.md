@@ -275,6 +275,18 @@ npm run build
 A runnable browser demo (text box → synthesize → play) lives in
 [`examples/browser`](./examples/browser). See its README for setup.
 
+### Releasing
+
+CI runs typecheck, tests (90% coverage enforced) and the build on every push
+and pull request. Publishing is driven by GitHub Releases:
+
+1. Bump the version and land it on `main`: `npm version <patch|minor|major>`
+2. Create a GitHub Release whose tag is `v<version>` (matching `package.json`;
+   the workflow fails the publish if they disagree)
+3. The `Publish` workflow re-runs the checks and publishes to npm with
+   [provenance](https://docs.npmjs.com/generating-provenance-statements),
+   using the repository's `NPM_TOKEN` secret
+
 Contribution rules — TDD, coverage, and ticket-driven development — are in
 [CLAUDE.md](./CLAUDE.md).
 
