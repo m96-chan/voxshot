@@ -177,6 +177,7 @@ async function createInstance(kind: EngineKind): Promise<ZeroVox> {
   if (kind === "chatterbox") {
     log("Preparing the Chatterbox model… (first run downloads ~1.5 GB)");
     await prewarmModelCache();
+    log("Initializing the model (loading weights, compiling kernels)… this can take a minute or two.");
     // Inference runs in a Web Worker so the page stays responsive during
     // model load, cloning and synthesis.
     const worker = new Worker(new URL("./tts.worker.ts", import.meta.url), { type: "module" });
@@ -198,7 +199,9 @@ async function createInstance(kind: EngineKind): Promise<ZeroVox> {
         "Local multilingual model not found (or the download is still running). Run: bash scripts/download-multilingual.sh (in examples/browser) to completion, then reload.",
       );
     }
-    log("Loading the local Chatterbox Multilingual model…");
+    log(
+      "Loading the local Chatterbox Multilingual model (loading weights, compiling kernels)… this can take a minute or two.",
+    );
     const worker = new Worker(new URL("./tts-multilingual.worker.ts", import.meta.url), {
       type: "module",
     });
