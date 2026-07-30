@@ -250,6 +250,11 @@ async function speak(): Promise<void> {
     }
     text = reading;
   }
+  if (kind === "chatterbox" && /[^\x00-\x7F]/.test(text)) {
+    log(
+      "⚠ The English Chatterbox model cannot speak Japanese: kana map to unknown tokens and the output will be (near) silent. Use the Placeholder engine to hear the text pipeline — real Japanese speech is tracked in issue #25.",
+    );
+  }
 
   const tts = await getInstance(kind);
   if (!(await ensureVoice(kind, tts))) {
