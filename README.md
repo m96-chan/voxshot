@@ -10,19 +10,24 @@ No API keys.
 
 Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 
-> **Status:** 🚧 Early development (Proof of Concept)
+[![npm](https://img.shields.io/npm/v/zerovox)](https://www.npmjs.com/package/zerovox)
+[![CI](https://github.com/m96-chan/zerovox/actions/workflows/ci.yml/badge.svg)](https://github.com/m96-chan/zerovox/actions/workflows/ci.yml)
 
-> **What works today:** the full browser pipeline — reference audio decoding,
-> voice extraction, voice persistence, text chunking, streaming synthesis and
-> playback — plus a real zero-shot engine: **Chatterbox ONNX via
-> Transformers.js v4** (English; the multilingual repo is not yet loadable by
-> Transformers.js), running on WebGPU with a WASM fallback, optionally
-> inside a Web Worker.
+> **Status:** 🌱 v0.1.0 on npm — usable, API not frozen yet.
+
+> **Verified end to end in a browser:** reference audio decoding, voice
+> cloning, voice persistence, text chunking, streaming synthesis and gapless
+> playback, driven by a real zero-shot engine — **Chatterbox ONNX via
+> Transformers.js v4** on WebGPU (WASM fallback), optionally inside a Web
+> Worker. Measured on an RTX 5090: 5.3 s of speech rendered in 2.7 s.
 >
-> A dependency-free `PlaceholderEngine` (speech-shaped audio, not speech) is
-> still bundled as the default, so the library works with nothing installed.
-> The Chatterbox engine has **not yet been verified against the real model in a
-> browser** — see [#2](https://github.com/m96-chan/zerovox/issues/2).
+> **English only for now.** The multilingual Chatterbox checkpoint needs
+> classifier-free guidance during generation, which Transformers.js has not
+> shipped yet — tracked in
+> [#25](https://github.com/m96-chan/zerovox/issues/25).
+>
+> A dependency-free `PlaceholderEngine` (speech-*shaped* audio, not speech) is
+> the default, so the library runs with nothing else installed.
 
 ---
 
@@ -34,10 +39,10 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 * 🖥️ WASM fallback
 * 📦 Simple npm package
 * 🧩 Framework agnostic
-* 💾 Voice embedding cache
-* 🔊 Gapless streaming playback (AudioWorklet)
+* 💾 Voice embedding cache (IndexedDB) + rendered-audio cache
+* 🔊 Gapless streaming playback (AudioWorklet) with one-chunk prefetch
 * 🇯🇵 Japanese reading conversion (`toJapaneseReading`)
-* 🌍 Multilingual support (planned)
+* 🌍 Multilingual speech — blocked upstream, see [#25](https://github.com/m96-chan/zerovox/issues/25)
 
 ---
 
@@ -91,9 +96,8 @@ await audio.play();
 | Firefox | 🚧     |
 | Safari  | 🚧     |
 
-WebGPU is recommended for the best performance.
-
-A WASM fallback will be available for unsupported environments.
+WebGPU is recommended for the best performance; environments without it fall
+back to WASM automatically (`device: "auto"`).
 
 ---
 
@@ -175,6 +179,10 @@ Numbers, dates, clock times, units, numeric symbols and upper-case acronyms
 become kana readings. It is opt-in — run it before `speak()`/`play()` for
 Japanese text; other languages should skip it.
 
+Note that this normalizes *text*. Speaking the result needs a model whose
+tokenizer covers Japanese, which the bundled English Chatterbox checkpoint
+does not ([#25](https://github.com/m96-chan/zerovox/issues/25)).
+
 ### Real voice cloning with Chatterbox
 
 ```bash
@@ -196,9 +204,13 @@ const tts = await ZeroVox.create({
 });
 
 await tts.cloneVoice(referenceAudioFile);   // 5-15s of clean speech
-await (await tts.speak("こんにちは、世界。")).play();
+await (await tts.speak("Cloned from a few seconds of reference audio.")).play();
 ```
 
+* **English only.** This checkpoint's tokenizer has no kana or CJK tokens, so
+  non-Latin text maps to unknown tokens and comes out near-silent. Japanese
+  speech needs the multilingual checkpoint —
+  [#25](https://github.com/m96-chan/zerovox/issues/25).
 * `@huggingface/transformers` is an **optional peer dependency**, imported
   lazily. Nothing is downloaded unless you actually construct the engine.
 * Model weights are cached by Transformers.js in the browser's Cache Storage
@@ -303,32 +315,46 @@ Contribution rules — TDD, coverage, and ticket-driven development — are in
 
 ---
 
+## Performance
+
+Measured on an RTX 5090 / Linux Chrome, English Chatterbox on WebGPU:
+
+| | |
+| --- | --- |
+| Synthesis | ~0.5× real time (5.3 s of speech in 2.7 s) |
+| Model load, warm cache | ~56 s — dominated by ONNX session creation, not download |
+| Model download, first run | ~1.5 GB |
+
+Notes:
+
+* Linux Chrome does not expose `shader-f16`, so the engine automatically
+  degrades from the `q4f16` language model to `q4` (bigger, slower). On
+  Windows / macOS the f16 path is selected and is faster.
+* Loading is the bottleneck, not synthesis. Start `ZeroVox.create()` early —
+  the [demo](./examples/browser) begins loading as soon as an engine is
+  picked. Tuning work is tracked in
+  [#31](https://github.com/m96-chan/zerovox/issues/31).
+* Keep inference off the UI thread with `WorkerSynthesisEngine` (below); model
+  loading blocks whichever thread it runs on.
+
+---
+
 ## Roadmap
 
-### v0.1
+Shipped:
 
-* Browser-only inference
-* Voice cloning
-* Basic TTS
-* TypeScript SDK
+* ✅ Browser-only inference, voice cloning, TypeScript SDK
+* ✅ Streaming synthesis (`stream()`) and gapless playback (`play()`)
+* ✅ Voice management + IndexedDB persistence, rendered-audio cache
+* ✅ Japanese reading conversion, bracket-aware sentence segmentation
+* ✅ Off-thread inference (`WorkerSynthesisEngine`)
 
-### v0.2
+Next:
 
-* Streaming synthesis
-* Voice management
-* IndexedDB cache
-
-### v0.3
-
-* Japanese text normalization
-* Better sentence segmentation
-* Audio queue
-
-### v0.4
-
-* Multiple model support
-* Emotion control
-* Speech-to-Speech
+* Multilingual speech — blocked on upstream CFG support
+  ([#25](https://github.com/m96-chan/zerovox/issues/25))
+* Faster model load ([#31](https://github.com/m96-chan/zerovox/issues/31))
+* Multiple model support, emotion control, speech-to-speech
 
 ---
 
