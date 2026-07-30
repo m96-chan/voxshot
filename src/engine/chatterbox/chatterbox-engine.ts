@@ -10,6 +10,7 @@ import type {
   ChatterboxModelLike,
   ChatterboxProcessorLike,
   LoadProgress,
+  PretrainedConfigLike,
   TensorLike,
   TransformersModule,
   TransformersModuleLoader,
@@ -30,6 +31,23 @@ export const CHATTERBOX_SAMPLE_RATE = 24_000;
  * so Transformers.js `from_pretrained` cannot load it.
  */
 const DEFAULT_MODEL_ID = "onnx-community/chatterbox-ONNX";
+
+/**
+ * The architecture name Transformers.js registers Chatterbox under.
+ *
+ * Its `MODEL_TYPE_MAPPING` is keyed by class name (`ChatterboxModel`), but the
+ * repo's `config.json` declares only `model_type: "chatterbox"` and no
+ * `architectures`, and `resolve_model_type` consults exactly those two fields.
+ * The lookup therefore misses and falls back to an encoder-only, single-file
+ * layout — which is why loads used to probe `onnx/model_quantized.onnx` and
+ * 404 twice before the real component files were fetched.
+ *
+ * Naming the architecture on the config we hand to `from_pretrained` makes the
+ * lookup succeed. Beyond silencing the 404s and the warning, it repairs the
+ * expected-file list that drives download totals: with the wrong layout,
+ * Transformers.js seeds its progress denominator with `config.json` alone.
+ */
+const CHATTERBOX_ARCHITECTURE = "ChatterboxModel";
 const DEFAULT_MAX_NEW_TOKENS = 256;
 const DEFAULT_EXAGGERATION = 0.5;
 /**
@@ -195,6 +213,9 @@ export class ChatterboxEngine implements SynthesisEngine {
     }
 
     const transformers = (this.#module ??= await this.#importModule());
+    // Resolved once, outside the plan loop: the config does not vary by plan,
+    // and re-reading it per attempt would repeat work on every fallback.
+    const config = await this.#resolveConfig(transformers);
     const fp16 = device === "webgpu" ? await this.#supportsFp16() : true;
     const plans = buildLoadPlans(device, this.#dtypeOverrides, fp16);
     const failures: string[] = [];
@@ -204,6 +225,7 @@ export class ChatterboxEngine implements SynthesisEngine {
       try {
         await this.#withStallGuard(async (notice) => {
           this.#model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
+            config,
             device: plan.device,
             dtype: plan.dtype,
             // Always supplied, even without an `onProgress` consumer: the
@@ -320,6 +342,21 @@ export class ChatterboxEngine implements SynthesisEngine {
     this.#processor = undefined;
     this.#plan = undefined;
     await model?.dispose();
+  }
+
+  /**
+   * Read the model's config and name its architecture if the repo omits it.
+   *
+   * See {@link CHATTERBOX_ARCHITECTURE} for why this is necessary. An
+   * architecture the repo already declares is left alone: it knows its own
+   * layout better than this default does.
+   */
+  async #resolveConfig(transformers: TransformersModule): Promise<PretrainedConfigLike> {
+    const config = await transformers.AutoConfig.from_pretrained(this.modelId);
+    if (config.architectures?.length) {
+      return config;
+    }
+    return { ...config, architectures: [CHATTERBOX_ARCHITECTURE] };
   }
 
   /** Emit one engine-level milestone, if anyone is listening. */
