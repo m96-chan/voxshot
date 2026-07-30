@@ -24,6 +24,14 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/m96-chan/zerovox.git"
+  },
+  "homepage": "https://github.com/m96-chan/zerovox#readme",
+  "bugs": {
+    "url": "https://github.com/m96-chan/zerovox/issues"
+  },
   "keywords": [
     "tts",
     "text-to-speech",
