@@ -13,7 +13,8 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 [![npm](https://img.shields.io/npm/v/voxshot)](https://www.npmjs.com/package/voxshot)
 [![CI](https://github.com/m96-chan/voxshot/actions/workflows/ci.yml/badge.svg)](https://github.com/m96-chan/voxshot/actions/workflows/ci.yml)
 
-> **Status:** 🌱 v0.1.0 on npm — usable, API not frozen yet.
+> **Status:** 🌱 Usable, API not frozen yet. **npm publication pending** under
+> the new name — see [Renamed from zerovox](#renamed-from-zerovox) below.
 
 > **Verified end to end in a browser:** reference audio decoding, voice
 > cloning, voice persistence, text chunking, streaming synthesis and gapless
@@ -43,6 +44,35 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 * 🔊 Gapless streaming playback (AudioWorklet) with one-chunk prefetch
 * 🇯🇵 Japanese reading conversion (`toJapaneseReading`)
 * 🌍 Multilingual speech — blocked upstream, see [#25](https://github.com/m96-chan/voxshot/issues/25)
+
+---
+
+## Renamed from zerovox
+
+This library was briefly published as `zerovox`. That name collided with an
+existing project, so everything moved to **`voxshot`**.
+
+`zerovox@0.1.0` has been unpublished from npm, so there is nothing left to
+migrate *from* on the registry — install `voxshot`. If you did pin the old
+package, the rename is mechanical:
+
+| Before | After |
+| --- | --- |
+| `npm i zerovox` | `npm i voxshot` |
+| `import { ZeroVox } from "zerovox"` | `import { VoxShot } from "voxshot"` |
+| `ZeroVoxError` / `ZeroVoxErrorCode` | `VoxShotError` / `VoxShotErrorCode` |
+| `isZeroVoxError()` | `isVoxShotError()` |
+| `ZeroVoxOptions` | `VoxShotOptions` |
+
+Two runtime details changed with it:
+
+* **Saved voices do not carry over.** The default IndexedDB database is now
+  `voxshot`. To read voices written by the old build, point the store at the
+  old database explicitly:
+  `new IndexedDbVoiceStore({ databaseName: "zerovox" })`.
+* **Rebuild your worker alongside the main thread.** The worker protocol
+  marker changed, so a stale worker bundle and a new main bundle will not
+  recognise each other's messages.
 
 ---
 
