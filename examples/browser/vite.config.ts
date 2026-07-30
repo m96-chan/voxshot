@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  base: process.env.GITHUB_ACTIONS ? "/voxshot/" : "/",
   resolve: {
     // voxshot is linked via file:../.., so its lazy
     // import("@huggingface/transformers") would otherwise resolve from the

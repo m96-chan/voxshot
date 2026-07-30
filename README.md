@@ -13,6 +13,8 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 [![npm](https://img.shields.io/npm/v/voxshot)](https://www.npmjs.com/package/voxshot)
 [![CI](https://github.com/m96-chan/voxshot/actions/workflows/ci.yml/badge.svg)](https://github.com/m96-chan/voxshot/actions/workflows/ci.yml)
 
+🎮 **[Try the live demo →](https://m96-chan.github.io/voxshot/)**
+
 > **Status:** 🌱 Usable, API not frozen yet. **npm publication pending** under
 > the new name — see [Renamed from zerovox](#renamed-from-zerovox) below.
 
