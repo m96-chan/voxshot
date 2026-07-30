@@ -6,14 +6,17 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "voxshot": "file:../.."
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^5.7.2",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vitest": "^4.1.10"
   }
 }
