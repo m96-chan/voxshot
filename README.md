@@ -243,6 +243,36 @@ await (await tts.speak("Cloned from a few seconds of reference audio.")).play();
   non-Latin text maps to unknown tokens and comes out near-silent. Japanese
   speech needs the multilingual checkpoint —
   [#25](https://github.com/m96-chan/voxshot/issues/25).
+
+#### Handling a stalled load
+
+The first load transfers roughly 1.5 GB. A transfer that hangs does not reject
+on its own, so `load()` is guarded by a stall timeout: if no progress event
+arrives for `stallTimeoutMs` (5 minutes by default), it rejects with
+`LOAD_STALLED` rather than waiting forever.
+
+The clock measures *silence*, not total elapsed time — session creation is
+legitimately quiet for tens of seconds, so a total cap would abandon healthy
+loads. Retrying is cheap, because whatever already reached the browser cache is
+reused.
+
+```ts
+import { ChatterboxEngine, isVoxShotError } from "voxshot";
+
+const engine = new ChatterboxEngine({ stallTimeoutMs: 120_000 });  // 0 waits forever
+
+try {
+  await VoxShot.create({ engine });
+} catch (cause) {
+  if (isVoxShotError(cause) && cause.code === "LOAD_STALLED") {
+    offerRetry();
+  }
+}
+```
+
+Branch on `code`, not `instanceof`: when the engine runs inside a Web Worker the
+error is rebuilt on the main thread, so it arrives as a `VoxShotError` carrying
+`code: "LOAD_STALLED"`.
 * `@huggingface/transformers` is an **optional peer dependency**, imported
   lazily. Nothing is downloaded unless you actually construct the engine.
 * Model weights are cached by Transformers.js in the browser's Cache Storage

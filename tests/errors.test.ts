@@ -5,6 +5,7 @@ import {
   DeviceUnavailableError,
   DisposedError,
   InvalidInputError,
+  LoadStalledError,
   NoVoiceError,
   VoiceNotFoundError,
   VoxShotError,
@@ -37,6 +38,7 @@ describe("error subclasses", () => {
     [new InvalidInputError("text is empty"), "INVALID_INPUT", "InvalidInputError"],
     [new AudioDecodeError("bad header"), "AUDIO_DECODE_FAILED", "AudioDecodeError"],
     [new DisposedError(), "DISPOSED", "DisposedError"],
+    [new LoadStalledError(300_000), "LOAD_STALLED", "LoadStalledError"],
   ])("%o exposes its code and name", (error, code, name) => {
     expect(error).toBeInstanceOf(VoxShotError);
     expect(error.code).toBe(code);
@@ -46,6 +48,13 @@ describe("error subclasses", () => {
 
   it("mentions the requested device in DeviceUnavailableError", () => {
     expect(new DeviceUnavailableError("webgpu").message).toContain("webgpu");
+  });
+
+  it("reports the exceeded threshold in LoadStalledError", () => {
+    const error = new LoadStalledError(300_000);
+
+    expect(error.message).toContain("300000");
+    expect(error.stallTimeoutMs).toBe(300_000);
   });
 
   it("mentions the missing voice name in VoiceNotFoundError", () => {

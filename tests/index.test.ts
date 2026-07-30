@@ -36,6 +36,7 @@ describe("public API", () => {
     expect(typeof voxshot.InvalidInputError).toBe("function");
     expect(typeof voxshot.AudioDecodeError).toBe("function");
     expect(typeof voxshot.DisposedError).toBe("function");
+    expect(new voxshot.LoadStalledError(1000).code).toBe("LOAD_STALLED");
   });
 
   it("exports the embedding size of the built in engine", () => {

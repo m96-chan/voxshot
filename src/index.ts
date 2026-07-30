@@ -44,6 +44,7 @@ export {
   DeviceUnavailableError,
   DisposedError,
   InvalidInputError,
+  LoadStalledError,
   NoVoiceError,
   VoiceNotFoundError,
   VoxShotError,
