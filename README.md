@@ -389,7 +389,9 @@ and pull request. Publishing is driven by GitHub Releases:
    using the repository's `NPM_TOKEN` secret
 
 Contribution rules — TDD, coverage, and ticket-driven development — are in
-[CLAUDE.md](./CLAUDE.md).
+[CONTRIBUTING.md](./CONTRIBUTING.md), with the full set in
+[CLAUDE.md](./CLAUDE.md). Released versions are listed in
+[CHANGELOG.md](./CHANGELOG.md).
 
 ---
 
@@ -472,6 +474,11 @@ MIT
 ## Contributing
 
 Contributions, bug reports, and feature requests are welcome.
+
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md) first. A few rules here are
+stricter than average — tests are written before implementation, coverage is
+enforced at 90% by CI, and every change starts from an issue — and they are much
+easier to follow if you know about them before you write the code.
 
 If you have ideas for improving browser-based TTS or voice cloning, feel free to open an issue or submit a pull request.
 
