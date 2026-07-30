@@ -1,4 +1,4 @@
-import { ChatterboxEngine, exposeEngine, type RpcEndpoint } from "zerovox";
+import { ChatterboxEngine, exposeEngine, type RpcEndpoint } from "voxshot";
 
 // Progress events fire only after the main thread requests load(), by which
 // time exposeEngine below has already run, so `emitProgress` is initialised.

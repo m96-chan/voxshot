@@ -1,8 +1,8 @@
-# ZeroVox
+# VoxShot
 
 > Browser-first Zero-Shot Text-to-Speech for JavaScript and TypeScript.
 
-ZeroVox is a lightweight JavaScript/TypeScript library that enables **zero-shot voice cloning** and **high-quality text-to-speech** directly in modern web browsers.
+VoxShot is a lightweight JavaScript/TypeScript library that enables **zero-shot voice cloning** and **high-quality text-to-speech** directly in modern web browsers.
 
 No Python.
 No backend.
@@ -10,10 +10,11 @@ No API keys.
 
 Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 
-[![npm](https://img.shields.io/npm/v/zerovox)](https://www.npmjs.com/package/zerovox)
-[![CI](https://github.com/m96-chan/zerovox/actions/workflows/ci.yml/badge.svg)](https://github.com/m96-chan/zerovox/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/voxshot)](https://www.npmjs.com/package/voxshot)
+[![CI](https://github.com/m96-chan/voxshot/actions/workflows/ci.yml/badge.svg)](https://github.com/m96-chan/voxshot/actions/workflows/ci.yml)
 
-> **Status:** 🌱 v0.1.0 on npm — usable, API not frozen yet.
+> **Status:** 🌱 Usable, API not frozen yet. **npm publication pending** under
+> the new name — see [Renamed from zerovox](#renamed-from-zerovox) below.
 
 > **Verified end to end in a browser:** reference audio decoding, voice
 > cloning, voice persistence, text chunking, streaming synthesis and gapless
@@ -24,7 +25,7 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 > **English only for now.** The multilingual Chatterbox checkpoint needs
 > classifier-free guidance during generation, which Transformers.js has not
 > shipped yet — tracked in
-> [#25](https://github.com/m96-chan/zerovox/issues/25).
+> [#25](https://github.com/m96-chan/voxshot/issues/25).
 >
 > A dependency-free `PlaceholderEngine` (speech-*shaped* audio, not speech) is
 > the default, so the library runs with nothing else installed.
@@ -42,20 +43,49 @@ Powered by WebGPU, ONNX Runtime Web, and modern open-source speech models.
 * 💾 Voice embedding cache (IndexedDB) + rendered-audio cache
 * 🔊 Gapless streaming playback (AudioWorklet) with one-chunk prefetch
 * 🇯🇵 Japanese reading conversion (`toJapaneseReading`)
-* 🌍 Multilingual speech — blocked upstream, see [#25](https://github.com/m96-chan/zerovox/issues/25)
+* 🌍 Multilingual speech — blocked upstream, see [#25](https://github.com/m96-chan/voxshot/issues/25)
 
 ---
 
-## Why ZeroVox?
+## Renamed from zerovox
+
+This library was briefly published as `zerovox`. That name collided with an
+existing project, so everything moved to **`voxshot`**.
+
+`zerovox@0.1.0` has been unpublished from npm, so there is nothing left to
+migrate *from* on the registry — install `voxshot`. If you did pin the old
+package, the rename is mechanical:
+
+| Before | After |
+| --- | --- |
+| `npm i zerovox` | `npm i voxshot` |
+| `import { ZeroVox } from "zerovox"` | `import { VoxShot } from "voxshot"` |
+| `ZeroVoxError` / `ZeroVoxErrorCode` | `VoxShotError` / `VoxShotErrorCode` |
+| `isZeroVoxError()` | `isVoxShotError()` |
+| `ZeroVoxOptions` | `VoxShotOptions` |
+
+Two runtime details changed with it:
+
+* **Saved voices do not carry over.** The default IndexedDB database is now
+  `voxshot`. To read voices written by the old build, point the store at the
+  old database explicitly:
+  `new IndexedDbVoiceStore({ databaseName: "zerovox" })`.
+* **Rebuild your worker alongside the main thread.** The worker protocol
+  marker changed, so a stale worker bundle and a new main bundle will not
+  recognise each other's messages.
+
+---
+
+## Why VoxShot?
 
 Most voice cloning projects require Python, PyTorch, or a backend server.
 
-ZeroVox focuses on a different goal:
+VoxShot focuses on a different goal:
 
 > **Make zero-shot TTS as easy as installing an npm package.**
 
 ```bash
-npm install zerovox
+npm install voxshot
 ```
 
 No Docker.
@@ -71,9 +101,9 @@ Just JavaScript.
 ## Quick Start
 
 ```ts
-import { ZeroVox } from "zerovox";
+import { VoxShot } from "voxshot";
 
-const tts = await ZeroVox.create();
+const tts = await VoxShot.create();
 
 await tts.cloneVoice(referenceAudioFile);
 
@@ -104,7 +134,7 @@ back to WASM automatically (`device: "auto"`).
 ## API
 
 ```ts
-const tts = await ZeroVox.create({
+const tts = await VoxShot.create({
   device: "auto",   // "auto" | "webgpu" | "wasm"
   model: "default"
 });
@@ -162,13 +192,13 @@ Like everything else, the output device is injectable: `play()` uses
 `platform.streamingPlayer`, and the default browser implementation
 (`BrowserStreamingAudioPlayer`) loads its worklet from an inline blob — no
 extra asset to serve. Tune or disable the cache with
-`ZeroVox.create({ synthesisCache: new SynthesisCache({ maxEntriesPerVoice: 8 }) })`
+`VoxShot.create({ synthesisCache: new SynthesisCache({ maxEntriesPerVoice: 8 }) })`
 or `synthesisCache: null`.
 
 ### Japanese reading conversion
 
 ```ts
-import { toJapaneseReading } from "zerovox";
+import { toJapaneseReading } from "voxshot";
 
 toJapaneseReading("1,000円");             // "せんえん"
 toJapaneseReading("会議は3月4日の14:00"); // "会議はさんがつよっかのじゅうよじ"
@@ -181,16 +211,16 @@ Japanese text; other languages should skip it.
 
 Note that this normalizes *text*. Speaking the result needs a model whose
 tokenizer covers Japanese, which the bundled English Chatterbox checkpoint
-does not ([#25](https://github.com/m96-chan/zerovox/issues/25)).
+does not ([#25](https://github.com/m96-chan/voxshot/issues/25)).
 
 ### Real voice cloning with Chatterbox
 
 ```bash
-npm install zerovox @huggingface/transformers
+npm install voxshot @huggingface/transformers
 ```
 
 ```ts
-import { ChatterboxEngine, ZeroVox } from "zerovox";
+import { ChatterboxEngine, VoxShot } from "voxshot";
 
 const engine = new ChatterboxEngine({
   // "onnx-community/chatterbox-ONNX" (English) by default — the multilingual
@@ -198,7 +228,7 @@ const engine = new ChatterboxEngine({
   onProgress: (p) => console.log(p.status, p.file, p.progress),
 });
 
-const tts = await ZeroVox.create({
+const tts = await VoxShot.create({
   engine,
   minChunkLength: 20,   // very short prompts destabilise the model
 });
@@ -210,7 +240,7 @@ await (await tts.speak("Cloned from a few seconds of reference audio.")).play();
 * **English only.** This checkpoint's tokenizer has no kana or CJK tokens, so
   non-Latin text maps to unknown tokens and comes out near-silent. Japanese
   speech needs the multilingual checkpoint —
-  [#25](https://github.com/m96-chan/zerovox/issues/25).
+  [#25](https://github.com/m96-chan/voxshot/issues/25).
 * `@huggingface/transformers` is an **optional peer dependency**, imported
   lazily. Nothing is downloaded unless you actually construct the engine.
 * Model weights are cached by Transformers.js in the browser's Cache Storage
@@ -225,7 +255,7 @@ await (await tts.speak("Cloned from a few seconds of reference audio.")).play();
 
 ```ts
 // tts.worker.ts
-import { ChatterboxEngine, exposeEngine, type RpcEndpoint } from "zerovox";
+import { ChatterboxEngine, exposeEngine, type RpcEndpoint } from "voxshot";
 
 const engine = new ChatterboxEngine({ onProgress: (p) => serve.emitProgress(p) });
 const serve = exposeEngine(engine, self as unknown as RpcEndpoint);
@@ -233,14 +263,14 @@ const serve = exposeEngine(engine, self as unknown as RpcEndpoint);
 
 ```ts
 // main thread
-import { WorkerSynthesisEngine, ZeroVox } from "zerovox";
+import { WorkerSynthesisEngine, VoxShot } from "voxshot";
 
 const worker = new Worker(new URL("./tts.worker.ts", import.meta.url), { type: "module" });
 const engine = new WorkerSynthesisEngine(worker, {
   onProgress: (p) => updateProgressBar(p),
 });
 
-const tts = await ZeroVox.create({ engine });
+const tts = await VoxShot.create({ engine });
 ```
 
 Audio crosses the boundary as a transferable buffer, always as a copy, so the
@@ -255,7 +285,7 @@ Every part of the pipeline is injectable, so a real model only has to
 implement `SynthesisEngine`:
 
 ```ts
-import { ZeroVox, type SynthesisEngine } from "zerovox";
+import { VoxShot, type SynthesisEngine } from "voxshot";
 
 class MyOnnxEngine implements SynthesisEngine {
   readonly name = "my-model";
@@ -267,7 +297,7 @@ class MyOnnxEngine implements SynthesisEngine {
   async dispose() { /* ... */ }
 }
 
-const tts = await ZeroVox.create({ engine: new MyOnnxEngine() });
+const tts = await VoxShot.create({ engine: new MyOnnxEngine() });
 ```
 
 The voice store (`VoiceStore`) and the browser bindings (`Platform`:
@@ -330,10 +360,10 @@ Notes:
 * Linux Chrome does not expose `shader-f16`, so the engine automatically
   degrades from the `q4f16` language model to `q4` (bigger, slower). On
   Windows / macOS the f16 path is selected and is faster.
-* Loading is the bottleneck, not synthesis. Start `ZeroVox.create()` early —
+* Loading is the bottleneck, not synthesis. Start `VoxShot.create()` early —
   the [demo](./examples/browser) begins loading as soon as an engine is
   picked. Tuning work is tracked in
-  [#31](https://github.com/m96-chan/zerovox/issues/31).
+  [#31](https://github.com/m96-chan/voxshot/issues/31).
 * Keep inference off the UI thread with `WorkerSynthesisEngine` (below); model
   loading blocks whichever thread it runs on.
 
@@ -352,15 +382,15 @@ Shipped:
 Next:
 
 * Multilingual speech — blocked on upstream CFG support
-  ([#25](https://github.com/m96-chan/zerovox/issues/25))
-* Faster model load ([#31](https://github.com/m96-chan/zerovox/issues/31))
+  ([#25](https://github.com/m96-chan/voxshot/issues/25))
+* Faster model load ([#31](https://github.com/m96-chan/voxshot/issues/31))
 * Multiple model support, emotion control, speech-to-speech
 
 ---
 
 ## Vision
 
-ZeroVox aims to become the browser-native voice toolkit for modern web applications.
+VoxShot aims to become the browser-native voice toolkit for modern web applications.
 
 Possible use cases include:
 
@@ -390,7 +420,7 @@ If you have ideas for improving browser-based TTS or voice cloning, feel free to
 
 ## Acknowledgements
 
-ZeroVox builds upon the incredible work of the open-source speech AI community, including projects such as:
+VoxShot builds upon the incredible work of the open-source speech AI community, including projects such as:
 
 * ONNX Runtime Web
 * Transformers.js

@@ -1,11 +1,11 @@
 import type { ResolvedDevice } from "../device.js";
-import type { ZeroVoxErrorCode } from "../errors.js";
+import type { VoxShotErrorCode } from "../errors.js";
 import type { VoiceEmbedding } from "../voice/types.js";
 
 /**
- * Protocol version, carried on every message as the `zerovox` field.
+ * Protocol version, carried on every message as the `voxshot` field.
  *
- * It doubles as a marker, so a ZeroVox worker can share a port with an
+ * It doubles as a marker, so a VoxShot worker can share a port with an
  * application's own messages without either side misreading the other.
  */
 export const PROTOCOL_VERSION = 1;
@@ -23,7 +23,7 @@ export type EngineRequest =
 
 /** A request as it travels over the port. */
 export type RequestMessage = EngineRequest & {
-  readonly zerovox: number;
+  readonly voxshot: number;
   readonly id: number;
 };
 
@@ -31,13 +31,13 @@ export type RequestMessage = EngineRequest & {
 export interface SerializedError {
   readonly name: string;
   readonly message: string;
-  readonly code: ZeroVoxErrorCode;
+  readonly code: VoxShotErrorCode;
 }
 
 export type ResponseMessage =
-  | { readonly zerovox: number; readonly id: number; readonly ok: true; readonly result: unknown }
+  | { readonly voxshot: number; readonly id: number; readonly ok: true; readonly result: unknown }
   | {
-      readonly zerovox: number;
+      readonly voxshot: number;
       readonly id: number;
       readonly ok: false;
       readonly error: SerializedError;
@@ -45,7 +45,7 @@ export type ResponseMessage =
 
 /** Progress emitted by the worker outside of any request / response pair. */
 export interface ProgressMessage {
-  readonly zerovox: number;
+  readonly voxshot: number;
   readonly progress: Record<string, unknown>;
 }
 
@@ -88,10 +88,10 @@ export function isProgressMessage(value: unknown): value is ProgressMessage {
   return isProtocolMessage(value) && typeof (value as ProgressMessage).progress === "object";
 }
 
-function isProtocolMessage(value: unknown): value is { zerovox: number } {
+function isProtocolMessage(value: unknown): value is { voxshot: number } {
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as { zerovox?: unknown }).zerovox === PROTOCOL_VERSION
+    (value as { voxshot?: unknown }).voxshot === PROTOCOL_VERSION
   );
 }

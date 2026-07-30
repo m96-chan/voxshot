@@ -1,6 +1,6 @@
 import { CHATTERBOX_SAMPLE_RATE } from "../engine/chatterbox/chatterbox-engine.js";
 import type { SynthesisEngine, SynthesisRequest } from "../engine/types.js";
-import { ZeroVoxError } from "../errors.js";
+import { VoxShotError } from "../errors.js";
 import type { PcmAudio } from "../platform.js";
 import type { EngineDescription, EngineRequest, ResponseMessage, RpcEndpoint } from "./protocol.js";
 import { PROTOCOL_VERSION, isProgressMessage, isResponseMessage } from "./protocol.js";
@@ -37,7 +37,7 @@ interface Pending {
  * ```ts
  * const worker = new Worker(new URL("./tts.worker.ts", import.meta.url), { type: "module" });
  * const engine = new WorkerSynthesisEngine(worker);
- * const tts = await ZeroVox.create({ engine });
+ * const tts = await VoxShot.create({ engine });
  * ```
  *
  * Audio crosses the boundary as a transferable buffer, but always as a copy —
@@ -117,7 +117,7 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
     this.#connected = false;
     this.#endpoint.removeEventListener("message", this.#listener);
 
-    const error = new ZeroVoxError("The worker connection was closed.");
+    const error = new VoxShotError("The worker connection was closed.");
     for (const [id, pending] of this.#pending) {
       if (pending.timer) {
         clearTimeout(pending.timer);
@@ -129,7 +129,7 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
 
   async #send(request: EngineRequest, transfer?: Transferable[]): Promise<unknown> {
     if (!this.#connected) {
-      throw new ZeroVoxError("This worker engine has been disconnected.");
+      throw new VoxShotError("This worker engine has been disconnected.");
     }
 
     const id = this.#nextId++;
@@ -139,7 +139,7 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
           ? setTimeout(() => {
               this.#pending.delete(id);
               reject(
-                new ZeroVoxError(
+                new VoxShotError(
                   `The worker did not answer "${request.method}" within ${this.#timeoutMs}ms.`,
                 ),
               );
@@ -147,7 +147,7 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
           : undefined;
 
       this.#pending.set(id, { resolve, reject, timer });
-      this.#endpoint.postMessage({ zerovox: PROTOCOL_VERSION, id, ...request }, transfer);
+      this.#endpoint.postMessage({ voxshot: PROTOCOL_VERSION, id, ...request }, transfer);
     });
   }
 
@@ -177,8 +177,8 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
   }
 }
 
-function deserializeError(response: Extract<ResponseMessage, { ok: false }>): ZeroVoxError {
-  const error = new ZeroVoxError(response.error.message, response.error.code);
+function deserializeError(response: Extract<ResponseMessage, { ok: false }>): VoxShotError {
+  const error = new VoxShotError(response.error.message, response.error.code);
   error.name = response.error.name;
   return error;
 }

@@ -12,11 +12,11 @@ describe("normalizeText", () => {
   });
 
   it("applies NFKC so full width characters become canonical", () => {
-    expect(normalizeText("ＺｅｒｏＶｏｘ１２３")).toBe("ZeroVox123");
+    expect(normalizeText("ＶｏｘＳｈｏｔ１２３")).toBe("VoxShot123");
   });
 
   it("converts half width katakana to full width via NFKC", () => {
-    expect(normalizeText("ｾﾞﾛﾎﾞｯｸｽ")).toBe("ゼロボックス");
+    expect(normalizeText("ｵﾝｾｲｺﾞｳｾｲ")).toBe("オンセイゴウセイ");
   });
 
   it("removes control characters", () => {

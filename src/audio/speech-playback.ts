@@ -1,6 +1,6 @@
 import type { StreamingPlayback } from "../platform.js";
 
-/** A running utterance started by `ZeroVox.play()`. */
+/** A running utterance started by `VoxShot.play()`. */
 export interface SpeechPlayback {
   /** Resolves when playback finished or was stopped; rejects on error. */
   readonly done: Promise<void>;

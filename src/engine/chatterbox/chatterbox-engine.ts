@@ -1,6 +1,6 @@
 import { resample } from "../../audio/pcm.js";
 import type { ResolvedDevice } from "../../device.js";
-import { InvalidInputError, ZeroVoxError } from "../../errors.js";
+import { InvalidInputError, VoxShotError } from "../../errors.js";
 import type { PcmAudio } from "../../platform.js";
 import type { VoiceTensor, VoiceTensorType } from "../../voice/types.js";
 import type { EmbedResult, SynthesisEngine, SynthesisRequest } from "../types.js";
@@ -159,7 +159,7 @@ export class ChatterboxEngine implements SynthesisEngine {
       }
     }
 
-    throw new ZeroVoxError(
+    throw new VoxShotError(
       `Failed to load "${this.modelId}" on every candidate configuration. Attempts: ${failures.join("; ")}`,
     );
   }
@@ -181,7 +181,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     for (const name of SPEAKER_TENSOR_NAMES) {
       const tensor = outputs[name];
       if (!tensor) {
-        throw new ZeroVoxError(`The speech encoder did not return "${name}".`);
+        throw new VoxShotError(`The speech encoder did not return "${name}".`);
       }
       tensors[name] = toVoiceTensor(tensor);
     }
@@ -254,7 +254,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     try {
       return await this.#loadModule();
     } catch (cause) {
-      throw new ZeroVoxError(
+      throw new VoxShotError(
         "ChatterboxEngine needs the optional peer dependency \"@huggingface/transformers\" (v4). Install it, or pass a custom loadModule.",
         "UNKNOWN",
         { cause },
@@ -268,7 +268,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     transformers: TransformersModule;
   } {
     if (!this.#model || !this.#processor || !this.#module) {
-      throw new ZeroVoxError("ChatterboxEngine is not loaded. Call load() first.");
+      throw new VoxShotError("ChatterboxEngine is not loaded. Call load() first.");
     }
     return { model: this.#model, processor: this.#processor, transformers: this.#module };
   }

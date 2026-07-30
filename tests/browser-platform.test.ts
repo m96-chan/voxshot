@@ -6,7 +6,7 @@ import {
   BrowserGpuProbe,
   createBrowserPlatform,
 } from "../src/browser-platform.js";
-import { AudioDecodeError, ZeroVoxError } from "../src/errors.js";
+import { AudioDecodeError, VoxShotError } from "../src/errors.js";
 
 /** Minimal stand-in for the parts of the Web Audio API the library uses. */
 class FakeAudioBuffer {
@@ -129,7 +129,7 @@ describe("BrowserAudioDecoder", () => {
   it("throws when the Web Audio API is missing", async () => {
     vi.stubGlobal("AudioContext", undefined);
 
-    await expect(new BrowserAudioDecoder().decode(new ArrayBuffer(8))).rejects.toThrow(ZeroVoxError);
+    await expect(new BrowserAudioDecoder().decode(new ArrayBuffer(8))).rejects.toThrow(VoxShotError);
   });
 });
 
@@ -188,7 +188,7 @@ describe("BrowserAudioPlayer", () => {
 
     await expect(
       new BrowserAudioPlayer().play({ samples: new Float32Array([1]), sampleRate: 16_000 }),
-    ).rejects.toThrow(ZeroVoxError);
+    ).rejects.toThrow(VoxShotError);
   });
 });
 

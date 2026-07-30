@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserStreamingAudioPlayer } from "../src/browser-platform.js";
-import { ZeroVoxError } from "../src/errors.js";
+import { VoxShotError } from "../src/errors.js";
 
 class FakePort {
   onmessage: ((event: { data: unknown }) => void) | null = null;
@@ -76,7 +76,7 @@ function install(): void {
   vi.stubGlobal("AudioContext", FakeStreamingContext);
   vi.stubGlobal("AudioWorkletNode", FakeWorkletNode);
   vi.stubGlobal("URL", {
-    createObjectURL: vi.fn(() => "blob:zerovox-worklet"),
+    createObjectURL: vi.fn(() => "blob:voxshot-worklet"),
   });
 }
 
@@ -107,20 +107,20 @@ describe("BrowserStreamingAudioPlayer", () => {
     expect(context.gains[0]?.connectedTo).toBe(context.destination);
   });
 
-  it("throws a ZeroVoxError without an AudioContext", async () => {
+  it("throws a VoxShotError without an AudioContext", async () => {
     vi.stubGlobal("AudioContext", undefined);
 
     await expect(new BrowserStreamingAudioPlayer().open(24_000)).rejects.toBeInstanceOf(
-      ZeroVoxError,
+      VoxShotError,
     );
   });
 
-  it("throws a ZeroVoxError when AudioWorklet is unavailable", async () => {
+  it("throws a VoxShotError when AudioWorklet is unavailable", async () => {
     install();
     vi.stubGlobal("AudioWorkletNode", undefined);
 
     await expect(new BrowserStreamingAudioPlayer().open(24_000)).rejects.toBeInstanceOf(
-      ZeroVoxError,
+      VoxShotError,
     );
   });
 

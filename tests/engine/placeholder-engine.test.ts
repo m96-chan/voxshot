@@ -153,7 +153,7 @@ describe("PlaceholderEngine", () => {
 
     it("stays inside the -1..1 range", async () => {
       for (const sample of await engine.synthesize({
-        text: "hello there, this is ZeroVox.",
+        text: "hello there, this is VoxShot.",
         voice: speaker,
         speed: 1,
       })) {

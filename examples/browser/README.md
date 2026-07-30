@@ -1,7 +1,7 @@
-# ZeroVox Browser Demo
+# VoxShot Browser Demo
 
 A minimal page to verify text-to-speech end to end in a real browser:
-type text, press **Speak**, and ZeroVox synthesizes and plays it.
+type text, press **Speak**, and VoxShot synthesizes and plays it.
 
 ## Run
 

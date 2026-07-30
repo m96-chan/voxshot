@@ -1,5 +1,5 @@
-export { ZeroVox } from "./zerovox.js";
-export type { PlayOptions, SpeakOptions, VoiceSource, ZeroVoxOptions } from "./zerovox.js";
+export { VoxShot } from "./voxshot.js";
+export type { PlayOptions, SpeakOptions, VoiceSource, VoxShotOptions } from "./voxshot.js";
 
 export { SynthesizedAudio } from "./audio/synthesized-audio.js";
 export { normalizePeak, resample, toMono, trimSilence } from "./audio/pcm.js";
@@ -46,10 +46,10 @@ export {
   InvalidInputError,
   NoVoiceError,
   VoiceNotFoundError,
-  ZeroVoxError,
-  isZeroVoxError,
+  VoxShotError,
+  isVoxShotError,
 } from "./errors.js";
-export type { ZeroVoxErrorCode } from "./errors.js";
+export type { VoxShotErrorCode } from "./errors.js";
 
 export {
   BrowserAudioDecoder,

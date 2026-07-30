@@ -1,7 +1,7 @@
 import { InvalidInputError } from "../errors.js";
 import { normalizeText } from "./normalize.js";
 
-/** Characters that end a sentence in the languages ZeroVox targets. */
+/** Characters that end a sentence in the languages VoxShot targets. */
 const TERMINATORS = /[.!?。！？…]/;
 
 /** Characters that are acceptable places to break an over-long sentence. */

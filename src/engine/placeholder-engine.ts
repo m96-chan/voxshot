@@ -34,7 +34,7 @@ export interface PlaceholderEngineOptions {
  * streaming, playback — can be built and tested before an ONNX Runtime Web
  * backend lands.
  *
- * Replace it by passing your own {@link SynthesisEngine} to `ZeroVox.create`.
+ * Replace it by passing your own {@link SynthesisEngine} to `VoxShot.create`.
  */
 export class PlaceholderEngine implements SynthesisEngine {
   readonly name = "placeholder";

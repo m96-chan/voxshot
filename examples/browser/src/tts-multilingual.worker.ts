@@ -1,5 +1,5 @@
 import { env } from "@huggingface/transformers";
-import { ChatterboxEngine, exposeEngine, type RpcEndpoint } from "zerovox";
+import { ChatterboxEngine, exposeEngine, type RpcEndpoint } from "voxshot";
 
 // Serve the model from this origin: the Hub copy of the multilingual repo is
 // missing the config files Transformers.js needs, so a locally assembled

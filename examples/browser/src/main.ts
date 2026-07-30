@@ -1,11 +1,11 @@
 import {
   WorkerSynthesisEngine,
-  ZeroVox,
-  isZeroVoxError,
+  VoxShot,
+  isVoxShotError,
   toJapaneseReading,
   type LoadProgress,
   type PcmAudio,
-} from "zerovox";
+} from "voxshot";
 
 type EngineKind = "placeholder" | "chatterbox" | "chatterbox-multilingual";
 
@@ -33,7 +33,7 @@ function log(message: string): void {
 }
 
 /**
- * ZeroVox requires a reference voice before it can speak. The placeholder
+ * VoxShot requires a reference voice before it can speak. The placeholder
  * engine only extracts pitch / brightness / loudness from it, so a synthetic
  * vowel-like tone is enough to exercise the whole pipeline without assets.
  */
@@ -66,10 +66,10 @@ function createProgressLogger(): (progress: Record<string, unknown>) => void {
   };
 }
 
-const instances = new Map<EngineKind, Promise<ZeroVox>>();
+const instances = new Map<EngineKind, Promise<VoxShot>>();
 const clonedSource = new Map<EngineKind, File | "synthetic">();
 
-function getInstance(kind: EngineKind): Promise<ZeroVox> {
+function getInstance(kind: EngineKind): Promise<VoxShot> {
   let instance = instances.get(kind);
   if (!instance) {
     instance = createInstance(kind);
@@ -175,7 +175,7 @@ async function withProgress(response: Response, file: string): Promise<Response>
 
 const seconds = (fromMs: number) => ((performance.now() - fromMs) / 1000).toFixed(1);
 
-async function createInstance(kind: EngineKind): Promise<ZeroVox> {
+async function createInstance(kind: EngineKind): Promise<VoxShot> {
   if (kind === "chatterbox") {
     log("Preparing the Chatterbox model… (first run downloads ~1.5 GB)");
     const downloadStart = performance.now();
@@ -188,7 +188,7 @@ async function createInstance(kind: EngineKind): Promise<ZeroVox> {
     // model load, cloning and synthesis.
     const worker = new Worker(new URL("./tts.worker.ts", import.meta.url), { type: "module" });
     const engine = new WorkerSynthesisEngine(worker, { onProgress: createProgressLogger() });
-    const tts = await ZeroVox.create({ engine });
+    const tts = await VoxShot.create({ engine });
     log(`Chatterbox ready (device: ${tts.device}, init ${seconds(initStart)}s)`);
     return tts;
   }
@@ -213,17 +213,17 @@ async function createInstance(kind: EngineKind): Promise<ZeroVox> {
       type: "module",
     });
     const engine = new WorkerSynthesisEngine(worker, { onProgress: createProgressLogger() });
-    const tts = await ZeroVox.create({ engine });
+    const tts = await VoxShot.create({ engine });
     log(`Chatterbox Multilingual ready (device: ${tts.device}, init ${seconds(initStart)}s)`);
     return tts;
   }
 
-  const tts = await ZeroVox.create();
+  const tts = await VoxShot.create();
   log(`Placeholder engine ready (device: ${tts.device})`);
   return tts;
 }
 
-async function ensureVoice(kind: EngineKind, tts: ZeroVox): Promise<boolean> {
+async function ensureVoice(kind: EngineKind, tts: VoxShot): Promise<boolean> {
   if (kind !== "placeholder") {
     const file = referenceInput.files?.[0];
     if (!file) {
@@ -288,7 +288,7 @@ async function speak(): Promise<void> {
   log("Playback finished");
 }
 
-const DEFAULT_SAMPLE = "Hello from ZeroVox! This is a browser text to speech demo.";
+const DEFAULT_SAMPLE = "Hello from VoxShot! This is a browser text to speech demo.";
 const JAPANESE_SAMPLE = "会議は3月4日の14:00からです。参加費は1,000円で、AIが50%の確率で答えます。";
 
 jaReadingInput.addEventListener("change", () => {
@@ -322,7 +322,7 @@ speakButton.addEventListener("click", () => {
   speakButton.disabled = true;
   speak()
     .catch((cause) => {
-      if (isZeroVoxError(cause)) {
+      if (isVoxShotError(cause)) {
         log(`Error [${cause.code}] ${cause.message}`);
       } else {
         log(`Error: ${cause instanceof Error ? cause.message : String(cause)}`);
