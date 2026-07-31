@@ -1,0 +1,800 @@
+diff --git a/node_modules/@huggingface/transformers/dist/transformers.node.cjs b/node_modules/@huggingface/transformers/dist/transformers.node.cjs
+index 6cb09ae..bd9eacc 100644
+--- a/node_modules/@huggingface/transformers/dist/transformers.node.cjs
++++ b/node_modules/@huggingface/transformers/dist/transformers.node.cjs
+@@ -497,6 +497,7 @@ __export(transformers_exports, {
+   MimiPreTrainedModel: () => MimiPreTrainedModel,
+   MinLengthLogitsProcessor: () => MinLengthLogitsProcessor,
+   MinNewTokensLengthLogitsProcessor: () => MinNewTokensLengthLogitsProcessor,
++  MinPLogitsWarper: () => MinPLogitsWarper,
+   Mistral4ForCausalLM: () => Mistral4ForCausalLM,
+   Mistral4Model: () => Mistral4Model,
+   Mistral4PreTrainedModel: () => Mistral4PreTrainedModel,
+@@ -24151,6 +24152,62 @@ var TopKLogitsWarper = class extends LogitsWarper {
+     this.filter_value = filter_value;
+   }
+ };
++var MinPLogitsWarper = class extends LogitsWarper {
++  /**
++   * Create a `MinPLogitsWarper`.
++   * @param {number} min_p Minimum token probability, which will be scaled by the probability of the most likely
++   * token. It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range.
++   * @param {Object} options Additional options for the min-p filtering.
++   * @param {number} [options.filter_value=-Infinity] All filtered values will be set to this float value.
++   * @param {number} [options.min_tokens_to_keep=1] Minimum number of tokens that cannot be filtered.
++   */
++  constructor(min_p, { filter_value = -Infinity, min_tokens_to_keep = 1 } = {}) {
++    super();
++    if (typeof min_p !== "number" || min_p < 0 || min_p > 1) {
++      throw new Error(`\`min_p\` must be a float in the [0, 1] interval, but is ${min_p}`);
++    }
++    if (!Number.isInteger(min_tokens_to_keep) || min_tokens_to_keep < 1) {
++      throw new Error(`\`min_tokens_to_keep\` must be a positive integer, but is ${min_tokens_to_keep}`);
++    }
++    this.min_p = min_p;
++    this.filter_value = filter_value;
++    this.min_tokens_to_keep = min_tokens_to_keep;
++  }
++  /**
++   * Apply logit warper.
++   * @param {bigint[][]} input_ids The input IDs.
++   * @param {Tensor} logits The logits.
++   * @returns {Tensor} The processed logits.
++   */
++  _call(input_ids, logits) {
++    const vocab_size = logits.dims.at(-1);
++    const batch_size = logits.data.length / vocab_size;
++    const data = (
++      /** @type {Float32Array} */
++      logits.data
++    );
++    const log_min_p = Math.log(this.min_p);
++    for (let b = 0; b < batch_size; ++b) {
++      const offset = b * vocab_size;
++      let max_logit = -Infinity;
++      for (let i = 0; i < vocab_size; ++i) {
++        const v = data[offset + i];
++        if (v > max_logit) max_logit = v;
++      }
++      let threshold = max_logit + log_min_p;
++      if (this.min_tokens_to_keep > 1) {
++        const sorted = Array.from(data.subarray(offset, offset + vocab_size)).sort((a, b2) => b2 - a);
++        threshold = Math.min(threshold, sorted[Math.min(this.min_tokens_to_keep, vocab_size) - 1]);
++      }
++      for (let i = 0; i < vocab_size; ++i) {
++        if (data[offset + i] < threshold) {
++          data[offset + i] = this.filter_value;
++        }
++      }
++    }
++    return logits;
++  }
++};
+ 
+ // src/generation/configuration_utils.js
+ var GenerationConfig = class {
+@@ -24250,6 +24307,13 @@ var GenerationConfig = class {
+    * @default 1.0
+    */
+   top_p = 1;
++  /**
++   * Minimum token probability, which will be scaled by the probability of the most likely token.
++   * It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range, comparably selective as setting `top_p` in the 0.99-0.8 range (use the opposite of normal `top_p` values).
++   * @type {number}
++   * @default null
++   */
++  min_p = null;
+   /**
+    * Local typicality measures how similar the conditional probability of predicting a target token next is to the expected conditional probability of predicting a random token next, given the partial text already generated.
+    * If set to float < 1, the smallest set of the most locally typical tokens with probabilities that add up to `typical_p` or higher are kept for generation.
+@@ -25331,6 +25395,9 @@ var PreTrainedModel = class extends Callable {
+    */
+   _get_logits_processor(generation_config, input_ids_seq_length, logits_processor = null) {
+     const processors = new LogitsProcessorList();
++    if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
++      processors.push(new ClassifierFreeGuidanceLogitsProcessor(generation_config.guidance_scale));
++    }
+     if (generation_config.repetition_penalty !== null && generation_config.repetition_penalty !== 1) {
+       processors.push(new RepetitionPenaltyLogitsProcessor(generation_config.repetition_penalty));
+     }
+@@ -25371,9 +25438,6 @@ var PreTrainedModel = class extends Callable {
+         new SuppressTokensAtBeginLogitsProcessor(generation_config.begin_suppress_tokens, begin_index)
+       );
+     }
+-    if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
+-      processors.push(new ClassifierFreeGuidanceLogitsProcessor(generation_config.guidance_scale));
+-    }
+     if (generation_config.temperature === 0 && generation_config.do_sample) {
+       logger.warn(
+         "`do_sample` changed to false because `temperature: 0` implies greedy sampling (always selecting the most likely token), which is incompatible with `do_sample: true`."
+@@ -25384,6 +25448,9 @@ var PreTrainedModel = class extends Callable {
+       if (generation_config.temperature !== null && generation_config.temperature !== 1) {
+         processors.push(new TemperatureLogitsWarper(generation_config.temperature));
+       }
++      if (generation_config.min_p !== null && generation_config.min_p > 0) {
++        processors.push(new MinPLogitsWarper(generation_config.min_p));
++      }
+     }
+     if (logits_processor !== null) {
+       processors.extend(logits_processor);
+@@ -27100,12 +27167,41 @@ var ChatterboxModel = class extends ChatterboxPreTrainedModel {
+         embed_model_inputs.position_ids = position_ids;
+       }
+       ({ inputs_embeds } = await sessionRun(this.sessions["embed_tokens"], embed_model_inputs));
++      const use_cfg = generation_config?.guidance_scale > 1;
++      if (use_cfg) {
++        if (input_ids.dims[0] !== 1) {
++          throw new Error("Classifier-free guidance is only supported for a batch size of 1.");
++        }
++        if (past_key_values && inputs_embeds.dims[1] === 1) {
++          inputs_embeds = cat([inputs_embeds, inputs_embeds], 0);
++        } else {
++          const ids = input_ids.data;
++          const hidden_size = inputs_embeds.dims.at(-1);
++          const unconditional = inputs_embeds.data.slice();
++          for (let i = 0; i < ids.length; ++i) {
++            if (ids[i] < START_SPEECH_TOKEN) {
++              unconditional.fill(0, i * hidden_size, (i + 1) * hidden_size);
++            }
++          }
++          inputs_embeds = cat(
++            [inputs_embeds, new Tensor2(inputs_embeds.type, unconditional, inputs_embeds.dims)],
++            0
++          );
++        }
++      }
+       if (audio_features && audio_tokens && speaker_embeddings && speaker_features) {
+         speech_encoder_outputs = { audio_features, audio_tokens, speaker_embeddings, speaker_features };
+       }
+       if (speech_encoder_outputs || audio_values) {
+         speech_encoder_outputs ??= await this.encode_speech(audio_values);
+-        inputs_embeds = cat([speech_encoder_outputs.audio_features, inputs_embeds], 1);
++        let cond_features = speech_encoder_outputs.audio_features;
++        if (cond_features.dims[0] !== inputs_embeds.dims[0]) {
++          cond_features = cat(
++            Array.from({ length: inputs_embeds.dims[0] }, () => cond_features),
++            0
++          );
++        }
++        inputs_embeds = cat([cond_features, inputs_embeds], 1);
+         attention_mask = ones([inputs_embeds.dims[0], inputs_embeds.dims[1]]);
+       } else {
+         const target_length = inputs_embeds.dims[1];
+@@ -27133,6 +27229,7 @@ var ChatterboxModel = class extends ChatterboxPreTrainedModel {
+     };
+   }
+   prepare_inputs_for_generation(input_ids, model_inputs, generation_config) {
++    model_inputs.generation_config = generation_config;
+     if (!model_inputs.position_ids && this.sessions["embed_tokens"].inputNames.includes("position_ids")) {
+       if (model_inputs.input_ids.dims[1] === 1) {
+         const position_ids = Array.from(
+@@ -35301,6 +35398,7 @@ var ModelRegistry = class {
+   MimiPreTrainedModel,
+   MinLengthLogitsProcessor,
+   MinNewTokensLengthLogitsProcessor,
++  MinPLogitsWarper,
+   Mistral4ForCausalLM,
+   Mistral4Model,
+   Mistral4PreTrainedModel,
+diff --git a/node_modules/@huggingface/transformers/dist/transformers.node.mjs b/node_modules/@huggingface/transformers/dist/transformers.node.mjs
+index bacb354..bfbacce 100644
+--- a/node_modules/@huggingface/transformers/dist/transformers.node.mjs
++++ b/node_modules/@huggingface/transformers/dist/transformers.node.mjs
+@@ -23191,6 +23191,62 @@ var TopKLogitsWarper = class extends LogitsWarper {
+     this.filter_value = filter_value;
+   }
+ };
++var MinPLogitsWarper = class extends LogitsWarper {
++  /**
++   * Create a `MinPLogitsWarper`.
++   * @param {number} min_p Minimum token probability, which will be scaled by the probability of the most likely
++   * token. It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range.
++   * @param {Object} options Additional options for the min-p filtering.
++   * @param {number} [options.filter_value=-Infinity] All filtered values will be set to this float value.
++   * @param {number} [options.min_tokens_to_keep=1] Minimum number of tokens that cannot be filtered.
++   */
++  constructor(min_p, { filter_value = -Infinity, min_tokens_to_keep = 1 } = {}) {
++    super();
++    if (typeof min_p !== "number" || min_p < 0 || min_p > 1) {
++      throw new Error(`\`min_p\` must be a float in the [0, 1] interval, but is ${min_p}`);
++    }
++    if (!Number.isInteger(min_tokens_to_keep) || min_tokens_to_keep < 1) {
++      throw new Error(`\`min_tokens_to_keep\` must be a positive integer, but is ${min_tokens_to_keep}`);
++    }
++    this.min_p = min_p;
++    this.filter_value = filter_value;
++    this.min_tokens_to_keep = min_tokens_to_keep;
++  }
++  /**
++   * Apply logit warper.
++   * @param {bigint[][]} input_ids The input IDs.
++   * @param {Tensor} logits The logits.
++   * @returns {Tensor} The processed logits.
++   */
++  _call(input_ids, logits) {
++    const vocab_size = logits.dims.at(-1);
++    const batch_size = logits.data.length / vocab_size;
++    const data = (
++      /** @type {Float32Array} */
++      logits.data
++    );
++    const log_min_p = Math.log(this.min_p);
++    for (let b = 0; b < batch_size; ++b) {
++      const offset = b * vocab_size;
++      let max_logit = -Infinity;
++      for (let i = 0; i < vocab_size; ++i) {
++        const v = data[offset + i];
++        if (v > max_logit) max_logit = v;
++      }
++      let threshold = max_logit + log_min_p;
++      if (this.min_tokens_to_keep > 1) {
++        const sorted = Array.from(data.subarray(offset, offset + vocab_size)).sort((a, b2) => b2 - a);
++        threshold = Math.min(threshold, sorted[Math.min(this.min_tokens_to_keep, vocab_size) - 1]);
++      }
++      for (let i = 0; i < vocab_size; ++i) {
++        if (data[offset + i] < threshold) {
++          data[offset + i] = this.filter_value;
++        }
++      }
++    }
++    return logits;
++  }
++};
+ 
+ // src/generation/configuration_utils.js
+ var GenerationConfig = class {
+@@ -23290,6 +23346,13 @@ var GenerationConfig = class {
+    * @default 1.0
+    */
+   top_p = 1;
++  /**
++   * Minimum token probability, which will be scaled by the probability of the most likely token.
++   * It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range, comparably selective as setting `top_p` in the 0.99-0.8 range (use the opposite of normal `top_p` values).
++   * @type {number}
++   * @default null
++   */
++  min_p = null;
+   /**
+    * Local typicality measures how similar the conditional probability of predicting a target token next is to the expected conditional probability of predicting a random token next, given the partial text already generated.
+    * If set to float < 1, the smallest set of the most locally typical tokens with probabilities that add up to `typical_p` or higher are kept for generation.
+@@ -24371,6 +24434,9 @@ var PreTrainedModel = class extends Callable {
+    */
+   _get_logits_processor(generation_config, input_ids_seq_length, logits_processor = null) {
+     const processors = new LogitsProcessorList();
++    if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
++      processors.push(new ClassifierFreeGuidanceLogitsProcessor(generation_config.guidance_scale));
++    }
+     if (generation_config.repetition_penalty !== null && generation_config.repetition_penalty !== 1) {
+       processors.push(new RepetitionPenaltyLogitsProcessor(generation_config.repetition_penalty));
+     }
+@@ -24411,9 +24477,6 @@ var PreTrainedModel = class extends Callable {
+         new SuppressTokensAtBeginLogitsProcessor(generation_config.begin_suppress_tokens, begin_index)
+       );
+     }
+-    if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
+-      processors.push(new ClassifierFreeGuidanceLogitsProcessor(generation_config.guidance_scale));
+-    }
+     if (generation_config.temperature === 0 && generation_config.do_sample) {
+       logger.warn(
+         "`do_sample` changed to false because `temperature: 0` implies greedy sampling (always selecting the most likely token), which is incompatible with `do_sample: true`."
+@@ -24424,6 +24487,9 @@ var PreTrainedModel = class extends Callable {
+       if (generation_config.temperature !== null && generation_config.temperature !== 1) {
+         processors.push(new TemperatureLogitsWarper(generation_config.temperature));
+       }
++      if (generation_config.min_p !== null && generation_config.min_p > 0) {
++        processors.push(new MinPLogitsWarper(generation_config.min_p));
++      }
+     }
+     if (logits_processor !== null) {
+       processors.extend(logits_processor);
+@@ -26140,12 +26206,41 @@ var ChatterboxModel = class extends ChatterboxPreTrainedModel {
+         embed_model_inputs.position_ids = position_ids;
+       }
+       ({ inputs_embeds } = await sessionRun(this.sessions["embed_tokens"], embed_model_inputs));
++      const use_cfg = generation_config?.guidance_scale > 1;
++      if (use_cfg) {
++        if (input_ids.dims[0] !== 1) {
++          throw new Error("Classifier-free guidance is only supported for a batch size of 1.");
++        }
++        if (past_key_values && inputs_embeds.dims[1] === 1) {
++          inputs_embeds = cat([inputs_embeds, inputs_embeds], 0);
++        } else {
++          const ids = input_ids.data;
++          const hidden_size = inputs_embeds.dims.at(-1);
++          const unconditional = inputs_embeds.data.slice();
++          for (let i = 0; i < ids.length; ++i) {
++            if (ids[i] < START_SPEECH_TOKEN) {
++              unconditional.fill(0, i * hidden_size, (i + 1) * hidden_size);
++            }
++          }
++          inputs_embeds = cat(
++            [inputs_embeds, new Tensor2(inputs_embeds.type, unconditional, inputs_embeds.dims)],
++            0
++          );
++        }
++      }
+       if (audio_features && audio_tokens && speaker_embeddings && speaker_features) {
+         speech_encoder_outputs = { audio_features, audio_tokens, speaker_embeddings, speaker_features };
+       }
+       if (speech_encoder_outputs || audio_values) {
+         speech_encoder_outputs ??= await this.encode_speech(audio_values);
+-        inputs_embeds = cat([speech_encoder_outputs.audio_features, inputs_embeds], 1);
++        let cond_features = speech_encoder_outputs.audio_features;
++        if (cond_features.dims[0] !== inputs_embeds.dims[0]) {
++          cond_features = cat(
++            Array.from({ length: inputs_embeds.dims[0] }, () => cond_features),
++            0
++          );
++        }
++        inputs_embeds = cat([cond_features, inputs_embeds], 1);
+         attention_mask = ones([inputs_embeds.dims[0], inputs_embeds.dims[1]]);
+       } else {
+         const target_length = inputs_embeds.dims[1];
+@@ -26173,6 +26268,7 @@ var ChatterboxModel = class extends ChatterboxPreTrainedModel {
+     };
+   }
+   prepare_inputs_for_generation(input_ids, model_inputs, generation_config) {
++    model_inputs.generation_config = generation_config;
+     if (!model_inputs.position_ids && this.sessions["embed_tokens"].inputNames.includes("position_ids")) {
+       if (model_inputs.input_ids.dims[1] === 1) {
+         const position_ids = Array.from(
+@@ -34340,6 +34436,7 @@ export {
+   MimiPreTrainedModel,
+   MinLengthLogitsProcessor,
+   MinNewTokensLengthLogitsProcessor,
++  MinPLogitsWarper,
+   Mistral4ForCausalLM,
+   Mistral4Model,
+   Mistral4PreTrainedModel,
+diff --git a/node_modules/@huggingface/transformers/dist/transformers.web.js b/node_modules/@huggingface/transformers/dist/transformers.web.js
+index bb7b327..8843f12 100644
+--- a/node_modules/@huggingface/transformers/dist/transformers.web.js
++++ b/node_modules/@huggingface/transformers/dist/transformers.web.js
+@@ -19305,6 +19305,62 @@ var TopKLogitsWarper = class extends LogitsWarper {
+     this.filter_value = filter_value;
+   }
+ };
++var MinPLogitsWarper = class extends LogitsWarper {
++  /**
++   * Create a `MinPLogitsWarper`.
++   * @param {number} min_p Minimum token probability, which will be scaled by the probability of the most likely
++   * token. It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range.
++   * @param {Object} options Additional options for the min-p filtering.
++   * @param {number} [options.filter_value=-Infinity] All filtered values will be set to this float value.
++   * @param {number} [options.min_tokens_to_keep=1] Minimum number of tokens that cannot be filtered.
++   */
++  constructor(min_p, { filter_value = -Infinity, min_tokens_to_keep = 1 } = {}) {
++    super();
++    if (typeof min_p !== "number" || min_p < 0 || min_p > 1) {
++      throw new Error(`\`min_p\` must be a float in the [0, 1] interval, but is ${min_p}`);
++    }
++    if (!Number.isInteger(min_tokens_to_keep) || min_tokens_to_keep < 1) {
++      throw new Error(`\`min_tokens_to_keep\` must be a positive integer, but is ${min_tokens_to_keep}`);
++    }
++    this.min_p = min_p;
++    this.filter_value = filter_value;
++    this.min_tokens_to_keep = min_tokens_to_keep;
++  }
++  /**
++   * Apply logit warper.
++   * @param {bigint[][]} input_ids The input IDs.
++   * @param {Tensor} logits The logits.
++   * @returns {Tensor} The processed logits.
++   */
++  _call(input_ids, logits) {
++    const vocab_size = logits.dims.at(-1);
++    const batch_size = logits.data.length / vocab_size;
++    const data = (
++      /** @type {Float32Array} */
++      logits.data
++    );
++    const log_min_p = Math.log(this.min_p);
++    for (let b = 0; b < batch_size; ++b) {
++      const offset = b * vocab_size;
++      let max_logit = -Infinity;
++      for (let i = 0; i < vocab_size; ++i) {
++        const v = data[offset + i];
++        if (v > max_logit) max_logit = v;
++      }
++      let threshold = max_logit + log_min_p;
++      if (this.min_tokens_to_keep > 1) {
++        const sorted = Array.from(data.subarray(offset, offset + vocab_size)).sort((a, b2) => b2 - a);
++        threshold = Math.min(threshold, sorted[Math.min(this.min_tokens_to_keep, vocab_size) - 1]);
++      }
++      for (let i = 0; i < vocab_size; ++i) {
++        if (data[offset + i] < threshold) {
++          data[offset + i] = this.filter_value;
++        }
++      }
++    }
++    return logits;
++  }
++};
+ 
+ // src/generation/configuration_utils.js
+ var GenerationConfig = class {
+@@ -19404,6 +19460,13 @@ var GenerationConfig = class {
+    * @default 1.0
+    */
+   top_p = 1;
++  /**
++   * Minimum token probability, which will be scaled by the probability of the most likely token.
++   * It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range, comparably selective as setting `top_p` in the 0.99-0.8 range (use the opposite of normal `top_p` values).
++   * @type {number}
++   * @default null
++   */
++  min_p = null;
+   /**
+    * Local typicality measures how similar the conditional probability of predicting a target token next is to the expected conditional probability of predicting a random token next, given the partial text already generated.
+    * If set to float < 1, the smallest set of the most locally typical tokens with probabilities that add up to `typical_p` or higher are kept for generation.
+@@ -20485,6 +20548,9 @@ var PreTrainedModel = class extends Callable {
+    */
+   _get_logits_processor(generation_config, input_ids_seq_length, logits_processor = null) {
+     const processors = new LogitsProcessorList();
++    if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
++      processors.push(new ClassifierFreeGuidanceLogitsProcessor(generation_config.guidance_scale));
++    }
+     if (generation_config.repetition_penalty !== null && generation_config.repetition_penalty !== 1) {
+       processors.push(new RepetitionPenaltyLogitsProcessor(generation_config.repetition_penalty));
+     }
+@@ -20525,9 +20591,6 @@ var PreTrainedModel = class extends Callable {
+         new SuppressTokensAtBeginLogitsProcessor(generation_config.begin_suppress_tokens, begin_index)
+       );
+     }
+-    if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
+-      processors.push(new ClassifierFreeGuidanceLogitsProcessor(generation_config.guidance_scale));
+-    }
+     if (generation_config.temperature === 0 && generation_config.do_sample) {
+       logger.warn(
+         "`do_sample` changed to false because `temperature: 0` implies greedy sampling (always selecting the most likely token), which is incompatible with `do_sample: true`."
+@@ -20538,6 +20601,9 @@ var PreTrainedModel = class extends Callable {
+       if (generation_config.temperature !== null && generation_config.temperature !== 1) {
+         processors.push(new TemperatureLogitsWarper(generation_config.temperature));
+       }
++      if (generation_config.min_p !== null && generation_config.min_p > 0) {
++        processors.push(new MinPLogitsWarper(generation_config.min_p));
++      }
+     }
+     if (logits_processor !== null) {
+       processors.extend(logits_processor);
+@@ -22254,12 +22320,41 @@ var ChatterboxModel = class extends ChatterboxPreTrainedModel {
+         embed_model_inputs.position_ids = position_ids;
+       }
+       ({ inputs_embeds } = await sessionRun(this.sessions["embed_tokens"], embed_model_inputs));
++      const use_cfg = generation_config?.guidance_scale > 1;
++      if (use_cfg) {
++        if (input_ids.dims[0] !== 1) {
++          throw new Error("Classifier-free guidance is only supported for a batch size of 1.");
++        }
++        if (past_key_values && inputs_embeds.dims[1] === 1) {
++          inputs_embeds = cat([inputs_embeds, inputs_embeds], 0);
++        } else {
++          const ids = input_ids.data;
++          const hidden_size = inputs_embeds.dims.at(-1);
++          const unconditional = inputs_embeds.data.slice();
++          for (let i = 0; i < ids.length; ++i) {
++            if (ids[i] < START_SPEECH_TOKEN) {
++              unconditional.fill(0, i * hidden_size, (i + 1) * hidden_size);
++            }
++          }
++          inputs_embeds = cat(
++            [inputs_embeds, new Tensor2(inputs_embeds.type, unconditional, inputs_embeds.dims)],
++            0
++          );
++        }
++      }
+       if (audio_features && audio_tokens && speaker_embeddings && speaker_features) {
+         speech_encoder_outputs = { audio_features, audio_tokens, speaker_embeddings, speaker_features };
+       }
+       if (speech_encoder_outputs || audio_values) {
+         speech_encoder_outputs ??= await this.encode_speech(audio_values);
+-        inputs_embeds = cat([speech_encoder_outputs.audio_features, inputs_embeds], 1);
++        let cond_features = speech_encoder_outputs.audio_features;
++        if (cond_features.dims[0] !== inputs_embeds.dims[0]) {
++          cond_features = cat(
++            Array.from({ length: inputs_embeds.dims[0] }, () => cond_features),
++            0
++          );
++        }
++        inputs_embeds = cat([cond_features, inputs_embeds], 1);
+         attention_mask = ones([inputs_embeds.dims[0], inputs_embeds.dims[1]]);
+       } else {
+         const target_length = inputs_embeds.dims[1];
+@@ -22287,6 +22382,7 @@ var ChatterboxModel = class extends ChatterboxPreTrainedModel {
+     };
+   }
+   prepare_inputs_for_generation(input_ids, model_inputs, generation_config) {
++    model_inputs.generation_config = generation_config;
+     if (!model_inputs.position_ids && this.sessions["embed_tokens"].inputNames.includes("position_ids")) {
+       if (model_inputs.input_ids.dims[1] === 1) {
+         const position_ids = Array.from(
+@@ -30454,6 +30550,7 @@ export {
+   MimiPreTrainedModel,
+   MinLengthLogitsProcessor,
+   MinNewTokensLengthLogitsProcessor,
++  MinPLogitsWarper,
+   Mistral4ForCausalLM,
+   Mistral4Model,
+   Mistral4PreTrainedModel,
+diff --git a/node_modules/@huggingface/transformers/src/generation/configuration_utils.js b/node_modules/@huggingface/transformers/src/generation/configuration_utils.js
+index da27891..3ed6177 100644
+--- a/node_modules/@huggingface/transformers/src/generation/configuration_utils.js
++++ b/node_modules/@huggingface/transformers/src/generation/configuration_utils.js
+@@ -118,6 +118,14 @@ export class GenerationConfig {
+      */
+     top_p = 1.0;
+ 
++    /**
++     * Minimum token probability, which will be scaled by the probability of the most likely token.
++     * It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range, comparably selective as setting `top_p` in the 0.99-0.8 range (use the opposite of normal `top_p` values).
++     * @type {number}
++     * @default null
++     */
++    min_p = null;
++
+     /**
+      * Local typicality measures how similar the conditional probability of predicting a target token next is to the expected conditional probability of predicting a random token next, given the partial text already generated.
+      * If set to float < 1, the smallest set of the most locally typical tokens with probabilities that add up to `typical_p` or higher are kept for generation.
+diff --git a/node_modules/@huggingface/transformers/src/generation/logits_process.js b/node_modules/@huggingface/transformers/src/generation/logits_process.js
+index 647a308..42f66f7 100644
+--- a/node_modules/@huggingface/transformers/src/generation/logits_process.js
++++ b/node_modules/@huggingface/transformers/src/generation/logits_process.js
+@@ -749,3 +749,72 @@ export class TopKLogitsWarper extends LogitsWarper {
+         this.filter_value = filter_value;
+     }
+ }
++
++/**
++ * [`LogitsWarper`] that performs min-p, i.e. keeping all tokens that are above a minimum probability, scaled by the
++ * probability of the most likely token. As a result, the filter becomes more aggressive in the presence of
++ * high-probability tokens, which is a sign of a confident output that we shouldn't deviate from.
++ * Often used together with [`TemperatureLogitsWarper`]. Used as an alternative to [`TopPLogitsWarper`] and
++ * [`TopKLogitsWarper`].
++ */
++export class MinPLogitsWarper extends LogitsWarper {
++    /**
++     * Create a `MinPLogitsWarper`.
++     * @param {number} min_p Minimum token probability, which will be scaled by the probability of the most likely
++     * token. It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range.
++     * @param {Object} options Additional options for the min-p filtering.
++     * @param {number} [options.filter_value=-Infinity] All filtered values will be set to this float value.
++     * @param {number} [options.min_tokens_to_keep=1] Minimum number of tokens that cannot be filtered.
++     */
++    constructor(min_p, { filter_value = -Infinity, min_tokens_to_keep = 1 } = {}) {
++        super();
++        if (typeof min_p !== 'number' || min_p < 0 || min_p > 1.0) {
++            throw new Error(`\`min_p\` must be a float in the [0, 1] interval, but is ${min_p}`);
++        }
++        if (!Number.isInteger(min_tokens_to_keep) || min_tokens_to_keep < 1) {
++            throw new Error(`\`min_tokens_to_keep\` must be a positive integer, but is ${min_tokens_to_keep}`);
++        }
++        this.min_p = min_p;
++        this.filter_value = filter_value;
++        this.min_tokens_to_keep = min_tokens_to_keep;
++    }
++
++    /**
++     * Apply logit warper.
++     * @param {bigint[][]} input_ids The input IDs.
++     * @param {Tensor} logits The logits.
++     * @returns {Tensor} The processed logits.
++     */
++    _call(input_ids, logits) {
++        const vocab_size = logits.dims.at(-1);
++        const batch_size = logits.data.length / vocab_size;
++        const data = /** @type {Float32Array} */ (logits.data);
++        const log_min_p = Math.log(this.min_p);
++        for (let b = 0; b < batch_size; ++b) {
++            const offset = b * vocab_size;
++
++            // Since softmax is monotonic and shift-invariant, `prob < min_p * max_prob`
++            // is equivalent to `logit < max_logit + log(min_p)`, so the probabilities
++            // never need to be materialized.
++            let max_logit = -Infinity;
++            for (let i = 0; i < vocab_size; ++i) {
++                const v = data[offset + i];
++                if (v > max_logit) max_logit = v;
++            }
++            let threshold = max_logit + log_min_p;
++
++            if (this.min_tokens_to_keep > 1) {
++                // Lower the threshold if needed so that at least `min_tokens_to_keep` tokens survive.
++                const sorted = Array.from(data.subarray(offset, offset + vocab_size)).sort((a, b) => b - a);
++                threshold = Math.min(threshold, sorted[Math.min(this.min_tokens_to_keep, vocab_size) - 1]);
++            }
++
++            for (let i = 0; i < vocab_size; ++i) {
++                if (data[offset + i] < threshold) {
++                    data[offset + i] = this.filter_value;
++                }
++            }
++        }
++        return logits;
++    }
++}
+diff --git a/node_modules/@huggingface/transformers/src/models/chatterbox/modeling_chatterbox.js b/node_modules/@huggingface/transformers/src/models/chatterbox/modeling_chatterbox.js
+index bdcd491..fdc1a7a 100644
+--- a/node_modules/@huggingface/transformers/src/models/chatterbox/modeling_chatterbox.js
++++ b/node_modules/@huggingface/transformers/src/models/chatterbox/modeling_chatterbox.js
+@@ -89,6 +89,42 @@ export class ChatterboxModel extends ChatterboxPreTrainedModel {
+ 
+             ({ inputs_embeds } = await sessionRun(this.sessions['embed_tokens'], embed_model_inputs));
+ 
++            // Classifier-free guidance (CFG): the reference PyTorch implementation
++            // (resemble-ai/chatterbox, `T3.inference`) always generates with
++            // `cfg_weight=0.5`, running a batch of two sequences: the conditional
++            // input and an unconditional copy whose *text* token embeddings are
++            // zeroed (`text_emb[1].zero_()`) — speaker conditioning, exaggeration
++            // and speech tokens are shared between the two rows. The multilingual
++            // checkpoint produces unintelligible vocalizations without it.
++            // Enabled by setting `guidance_scale` (= 1 + cfg_weight, i.e. 1.5 for
++            // parity with the python defaults) to a value > 1. The two rows are
++            // recombined by `ClassifierFreeGuidanceLogitsProcessor`, so the
++            // batch size visible to `generate()` remains 1.
++            const use_cfg = generation_config?.guidance_scale > 1;
++            if (use_cfg) {
++                if (input_ids.dims[0] !== 1) {
++                    throw new Error('Classifier-free guidance is only supported for a batch size of 1.');
++                }
++                if (past_key_values && inputs_embeds.dims[1] === 1) {
++                    // Generation step: the sampled speech token is fed to both rows.
++                    inputs_embeds = cat([inputs_embeds, inputs_embeds], 0);
++                } else {
++                    // Prefill: zero out the text token embeddings of the unconditional row.
++                    const ids = input_ids.data;
++                    const hidden_size = inputs_embeds.dims.at(-1);
++                    const unconditional = inputs_embeds.data.slice();
++                    for (let i = 0; i < ids.length; ++i) {
++                        if (ids[i] < START_SPEECH_TOKEN) {
++                            unconditional.fill(0, i * hidden_size, (i + 1) * hidden_size);
++                        }
++                    }
++                    inputs_embeds = cat(
++                        [inputs_embeds, new Tensor(inputs_embeds.type, unconditional, inputs_embeds.dims)],
++                        0,
++                    );
++                }
++            }
++
+             if (audio_features && audio_tokens && speaker_embeddings && speaker_features) {
+                 // Use pre-computed speech encoder outputs
+                 speech_encoder_outputs = { audio_features, audio_tokens, speaker_embeddings, speaker_features };
+@@ -97,8 +133,16 @@ export class ChatterboxModel extends ChatterboxPreTrainedModel {
+             if (speech_encoder_outputs || audio_values) {
+                 speech_encoder_outputs ??= await this.encode_speech(audio_values);
+ 
+-                // Update LLM inputs
+-                inputs_embeds = cat([speech_encoder_outputs.audio_features, inputs_embeds], 1);
++                // Update LLM inputs. With CFG enabled, the speaker conditioning is
++                // shared by (i.e. repeated for) the conditional and unconditional rows.
++                let cond_features = speech_encoder_outputs.audio_features;
++                if (cond_features.dims[0] !== inputs_embeds.dims[0]) {
++                    cond_features = cat(
++                        Array.from({ length: inputs_embeds.dims[0] }, () => cond_features),
++                        0,
++                    );
++                }
++                inputs_embeds = cat([cond_features, inputs_embeds], 1);
+                 attention_mask = ones([inputs_embeds.dims[0], inputs_embeds.dims[1]]);
+             } else {
+                 const target_length = inputs_embeds.dims[1];
+@@ -128,6 +172,9 @@ export class ChatterboxModel extends ChatterboxPreTrainedModel {
+     }
+ 
+     prepare_inputs_for_generation(input_ids, model_inputs, generation_config) {
++        // Forward the generation config to `forward`, which needs `guidance_scale`
++        // to decide whether to build the classifier-free guidance batch.
++        model_inputs.generation_config = generation_config;
+         if (!model_inputs.position_ids && this.sessions['embed_tokens'].inputNames.includes('position_ids')) {
+             // If position_ids are not provided, we create them on the fly using the position of the START_SPEECH_TOKEN
+             if (model_inputs.input_ids.dims[1] === 1) {
+diff --git a/node_modules/@huggingface/transformers/src/models/modeling_utils.js b/node_modules/@huggingface/transformers/src/models/modeling_utils.js
+index 51487ce..a5bdb03 100644
+--- a/node_modules/@huggingface/transformers/src/models/modeling_utils.js
++++ b/node_modules/@huggingface/transformers/src/models/modeling_utils.js
+@@ -29,6 +29,7 @@ import {
+     MinLengthLogitsProcessor,
+     MinNewTokensLengthLogitsProcessor,
+     TemperatureLogitsWarper,
++    MinPLogitsWarper,
+     ClassifierFreeGuidanceLogitsProcessor,
+ } from '../generation/logits_process.js';
+ import { GenerationConfig } from '../generation/configuration_utils.js';
+@@ -402,6 +403,14 @@ export class PreTrainedModel extends Callable {
+     ) {
+         const processors = new LogitsProcessorList();
+ 
++        // Classifier-free guidance must run FIRST so that the conditional and
++        // unconditional batches are combined back into a single batch before any
++        // other processor (e.g. repetition penalty) is applied — matching the
++        // processor ordering of the python `transformers` library.
++        if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
++            processors.push(new ClassifierFreeGuidanceLogitsProcessor(generation_config.guidance_scale));
++        }
++
+         // if (generation_config.diversity_penalty !== null && generation_config.diversity_penalty > 0.0) {
+         //     processors.push(new HammingDiversityLogitsProcessor(
+         //         generation_config.diversity_penalty,
+@@ -513,11 +522,6 @@ export class PreTrainedModel extends Callable {
+         //     processors.push(new ForceTokensLogitsProcessor(generation_config.forced_decoder_ids));
+         // }
+ 
+-        // 8. prepare batched CFG externally
+-        if (generation_config.guidance_scale !== null && generation_config.guidance_scale > 1) {
+-            processors.push(new ClassifierFreeGuidanceLogitsProcessor(generation_config.guidance_scale));
+-        }
+-
+         if (generation_config.temperature === 0 && generation_config.do_sample) {
+             logger.warn(
+                 '`do_sample` changed to false because `temperature: 0` implies greedy sampling (always selecting the most likely token), which is incompatible with `do_sample: true`.',
+@@ -536,6 +540,9 @@ export class PreTrainedModel extends Callable {
+             // if (generation_config.top_p !== null && generation_config.top_p < 1.0) {
+             //     processors.push(new TopPLogitsWarper(generation_config.top_p));
+             // }
++            if (generation_config.min_p !== null && generation_config.min_p > 0) {
++                processors.push(new MinPLogitsWarper(generation_config.min_p));
++            }
+         }
+ 
+         if (logits_processor !== null) {
+diff --git a/node_modules/@huggingface/transformers/types/generation/configuration_utils.d.ts b/node_modules/@huggingface/transformers/types/generation/configuration_utils.d.ts
+index 1a19323..89d40d1 100644
+--- a/node_modules/@huggingface/transformers/types/generation/configuration_utils.d.ts
++++ b/node_modules/@huggingface/transformers/types/generation/configuration_utils.d.ts
+@@ -100,6 +100,13 @@ export class GenerationConfig {
+      * @default 1.0
+      */
+     top_p: number;
++    /**
++     * Minimum token probability, which will be scaled by the probability of the most likely token.
++     * It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range, comparably selective as setting `top_p` in the 0.99-0.8 range (use the opposite of normal `top_p` values).
++     * @type {number}
++     * @default null
++     */
++    min_p: number;
+     /**
+      * Local typicality measures how similar the conditional probability of predicting a target token next is to the expected conditional probability of predicting a random token next, given the partial text already generated.
+      * If set to float < 1, the smallest set of the most locally typical tokens with probabilities that add up to `typical_p` or higher are kept for generation.
+diff --git a/node_modules/@huggingface/transformers/types/generation/logits_process.d.ts b/node_modules/@huggingface/transformers/types/generation/logits_process.d.ts
+index fd26831..9eab8aa 100644
+--- a/node_modules/@huggingface/transformers/types/generation/logits_process.d.ts
++++ b/node_modules/@huggingface/transformers/types/generation/logits_process.d.ts
+@@ -378,6 +378,37 @@ export class TopKLogitsWarper extends LogitsWarper {
+     top_k: number;
+     filter_value: number;
+ }
++/**
++ * [`LogitsWarper`] that performs min-p, i.e. keeping all tokens that are above a minimum probability, scaled by the
++ * probability of the most likely token. As a result, the filter becomes more aggressive in the presence of
++ * high-probability tokens, which is a sign of a confident output that we shouldn't deviate from.
++ * Often used together with [`TemperatureLogitsWarper`]. Used as an alternative to [`TopPLogitsWarper`] and
++ * [`TopKLogitsWarper`].
++ */
++export class MinPLogitsWarper extends LogitsWarper {
++    /**
++     * Create a `MinPLogitsWarper`.
++     * @param {number} min_p Minimum token probability, which will be scaled by the probability of the most likely
++     * token. It must be a value between 0 and 1. Typical values are in the 0.01-0.2 range.
++     * @param {Object} options Additional options for the min-p filtering.
++     * @param {number} [options.filter_value=-Infinity] All filtered values will be set to this float value.
++     * @param {number} [options.min_tokens_to_keep=1] Minimum number of tokens that cannot be filtered.
++     */
++    constructor(min_p: number, { filter_value, min_tokens_to_keep }?: {
++        filter_value?: number;
++        min_tokens_to_keep?: number;
++    });
++    min_p: number;
++    filter_value: number;
++    min_tokens_to_keep: number;
++    /**
++     * Apply logit warper.
++     * @param {bigint[][]} input_ids The input IDs.
++     * @param {Tensor} logits The logits.
++     * @returns {Tensor} The processed logits.
++     */
++    _call(input_ids: bigint[][], logits: Tensor): Tensor;
++}
+ import { Tensor } from '../utils/tensor.js';
+ export {};
+ //# sourceMappingURL=logits_process.d.ts.map
+\ No newline at end of file
