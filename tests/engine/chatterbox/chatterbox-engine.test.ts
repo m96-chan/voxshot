@@ -37,6 +37,8 @@ interface ModuleHarness {
   hangOn: (device: string, modelDtype: string) => boolean;
   /** Last `progress_callback` handed to `from_pretrained`, so tests can drive it. */
   lastProgressCallback: ((progress: Record<string, unknown>) => void) | undefined;
+  /** Every stopping criterion the engine constructed. */
+  stoppers: { interrupted: boolean }[];
   waveform: Float32Array;
   progressEvents: unknown[];
 }
@@ -55,6 +57,7 @@ function createModule(): ModuleHarness {
     failOn: () => false,
     hangOn: () => false,
     lastProgressCallback: undefined,
+    stoppers: [],
     waveform: Float32Array.from([0, 0.5, -0.5, 0.25]),
     progressEvents: [],
     module: undefined as unknown as TransformersModule,
@@ -103,6 +106,15 @@ function createModule(): ModuleHarness {
           },
         };
       },
+    },
+    InterruptableStoppingCriteria: class {
+      interrupted = false;
+      constructor() {
+        harness.stoppers.push(this);
+      }
+      interrupt() {
+        this.interrupted = true;
+      }
     },
     AutoConfig: {
       async from_pretrained() {
@@ -761,5 +773,100 @@ describe("ChatterboxEngine", () => {
     it("tolerates dispose before load", async () => {
       await expect(engine.dispose()).resolves.toBeUndefined();
     });
+  });
+});
+
+/**
+ * #67: an abandoned render used to run to completion, holding the worker's
+ * single execution slot. `ChatterboxModel.generate` spreads its params into
+ * the base `generate`, so a stopping criterion reaches the token loop.
+ */
+describe("ChatterboxEngine cancellation", () => {
+  let harness: ModuleHarness;
+  let engine: ChatterboxEngine;
+
+  beforeEach(async () => {
+    harness = createModule();
+    engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+    await engine.load("wasm");
+    await engine.embed(audio());
+  });
+
+  const voice = (): VoiceEmbedding => ({
+    vector: Float32Array.from([0.1]),
+    sampleRate: CHATTERBOX_SAMPLE_RATE,
+    createdAt: 0,
+    engine: "chatterbox",
+    tensors: {
+      audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+      speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+    },
+  });
+
+  it("passes a stopping criterion to generate when a signal is supplied", async () => {
+    const controller = new AbortController();
+
+    await engine.synthesize({
+      text: "hello",
+      voice: voice(),
+      speed: 1,
+      signal: controller.signal,
+    });
+
+    expect(harness.generateCalls[0]?.stopping_criteria).toBe(harness.stoppers[0]);
+  });
+
+  it("leaves generate untouched when no signal is supplied", async () => {
+    await engine.synthesize({ text: "hello", voice: voice(), speed: 1 });
+
+    expect(harness.generateCalls[0]).not.toHaveProperty("stopping_criteria");
+    expect(harness.stoppers).toHaveLength(0);
+  });
+
+  it("interrupts the criterion when the caller aborts", async () => {
+    const controller = new AbortController();
+    const rendering = engine.synthesize({
+      text: "cut me",
+      voice: voice(),
+      speed: 1,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(rendering).rejects.toThrow();
+    expect(harness.stoppers[0]?.interrupted).toBe(true);
+  });
+
+  it("discards the truncated waveform an interrupted render leaves behind", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    // Aborting before the call means the criterion starts interrupted; the
+    // half-rendered result must not be mistaken for a short utterance.
+    await expect(
+      engine.synthesize({ text: "gone", voice: voice(), speed: 1, signal: controller.signal }),
+    ).rejects.toThrow();
+    expect(harness.stoppers[0]?.interrupted).toBe(true);
+  });
+
+  it("still renders on a build without InterruptableStoppingCriteria", async () => {
+    const bare = createModule();
+    delete (bare.module as { InterruptableStoppingCriteria?: unknown })
+      .InterruptableStoppingCriteria;
+    const plain = new ChatterboxEngine({ loadModule: async () => bare.module });
+    await plain.load("wasm");
+    await plain.embed(audio());
+
+    const samples = await plain.synthesize({
+      text: "no criteria here",
+      voice: voice(),
+      speed: 1,
+      signal: new AbortController().signal,
+    });
+
+    expect(samples.length).toBeGreaterThan(0);
+    expect(bare.generateCalls[0]).not.toHaveProperty("stopping_criteria");
   });
 });

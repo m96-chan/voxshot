@@ -35,12 +35,82 @@ export function exposeEngine(
     endpoint.postMessage({ voxshot: PROTOCOL_VERSION, progress });
   };
 
+  // One engine call at a time. ONNX Runtime sessions are not re-entrant, and
+  // overlapping calls wedge them: an utterance cut mid-render used to leave a
+  // synthesize running, and the next request re-entered the same session and
+  // never came back (#67).
+  const queue: Job[] = [];
+  const jobs = new Map<number, Job>();
+  let draining = false;
+
+  const drain = async (): Promise<void> => {
+    if (draining) {
+      return;
+    }
+    draining = true;
+    try {
+      for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
+        if (job.cancelled) {
+          // Never started, so there is nothing to interrupt — just answer.
+          jobs.delete(job.request.id);
+          fail(endpoint, job.request.id, new VoxShotError("The request was cancelled."));
+          continue;
+        }
+        try {
+          // Stays registered while it runs: a cancel arriving mid-render has
+          // to be able to find it, which is the case that matters most.
+          await handle(engine, job.request, endpoint, emitProgress, job.controller.signal);
+        } finally {
+          jobs.delete(job.request.id);
+        }
+      }
+    } finally {
+      draining = false;
+    }
+  };
+
+  const cancel = (target: number): void => {
+    const job = jobs.get(target);
+    if (!job) {
+      // Already finished, or never existed. A cancel racing its own reply is
+      // expected, so this is deliberately not an error.
+      return;
+    }
+    job.cancelled = true;
+    job.controller.abort();
+  };
+
   const listener = (event: { data: unknown }): void => {
     const request = event.data;
     if (!isRequestMessage(request)) {
       return;
     }
-    void handle(engine, request, endpoint, emitProgress);
+
+    if (request.method === "cancel") {
+      cancel(request.target);
+      reply(endpoint, request.id, undefined);
+      return;
+    }
+
+    if (request.method === "dispose") {
+      // Teardown jumps the queue. Waiting its turn behind a render is how a
+      // wedged engine became impossible to shut down.
+      for (const job of queue.splice(0)) {
+        jobs.delete(job.request.id);
+        job.controller.abort();
+        fail(endpoint, job.request.id, new VoxShotError("The engine was disposed."));
+      }
+      for (const job of jobs.values()) {
+        job.controller.abort();
+      }
+      void handle(engine, request, endpoint, emitProgress, undefined);
+      return;
+    }
+
+    const job: Job = { request, controller: new AbortController(), cancelled: false };
+    jobs.set(request.id, job);
+    queue.push(job);
+    void drain();
   };
 
   endpoint.addEventListener("message", listener);
@@ -52,11 +122,19 @@ export function exposeEngine(
   return Object.assign(stop, { emitProgress });
 }
 
+/** One queued request, with the handle used to abandon it. */
+interface Job {
+  readonly request: RequestMessage;
+  readonly controller: AbortController;
+  cancelled: boolean;
+}
+
 async function handle(
   engine: SynthesisEngine,
   request: RequestMessage,
   endpoint: RpcEndpoint,
   emitProgress: (progress: Record<string, unknown>) => void,
+  signal: AbortSignal | undefined,
 ): Promise<void> {
   try {
     switch (request.method) {
@@ -88,6 +166,9 @@ async function handle(
           text: request.text,
           voice: request.voice,
           speed: request.speed,
+          // Engines that cannot interrupt a render simply ignore this; the
+          // caller still stops waiting.
+          ...(signal ? { signal } : {}),
         });
         reply(endpoint, request.id, samples, [samples.buffer as ArrayBuffer]);
         return;
@@ -103,14 +184,19 @@ async function handle(
       }
     }
   } catch (cause) {
-    const message: ResponseMessage = {
-      voxshot: PROTOCOL_VERSION,
-      id: request.id,
-      ok: false,
-      error: serializeError(cause),
-    };
-    endpoint.postMessage(message);
+    fail(endpoint, request.id, cause);
   }
+}
+
+/** Answer a request with an error. */
+function fail(endpoint: RpcEndpoint, id: number, cause: unknown): void {
+  const message: ResponseMessage = {
+    voxshot: PROTOCOL_VERSION,
+    id,
+    ok: false,
+    error: serializeError(cause),
+  };
+  endpoint.postMessage(message);
 }
 
 function reply(

@@ -9,6 +9,7 @@ import { buildLoadPlans } from "./dtype-plan.js";
 import type {
   ChatterboxModelLike,
   ChatterboxProcessorLike,
+  InterruptableStoppingCriteriaLike,
   LoadProgress,
   PretrainedConfigLike,
   TensorLike,
@@ -319,12 +320,23 @@ export class ChatterboxEngine implements SynthesisEngine {
       speaker[name] = new transformers.Tensor(tensor.type, tensor.data, [...tensor.dims]);
     }
 
+    // `ChatterboxModel.generate` spreads its params straight into the base
+    // `generate`, so a stopping criterion reaches the token loop and ends it
+    // at the next step. Without this an abandoned render keeps the worker's
+    // single execution slot busy for its full length (#67).
+    const stopper = request.signal ? this.#interrupter(transformers, request.signal) : undefined;
+
     const waveform = await model.generate({
       ...inputs,
       ...speaker,
       exaggeration: this.#exaggeration,
       max_new_tokens: this.#maxNewTokens,
+      ...(stopper ? { stopping_criteria: stopper } : {}),
     });
+
+    // Interruption leaves a truncated waveform behind; nobody is waiting for
+    // it, and returning it would be indistinguishable from a short utterance.
+    request.signal?.throwIfAborted();
 
     const samples = Float32Array.from(waveform.data as Float32Array);
     if (speed === 1) {
@@ -357,6 +369,30 @@ export class ChatterboxEngine implements SynthesisEngine {
       return config;
     }
     return { ...config, architectures: [CHATTERBOX_ARCHITECTURE] };
+  }
+
+  /**
+   * Build a stopping criterion wired to `signal`, when the library offers one.
+   *
+   * Returns undefined on builds without `InterruptableStoppingCriteria`, in
+   * which case cancellation degrades to "the caller stops waiting" rather than
+   * failing the render outright.
+   */
+  #interrupter(
+    transformers: TransformersModule,
+    signal: AbortSignal,
+  ): InterruptableStoppingCriteriaLike | undefined {
+    const Criteria = transformers.InterruptableStoppingCriteria;
+    if (!Criteria) {
+      return undefined;
+    }
+    const stopper = new Criteria();
+    if (signal.aborted) {
+      stopper.interrupt();
+    } else {
+      signal.addEventListener("abort", () => stopper.interrupt(), { once: true });
+    }
+    return stopper;
   }
 
   /** Emit one engine-level milestone, if anyone is listening. */

@@ -15,8 +15,14 @@ export interface SpeechPlayback {
 export interface SpeechPlaybackInput {
   /** Text chunks in speaking order. */
   chunks: readonly string[];
-  /** Render one chunk. Called with a one-chunk lookahead. */
-  synthesize(chunk: string): Promise<Float32Array>;
+  /**
+   * Render one chunk. Called with a one-chunk lookahead.
+   *
+   * `signal` aborts when playback stops. Honouring it matters because the
+   * engine serialises renders: a lookahead nobody is waiting for still holds
+   * the single execution slot until it finishes (#67).
+   */
+  synthesize(chunk: string, signal: AbortSignal): Promise<Float32Array>;
   /** Open the output stream. Called once, lazily. */
   open(): Promise<StreamingPlayback>;
   /** Initial gain. */
@@ -48,6 +54,7 @@ class SpeechPlaybackController implements SpeechPlayback {
 
   readonly #input: SpeechPlaybackInput;
   #playback: StreamingPlayback | undefined;
+  readonly #controller = new AbortController();
   #pendingVolume: number | undefined;
 
   /** Chunks handed to the device that may not have fully played yet. */
@@ -73,6 +80,7 @@ class SpeechPlaybackController implements SpeechPlayback {
       return;
     }
     this.#stopped = true;
+    this.#controller.abort();
     await this.#playback?.stop();
   }
 
@@ -129,15 +137,23 @@ class SpeechPlaybackController implements SpeechPlayback {
         this.#pendingVolume = undefined;
       }
 
+      // Every render carries a catch: stopping rejects the one still in
+      // flight, and nothing is left to await it once the loop returns.
+      const start = (chunk: string): Promise<Float32Array> => {
+        const rendering = synthesize(chunk, this.#controller.signal);
+        rendering.catch(() => undefined);
+        return rendering;
+      };
+
       let next: Promise<Float32Array> | undefined =
-        chunks.length > 0 ? synthesize(chunks[0] as string) : undefined;
+        chunks.length > 0 ? start(chunks[0] as string) : undefined;
 
       for (let index = 0; index < chunks.length; index += 1) {
         const samples = (await next) as Float32Array;
         if (this.#stopped) {
           return;
         }
-        next = index + 1 < chunks.length ? synthesize(chunks[index + 1] as string) : undefined;
+        next = index + 1 < chunks.length ? start(chunks[index + 1] as string) : undefined;
 
         await this.#rewrite;
         if (this.#stopped) {
@@ -155,9 +171,15 @@ class SpeechPlaybackController implements SpeechPlayback {
         await playback.end();
       }
     } catch (cause) {
+      // A render we cancelled ourselves rejects by design; that is the shape
+      // of a clean stop, not a failure to report back to the caller.
+      const cancelled = this.#controller.signal.aborted;
       this.#stopped = true;
+      this.#controller.abort();
       await this.#playback?.stop().catch(() => undefined);
-      throw cause;
+      if (!cancelled) {
+        throw cause;
+      }
     }
   }
 

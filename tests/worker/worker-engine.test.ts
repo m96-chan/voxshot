@@ -10,6 +10,7 @@ import {
 import type { PcmAudio } from "../../src/platform.js";
 import type { VoiceEmbedding } from "../../src/voice/types.js";
 import { exposeEngine } from "../../src/worker/expose.js";
+import { PROTOCOL_VERSION } from "../../src/worker/protocol.js";
 import { WorkerSynthesisEngine } from "../../src/worker/worker-engine.js";
 import { toArray } from "../helpers/tensor.js";
 
@@ -34,10 +35,26 @@ class RecordingEngine implements SynthesisEngine {
     return Float32Array.from([audio.samples.length, audio.sampleRate]);
   }
 
+  /** Set to hold every synthesize open until the test releases it. */
+  gate: Promise<void> | undefined;
+  /** Highest number of synthesize calls that were ever in flight at once. */
+  peakConcurrency = 0;
+  #inFlight = 0;
+  /** Signals seen by synthesize, in call order. */
+  signals: (AbortSignal | undefined)[] = [];
+
   async synthesize(request: SynthesisRequest): Promise<Float32Array> {
     if (this.failure) throw this.failure;
+    this.#inFlight += 1;
+    this.peakConcurrency = Math.max(this.peakConcurrency, this.#inFlight);
     this.requests.push(request);
-    return Float32Array.from([0.1, 0.2, 0.3]);
+    this.signals.push(request.signal);
+    try {
+      if (this.gate) await this.gate;
+      return Float32Array.from([0.1, 0.2, 0.3]);
+    } finally {
+      this.#inFlight -= 1;
+    }
   }
 
   async dispose(): Promise<void> {
@@ -48,6 +65,8 @@ class RecordingEngine implements SynthesisEngine {
 interface Wired {
   engine: WorkerSynthesisEngine;
   worker: RecordingEngine;
+  /** The main-thread end of the channel, for posting raw protocol messages. */
+  port: MessagePort;
   close: () => void;
 }
 
@@ -63,6 +82,7 @@ function wire(options: Record<string, unknown> = {}): Wired {
   const wired: Wired = {
     engine,
     worker,
+    port: channel.port1,
     close: () => {
       stop();
       engine.disconnect();
@@ -350,5 +370,190 @@ describe("worker errors that are not VoxShotError instances", () => {
     await expect(
       engine.synthesize({ text: "hi", voice, speed: 1 }),
     ).rejects.toMatchObject({ code: "NO_VOICE" });
+  });
+});
+
+/**
+ * #67: a cut utterance left a synthesize running in the worker, and the next
+ * request re-entered the same ONNX session concurrently, wedging the engine.
+ * The RPC layer must never hand the engine two overlapping calls, and must
+ * offer a way to abandon work that is already under way.
+ */
+describe("serialized execution", () => {
+  const release = () => {
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { gate, open };
+  };
+
+  /**
+   * Port messages are delivered as macrotasks, so a microtask tick is not
+   * enough to let queued requests reach the worker — awaiting one would open
+   * the gate before either call had started, and concurrency would look fine
+   * whether or not it was.
+   */
+  const deliver = async (): Promise<void> => {
+    for (let tick = 0; tick < 3; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  it("never runs two engine calls at once", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    const { gate, open } = release();
+    worker.gate = gate;
+
+    const both = Promise.all([
+      engine.synthesize({ text: "one", voice, speed: 1 }),
+      engine.synthesize({ text: "two", voice, speed: 1 }),
+    ]);
+    await deliver();
+
+    // Both requests have reached the worker by now. Only one may be running.
+    expect(worker.peakConcurrency).toBe(1);
+    expect(worker.requests.map((r) => r.text)).toEqual(["one"]);
+
+    open();
+    await both;
+    expect(worker.peakConcurrency).toBe(1);
+    expect(worker.requests.map((r) => r.text)).toEqual(["one", "two"]);
+  });
+
+  it("keeps the queue in the order requests arrived", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    const { gate, open } = release();
+    worker.gate = gate;
+
+    const all = Promise.all(
+      ["a", "b", "c"].map((text) => engine.synthesize({ text, voice, speed: 1 })),
+    );
+    await deliver();
+    open();
+    await all;
+
+    expect(worker.requests.map((r) => r.text)).toEqual(["a", "b", "c"]);
+  });
+
+  it("hands the running call a signal that aborts when the caller does", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    const { gate, open } = release();
+    worker.gate = gate;
+    const controller = new AbortController();
+
+    const call = engine.synthesize({
+      text: "cut me",
+      voice,
+      speed: 1,
+      signal: controller.signal,
+    });
+    // Attach the handler before aborting: abort rejects synchronously, and a
+    // rejection left unobserved across a turn of the microtask queue is
+    // reported as unhandled even though the test does await it later.
+    const rejected = expect(call).rejects.toBeInstanceOf(VoxShotError);
+    await deliver();
+    controller.abort();
+    await vi.waitFor(() => expect(worker.signals[0]?.aborted).toBe(true));
+
+    open();
+    await rejected;
+  });
+
+  it("drops a queued request without ever starting it", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    const { gate, open } = release();
+    worker.gate = gate;
+    const controller = new AbortController();
+
+    const first = engine.synthesize({ text: "running", voice, speed: 1 });
+    const second = engine.synthesize({
+      text: "queued",
+      voice,
+      speed: 1,
+      signal: controller.signal,
+    });
+    const rejected = expect(second).rejects.toBeInstanceOf(VoxShotError);
+    await deliver();
+    controller.abort();
+    await rejected;
+    // The caller stops waiting immediately, but the worker only learns of the
+    // cancellation when the control message lands.
+    await deliver();
+
+    open();
+    await first;
+
+    // The cancelled one must never reach the engine at all.
+    expect(worker.requests.map((r) => r.text)).toEqual(["running"]);
+  });
+
+  it("reaches dispose past a render that never finishes", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    // Never opened: this is the wedged render from the report, not a slow one.
+    worker.gate = new Promise<void>(() => {});
+
+    const wedged = engine.synthesize({ text: "never ends", voice, speed: 1 });
+    const abandoned = wedged.catch(() => undefined);
+    await deliver();
+
+    // Teardown has to be reachable even when the thing blocking the queue
+    // will never complete on its own.
+    await expect(engine.dispose()).resolves.toBeUndefined();
+    expect(worker.disposed).toBe(true);
+
+    engine.disconnect();
+    await abandoned;
+  });
+
+  it("ignores a cancel for a request it no longer knows about", async () => {
+    const { engine, worker, port } = wire();
+    await engine.load("wasm");
+
+    // A cancel racing its own reply arrives after the job is gone. The worker
+    // answers every control message, so a missing reply is the signal that
+    // handling it threw instead of treating the unknown id as a no-op.
+    const replies: number[] = [];
+    port.addEventListener("message", (event: MessageEvent) => {
+      const data = event.data as { id?: number };
+      if (typeof data?.id === "number") replies.push(data.id);
+    });
+
+    port.postMessage({
+      voxshot: PROTOCOL_VERSION,
+      id: 9999,
+      method: "cancel",
+      target: 4242,
+    });
+    await deliver();
+
+    expect(replies).toContain(9999);
+
+    const samples = await engine.synthesize({ text: "still fine", voice, speed: 1 });
+    expect(Array.from(samples)).toHaveLength(3);
+    expect(worker.requests.map((r) => r.text)).toEqual(["still fine"]);
+  });
+
+  it("lets dispose through while a synthesize is still running", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    const { gate, open } = release();
+    worker.gate = gate;
+
+    const rendering = engine.synthesize({ text: "long", voice, speed: 1 });
+    await deliver();
+
+    // Serialising must not make teardown unreachable: a queued dispose behind
+    // a wedged synthesize is exactly how #67 left consumers with no way out.
+    await expect(engine.dispose()).resolves.toBeUndefined();
+    expect(worker.disposed).toBe(true);
+
+    open();
+    await rendering.catch(() => undefined);
   });
 });

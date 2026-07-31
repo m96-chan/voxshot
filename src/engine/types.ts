@@ -10,6 +10,15 @@ export interface SynthesisRequest {
   readonly voice: VoiceEmbedding;
   /** Playback rate multiplier; `1` is the engine's natural pace. */
   readonly speed: number;
+  /**
+   * Abandon the render when this aborts.
+   *
+   * Engines that cannot interrupt work in progress may ignore it — the caller
+   * stops waiting either way. Engines that can should stop promptly, because
+   * a render nobody is waiting for still occupies the one slot the worker
+   * serialises calls through.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**
