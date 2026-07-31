@@ -149,6 +149,7 @@ tts.sampleRate;      // sample rate of the audio this instance produces
 await tts.cloneVoice(file);   // ArrayBuffer | Blob | File | typed array | { samples, sampleRate }
 await tts.speak(text);        // -> SynthesizedAudio
 await tts.speak(text, { speed: 1.2 });
+await tts.speak(text, { expressiveness: 0.9 });   // livelier, this line only
 
 for await (const chunk of tts.stream(text)) {
   await chunk.play();         // play sentence by sentence, no need to wait for the rest
@@ -245,6 +246,62 @@ await (await tts.speak("Cloned from a few seconds of reference audio.")).play();
   non-Latin text maps to unknown tokens and comes out near-silent. Japanese
   speech needs the multilingual checkpoint —
   [#25](https://github.com/m96-chan/voxshot/issues/25).
+
+#### Long text
+
+Chunks are sized in characters, but the model generates in speech tokens, and
+the two are related: measured on this checkpoint a chunk needs roughly **2.4
+tokens per character**.
+
+```
+chars   30    60    90   120   160
+tokens  92   185   257   331   403
+```
+
+The generation budget is therefore sized to each chunk rather than fixed, so a
+full-length chunk is not cut off mid-sentence. If you set `maxNewTokens`
+yourself it is honoured as written — and if the text needs more than you
+allowed, the engine says so rather than letting the audio just end:
+
+```ts
+new ChatterboxEngine({
+  onProgress: (event) => {
+    if (event.status === "synthesize-truncated") {
+      console.warn("ran out of tokens for:", event.text);
+    }
+  },
+});
+```
+
+Keep chunks short. Beyond roughly 160 characters this checkpoint stops
+tracking the text and drifts into sounds that resemble another language — at
+200 characters a measurement produced 41 seconds of audio for what should have
+been about 13. `maxChunkLength` defaults to 120 for that reason, not only for
+latency.
+
+#### Changing the delivery per line
+
+`expressiveness` sets how animated a single utterance is, overriding whatever
+the engine was constructed with. It exists per call because the alternative is
+building a new engine, which means reloading the model.
+
+```ts
+const engine = new ChatterboxEngine({ exaggeration: 0.5 });   // the default
+const tts = await VoxShot.create({ engine });
+
+await tts.speak("Reading the headlines.");                        // 0.5
+await tts.speak("And now the weather!", { expressiveness: 0.9 }); // livelier
+```
+
+The name describes the effect rather than any one model's parameter —
+`ChatterboxEngine` maps it onto its `exaggeration` control, and an engine
+without such a control ignores it. Rendered audio is cached per value, so the
+same line at two settings really is rendered twice.
+
+There is deliberately no upper bound. The model accepts any non-negative
+number and the usable range is not documented upstream, so the library rejects
+only values that cannot be a setting at all rather than inventing a limit.
+`0.5` is the model's own default.
 
 #### Following what the load is doing
 

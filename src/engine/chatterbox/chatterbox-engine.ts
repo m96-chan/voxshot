@@ -49,7 +49,43 @@ const DEFAULT_MODEL_ID = "onnx-community/chatterbox-ONNX";
  * Transformers.js seeds its progress denominator with `config.json` alone.
  */
 const CHATTERBOX_ARCHITECTURE = "ChatterboxModel";
-const DEFAULT_MAX_NEW_TOKENS = 256;
+/**
+ * Speech tokens a chunk needs, per character of text.
+ *
+ * Measured on `onnx-community/chatterbox-ONNX` with a speech-shaped reference,
+ * generating with a cap high enough not to interfere:
+ *
+ * ```
+ * chars   30    60    90   120   160
+ * tokens  92   185   257   331   403
+ * ```
+ *
+ * That is close to linear at roughly 2.4 tokens per character plus a fixed
+ * ~20. The old fixed cap of 256 therefore ran out at about 89 characters —
+ * inside the 120-character chunks the splitter produces by default, so a
+ * full-length chunk was truncated by construction.
+ *
+ * Dense text (digits, CJK, heavy punctuation) costs more per character, which
+ * is what {@link TOKEN_BUDGET_SAFETY} is for; the truncation report is the
+ * backstop for when even that is not enough.
+ */
+const TOKENS_PER_CHARACTER = 2.4;
+const TOKEN_BUDGET_BASE = 20;
+const TOKEN_BUDGET_SAFETY = 1.25;
+/** Enough for a very short prompt to finish naturally. */
+const MIN_TOKEN_BUDGET = 96;
+
+/**
+ * Samples the vocoder emits per speech token, plus its trailing silence.
+ *
+ * A fixed rate of 25 tokens per second at 24 kHz, confirmed across generations
+ * from 92 to 1024 tokens (957-965 samples/token, the spread being rounding in
+ * the measurement). It is what lets the engine tell "stopped because it had
+ * finished" from "stopped because it ran out of budget" — `generate` returns
+ * only a waveform, so the token count has to be recovered from its length.
+ */
+const CHATTERBOX_SAMPLES_PER_TOKEN = 960;
+const CHATTERBOX_TRAILING_SAMPLES = 2400;
 const DEFAULT_EXAGGERATION = 0.5;
 /**
  * How long loading may stay silent before it is declared stalled.
@@ -111,10 +147,14 @@ export interface ChatterboxEngineOptions {
   /** Override the per-session quantization chosen for the device. */
   dtype?: Partial<DtypeConfig>;
   /**
-   * Generation cap. 256 tokens is roughly 5-10 seconds of speech; raising it
-   * increases latency for the chunk being rendered.
+   * Fixed generation cap, honoured as written for every chunk.
    *
-   * @defaultValue 256
+   * Leave it unset — the default — and the cap is sized to each chunk from its
+   * length instead, so a full-length chunk is not truncated and a short one
+   * does not pay for tokens it will never use. A fixed cap that is too small
+   * for the text ends the audio mid-sentence; see {@link TOKENS_PER_CHARACTER}
+   * for the measured relationship, and the `synthesize-truncated` event for
+   * when it happens anyway.
    */
   maxNewTokens?: number;
   /**
@@ -174,7 +214,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   readonly modelId: string;
 
   readonly #dtypeOverrides: Partial<DtypeConfig> | undefined;
-  readonly #maxNewTokens: number;
+  readonly #maxNewTokens: number | undefined;
   readonly #exaggeration: number;
   readonly #onProgress: ((progress: ChatterboxLoadEvent) => void) | undefined;
   readonly #loadModule: TransformersModuleLoader;
@@ -189,7 +229,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   constructor(options: ChatterboxEngineOptions = {}) {
     this.modelId = options.modelId ?? DEFAULT_MODEL_ID;
     this.#dtypeOverrides = options.dtype;
-    this.#maxNewTokens = options.maxNewTokens ?? DEFAULT_MAX_NEW_TOKENS;
+    this.#maxNewTokens = options.maxNewTokens;
     this.#exaggeration = options.exaggeration ?? DEFAULT_EXAGGERATION;
     this.#onProgress = options.onProgress;
     this.#loadModule = options.loadModule ?? defaultModuleLoader;
@@ -294,6 +334,13 @@ export class ChatterboxEngine implements SynthesisEngine {
     if (!Number.isFinite(speed) || speed < MIN_SPEED || speed > MAX_SPEED) {
       throw new InvalidInputError(`speed must be between ${MIN_SPEED} and ${MAX_SPEED}.`);
     }
+    // No upper bound: the usable range is not documented upstream, and the
+    // model accepts any float. This only rejects values that cannot be a
+    // setting at all.
+    const expressiveness = request.expressiveness ?? this.#exaggeration;
+    if (!Number.isFinite(expressiveness) || expressiveness < 0) {
+      throw new InvalidInputError("expressiveness must be a non negative finite number.");
+    }
     if (voice.engine !== undefined && voice.engine !== this.name) {
       throw new InvalidInputError(
         `This voice was produced by the "${voice.engine}" engine and cannot be used with "${this.name}". Clone the reference audio again.`,
@@ -326,11 +373,17 @@ export class ChatterboxEngine implements SynthesisEngine {
     // single execution slot busy for its full length (#67).
     const stopper = request.signal ? this.#interrupter(transformers, request.signal) : undefined;
 
+    // A cap the caller set is honoured as written; otherwise it is sized to
+    // this chunk, so a full-length one is not truncated and a short one does
+    // not pay for tokens it will never use.
+    const budget = this.#maxNewTokens ?? tokenBudgetFor(trimmed);
+
     const waveform = await model.generate({
       ...inputs,
       ...speaker,
-      exaggeration: this.#exaggeration,
-      max_new_tokens: this.#maxNewTokens,
+      // Chatterbox's own name for the knob the request calls expressiveness.
+      exaggeration: expressiveness,
+      max_new_tokens: budget,
       ...(stopper ? { stopping_criteria: stopper } : {}),
     });
 
@@ -339,6 +392,21 @@ export class ChatterboxEngine implements SynthesisEngine {
     request.signal?.throwIfAborted();
 
     const samples = Float32Array.from(waveform.data as Float32Array);
+
+    // `generate` returns only a waveform, so whether it stopped early has to
+    // be recovered from its length. Silence here is how #65 went unnoticed:
+    // the audio simply ended, with no error to catch.
+    const tokensUsed = Math.round(
+      (samples.length - CHATTERBOX_TRAILING_SAMPLES) / CHATTERBOX_SAMPLES_PER_TOKEN,
+    );
+    if (tokensUsed >= budget) {
+      this.#onProgress?.({
+        status: "synthesize-truncated",
+        text: trimmed,
+        tokens: budget,
+      } as unknown as ChatterboxLoadEvent);
+    }
+
     if (speed === 1) {
       return samples;
     }
@@ -472,6 +540,16 @@ export class ChatterboxEngine implements SynthesisEngine {
     }
     return { model: this.#model, processor: this.#processor, transformers: this.#module };
   }
+}
+
+/**
+ * How many speech tokens `text` is likely to need.
+ *
+ * See {@link TOKENS_PER_CHARACTER} for the measurement this comes from.
+ */
+export function tokenBudgetFor(text: string): number {
+  const estimate = TOKENS_PER_CHARACTER * text.length + TOKEN_BUDGET_BASE;
+  return Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
 }
 
 /** Render a plan as `device/dtype`, the form used in events and error text. */

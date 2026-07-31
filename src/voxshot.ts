@@ -82,6 +82,16 @@ export interface SpeakOptions {
    * @defaultValue 1
    */
   speed?: number;
+  /**
+   * How expressive this utterance should be, overriding the engine's default
+   * for this call only.
+   *
+   * Named for the effect rather than for any one model's parameter, so it can
+   * mean something across engines — `ChatterboxEngine` maps it onto its
+   * `exaggeration` control, and an engine without such a control ignores it.
+   * Omit it to leave the engine's own default in place.
+   */
+  expressiveness?: number;
 }
 
 export interface PlayOptions extends SpeakOptions {
@@ -247,7 +257,13 @@ export class VoxShot {
 
     const speed = options.speed ?? 1;
     for (const chunk of chunks) {
-      const samples = await this.#synthesizeChunk(chunk, voice, speed);
+      const samples = await this.#synthesizeChunk(
+        chunk,
+        voice,
+        speed,
+        undefined,
+        options.expressiveness,
+      );
       yield new SynthesizedAudio(samples, this.#engine.sampleRate, this.#platform.player);
     }
   }
@@ -285,9 +301,11 @@ export class VoxShot {
     }
 
     const speed = options.speed ?? 1;
+    const expressiveness = options.expressiveness;
     return startSpeechPlayback({
       chunks,
-      synthesize: (chunk, signal) => this.#synthesizeChunk(chunk, voice, speed, signal),
+      synthesize: (chunk, signal) =>
+        this.#synthesizeChunk(chunk, voice, speed, signal, expressiveness),
       open: () => streaming.open(this.#engine.sampleRate),
       ...(options.volume !== undefined ? { volume: options.volume } : {}),
     });
@@ -299,8 +317,9 @@ export class VoxShot {
     voice: VoiceEmbedding,
     speed: number,
     signal?: AbortSignal,
+    expressiveness?: number,
   ): Promise<Float32Array> {
-    const cached = this.#cache?.get(voice, chunk, speed);
+    const cached = this.#cache?.get(voice, chunk, speed, expressiveness);
     if (cached) {
       return cached;
     }
@@ -308,9 +327,10 @@ export class VoxShot {
       text: chunk,
       voice,
       speed,
+      ...(expressiveness === undefined ? {} : { expressiveness }),
       ...(signal ? { signal } : {}),
     });
-    this.#cache?.set(voice, chunk, speed, samples);
+    this.#cache?.set(voice, chunk, speed, samples, expressiveness);
     return samples;
   }
 

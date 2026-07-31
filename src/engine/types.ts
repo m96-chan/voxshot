@@ -11,6 +11,15 @@ export interface SynthesisRequest {
   /** Playback rate multiplier; `1` is the engine's natural pace. */
   readonly speed: number;
   /**
+   * How expressive the delivery should be, overriding whatever default the
+   * engine was constructed with.
+   *
+   * Named for the effect rather than for any one model's parameter: engines
+   * map it onto their own control (Chatterbox calls it `exaggeration`), and
+   * engines with no such control ignore it.
+   */
+  readonly expressiveness?: number;
+  /**
    * Abandon the render when this aborts.
    *
    * Engines that cannot interrupt work in progress may ignore it — the caller

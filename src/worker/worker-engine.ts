@@ -100,6 +100,9 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
         text: request.text,
         voice: request.voice,
         speed: request.speed,
+        ...(request.expressiveness === undefined
+          ? {}
+          : { expressiveness: request.expressiveness }),
       },
       undefined,
       request.signal,

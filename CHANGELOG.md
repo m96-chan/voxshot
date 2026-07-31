@@ -10,11 +10,26 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 
 ### Added
 
+- `expressiveness` on `SpeakOptions` and `SynthesisRequest`, setting how
+  animated a single utterance is without rebuilding the engine — which
+  previously meant reloading the model. `ChatterboxEngine` maps it onto its
+  `exaggeration` control and falls back to the value it was constructed with.
+  It also takes part in the synthesis cache key, so the same line at two
+  settings is rendered twice rather than served from the first. ([#69])
+
 - `SynthesisRequest.signal`, so a render in progress can be abandoned.
   `SpeechPlayback.stop()` now uses it to cancel the lookahead chunk it walks
   away from, instead of leaving it running. ([#67])
 
 ### Fixed
+
+- Long chunks are no longer truncated mid-sentence. The chunk budget is
+  measured in characters and the generation cap in tokens, and nothing related
+  the two: at roughly 2.4 tokens per character the old fixed cap of 256 ran out
+  at about 89 characters, inside the 120-character chunks the splitter
+  produces. The cap is now sized to each chunk, and generation that stops
+  because it ran out of budget reports `synthesize-truncated` instead of simply
+  ending the audio. ([#65])
 
 - The engine no longer stops answering after an utterance is cut mid-render.
   Requests to the worker are serialized, so a second call cannot re-enter an
@@ -106,3 +121,5 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#46]: https://github.com/m96-chan/voxshot/issues/46
 [#51]: https://github.com/m96-chan/voxshot/issues/51
 [#67]: https://github.com/m96-chan/voxshot/issues/67
+[#65]: https://github.com/m96-chan/voxshot/issues/65
+[#69]: https://github.com/m96-chan/voxshot/issues/69
