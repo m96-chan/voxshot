@@ -114,6 +114,66 @@ describe("VoxShot.create", () => {
     await expect(create({ device: "webgpu" })).rejects.toBeInstanceOf(DeviceUnavailableError);
   });
 
+  describe("an engine that requires a GPU", () => {
+    const gpuOnly = () => Object.assign(new FakeEngine(), { requiresGpu: true });
+
+    it("refuses to run without one", async () => {
+      harness.gpuAvailable.value = false;
+      const engine = gpuOnly();
+
+      await expect(create({ engine })).rejects.toBeInstanceOf(DeviceUnavailableError);
+    });
+
+    it("refuses before loading anything", async () => {
+      // The whole point: this model is ~1.5 GB. Discovering the machine cannot
+      // run it after the download, at a measured RTF of ~5.8, is the failure
+      // being prevented — not the eventual error.
+      harness.gpuAvailable.value = false;
+      const engine = gpuOnly();
+
+      await expect(create({ engine })).rejects.toThrow();
+      expect(engine.loadedOn).toBeUndefined();
+    });
+
+    it("says which engine wanted the GPU", async () => {
+      harness.gpuAvailable.value = false;
+
+      await expect(create({ engine: gpuOnly() })).rejects.toThrow(/fake/);
+    });
+
+    it("does not claim the GPU is missing when the caller chose otherwise", async () => {
+      // `device: "wasm"` never probes the GPU, so it may well be there. Saying
+      // it "is not available in this environment" would send someone hunting a
+      // driver problem that does not exist.
+      harness.gpuAvailable.value = true;
+
+      await expect(create({ engine: gpuOnly(), device: "wasm" })).rejects.toThrow(
+        /requires a GPU/,
+      );
+      await expect(create({ engine: gpuOnly(), device: "wasm" })).rejects.not.toThrow(
+        /is not available in this environment/,
+      );
+    });
+
+    it("runs normally when a GPU is there", async () => {
+      harness.gpuAvailable.value = true;
+      const engine = gpuOnly();
+
+      expect((await create({ engine })).device).toBe("webgpu");
+      expect(engine.loadedOn).toBe("webgpu");
+    });
+
+    it("leaves an engine that did not ask on the wasm path", async () => {
+      // The requirement belongs to the engine, not the library: a model that
+      // is honestly CPU-viable should keep working.
+      harness.gpuAvailable.value = false;
+      const engine = new FakeEngine();
+
+      expect((await create({ engine })).device).toBe("wasm");
+      expect(engine.loadedOn).toBe("wasm");
+    });
+  });
+
   it("exposes the engine sample rate", async () => {
     expect((await create()).sampleRate).toBe(16_000);
   });

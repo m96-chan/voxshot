@@ -9,6 +9,7 @@ import { resolveDevice } from "./device.js";
 import { PlaceholderEngine } from "./engine/placeholder-engine.js";
 import type { SynthesisEngine } from "./engine/types.js";
 import {
+  DeviceUnavailableError,
   DisposedError,
   InvalidInputError,
   NoVoiceError,
@@ -179,10 +180,18 @@ export class VoxShot {
     }
 
     const platform = options.platform ?? createBrowserPlatform();
-    const engine = options.engine ?? new PlaceholderEngine();
+    const engine: SynthesisEngine = options.engine ?? new PlaceholderEngine();
     const store = options.voiceStore ?? createDefaultVoiceStore();
 
     const device = await resolveDevice(options.device, platform.gpu);
+    // Before load, deliberately: the point is to spare an unsuitable machine
+    // the download, not to report the problem after it.
+    if (engine.requiresGpu && device !== "webgpu") {
+      throw new DeviceUnavailableError(
+        "webgpu",
+        `The "${engine.name}" engine requires a GPU and this environment resolved to "${device}".`,
+      );
+    }
     await engine.load(device);
 
     return new VoxShot(

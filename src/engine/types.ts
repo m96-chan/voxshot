@@ -53,6 +53,21 @@ export interface SynthesisEngine {
   readonly name: string;
   /** Sample rate of the audio {@link SynthesisEngine.synthesize} returns. */
   readonly sampleRate: number;
+  /**
+   * Refuse to run anywhere but a GPU.
+   *
+   * The engine's own call, not the library's: what counts as usable depends
+   * entirely on the model. The Chatterbox pipeline measures ~5.8x slower than
+   * real time on CPU, which is not a degraded experience but a broken one — and
+   * it arrives with no error, after a ~1.5 GB download. A model cheap enough to
+   * be honestly CPU-viable should leave this unset and keep working.
+   *
+   * Checked before {@link SynthesisEngine.load}, so an unsuitable machine finds
+   * out before paying for the weights.
+   *
+   * @defaultValue false
+   */
+  readonly requiresGpu?: boolean;
   /** Prepare weights for the given device. Called once before use. */
   load(device: ResolvedDevice): Promise<void>;
   /** Extract a speaker embedding from mono reference audio. */

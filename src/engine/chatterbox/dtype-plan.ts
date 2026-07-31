@@ -55,10 +55,16 @@ export function buildLoadPlans(
   device: ResolvedDevice,
   overrides?: Partial<DtypeConfig>,
   fp16 = true,
+  allowWasm = true,
 ): LoadPlan[] {
+  // The wasm tail exists so a GPU that cannot run the model still produces
+  // audio. Whether that is a kindness or a trap is the engine's call: this
+  // pipeline measures ~5.8x slower than real time there, which is not a
+  // degraded experience. An engine that says so drops the tail (#107).
+  const webgpu = [...(fp16 ? [plan("webgpu", "q4f16")] : []), plan("webgpu", "q4")];
   const plans =
     device === "webgpu"
-      ? [...(fp16 ? [plan("webgpu", "q4f16")] : []), plan("webgpu", "q4"), plan("wasm", "q4")]
+      ? [...webgpu, ...(allowWasm ? [plan("wasm", "q4")] : [])]
       : [plan("wasm", "q4")];
 
   if (!overrides) {
