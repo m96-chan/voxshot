@@ -18,6 +18,7 @@ export type EngineRequest =
       readonly text: string;
       readonly voice: VoiceEmbedding;
       readonly speed: number;
+      readonly expressiveness?: number;
     }
   | { readonly method: "dispose" }
   /**

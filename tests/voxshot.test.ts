@@ -631,3 +631,54 @@ describe("VoxShot synthesis cache", () => {
     expect(harness.engine.requests).toHaveLength(2);
   });
 });
+
+/**
+ * #69: the facade has to carry expressiveness per utterance and keep it out
+ * of the cache's blind spot.
+ */
+describe("per utterance expressiveness", () => {
+  it("passes speak's value to the engine", async () => {
+    const harness = createHarness();
+    const tts = await VoxShot.create({ engine: harness.engine, platform: harness.platform });
+    await tts.cloneVoice(new ArrayBuffer(16));
+
+    await tts.speak("hello", { expressiveness: 0.8 });
+
+    expect(harness.engine.requests[0]?.expressiveness).toBe(0.8);
+  });
+
+  it("leaves it unset when the caller does not ask for one", async () => {
+    const harness = createHarness();
+    const tts = await VoxShot.create({ engine: harness.engine, platform: harness.platform });
+    await tts.cloneVoice(new ArrayBuffer(16));
+
+    await tts.speak("hello");
+
+    expect(harness.engine.requests[0]?.expressiveness).toBeUndefined();
+  });
+
+  it("renders again rather than reusing audio from a different expressiveness", async () => {
+    const harness = createHarness();
+    const tts = await VoxShot.create({ engine: harness.engine, platform: harness.platform });
+    await tts.cloneVoice(new ArrayBuffer(16));
+
+    await tts.speak("same words", { expressiveness: 0.2 });
+    await tts.speak("same words", { expressiveness: 0.9 });
+
+    // A cache that ignored expressiveness would answer the second call from
+    // the first, and the setting would appear to do nothing.
+    expect(harness.engine.requests).toHaveLength(2);
+    expect(harness.engine.requests.map((r) => r.expressiveness)).toEqual([0.2, 0.9]);
+  });
+
+  it("still serves the cache when expressiveness matches", async () => {
+    const harness = createHarness();
+    const tts = await VoxShot.create({ engine: harness.engine, platform: harness.platform });
+    await tts.cloneVoice(new ArrayBuffer(16));
+
+    await tts.speak("same words", { expressiveness: 0.4 });
+    await tts.speak("same words", { expressiveness: 0.4 });
+
+    expect(harness.engine.requests).toHaveLength(1);
+  });
+});

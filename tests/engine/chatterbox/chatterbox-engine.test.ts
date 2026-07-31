@@ -870,3 +870,67 @@ describe("ChatterboxEngine cancellation", () => {
     expect(bare.generateCalls[0]).not.toHaveProperty("stopping_criteria");
   });
 });
+
+/**
+ * #69: expressiveness was fixed when the engine was constructed, so changing
+ * it meant reloading a 1.5 GB model. The model accepts a value per call.
+ */
+describe("ChatterboxEngine expressiveness", () => {
+  let harness: ModuleHarness;
+
+  const voice = (): VoiceEmbedding => ({
+    vector: Float32Array.from([0.1]),
+    sampleRate: CHATTERBOX_SAMPLE_RATE,
+    createdAt: 0,
+    engine: "chatterbox",
+    tensors: {
+      audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+      speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+    },
+  });
+
+  const ready = async (overrides: Record<string, unknown> = {}) => {
+    harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module, ...overrides });
+    await engine.load("wasm");
+    await engine.embed(audio());
+    return engine;
+  };
+
+  it("uses the request's value in preference to the constructor default", async () => {
+    const engine = await ready({ exaggeration: 0.5 });
+
+    await engine.synthesize({ text: "hi", voice: voice(), speed: 1, expressiveness: 0.9 });
+
+    expect(harness.generateCalls[0]?.exaggeration).toBe(0.9);
+  });
+
+  it("falls back to the constructor default when the request omits it", async () => {
+    const engine = await ready({ exaggeration: 0.25 });
+
+    await engine.synthesize({ text: "hi", voice: voice(), speed: 1 });
+
+    expect(harness.generateCalls[0]?.exaggeration).toBe(0.25);
+  });
+
+  it("honours a request value of zero rather than treating it as absent", async () => {
+    const engine = await ready({ exaggeration: 0.5 });
+
+    await engine.synthesize({ text: "hi", voice: voice(), speed: 1, expressiveness: 0 });
+
+    expect(harness.generateCalls[0]?.exaggeration).toBe(0);
+  });
+
+  it("rejects a value that is not a finite non-negative number", async () => {
+    const engine = await ready();
+
+    await expect(
+      engine.synthesize({ text: "hi", voice: voice(), speed: 1, expressiveness: -1 }),
+    ).rejects.toBeInstanceOf(InvalidInputError);
+    await expect(
+      engine.synthesize({ text: "hi", voice: voice(), speed: 1, expressiveness: Number.NaN }),
+    ).rejects.toBeInstanceOf(InvalidInputError);
+  });
+});

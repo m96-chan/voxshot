@@ -294,6 +294,13 @@ export class ChatterboxEngine implements SynthesisEngine {
     if (!Number.isFinite(speed) || speed < MIN_SPEED || speed > MAX_SPEED) {
       throw new InvalidInputError(`speed must be between ${MIN_SPEED} and ${MAX_SPEED}.`);
     }
+    // No upper bound: the usable range is not documented upstream, and the
+    // model accepts any float. This only rejects values that cannot be a
+    // setting at all.
+    const expressiveness = request.expressiveness ?? this.#exaggeration;
+    if (!Number.isFinite(expressiveness) || expressiveness < 0) {
+      throw new InvalidInputError("expressiveness must be a non negative finite number.");
+    }
     if (voice.engine !== undefined && voice.engine !== this.name) {
       throw new InvalidInputError(
         `This voice was produced by the "${voice.engine}" engine and cannot be used with "${this.name}". Clone the reference audio again.`,
@@ -329,7 +336,8 @@ export class ChatterboxEngine implements SynthesisEngine {
     const waveform = await model.generate({
       ...inputs,
       ...speaker,
-      exaggeration: this.#exaggeration,
+      // Chatterbox's own name for the knob the request calls expressiveness.
+      exaggeration: expressiveness,
       max_new_tokens: this.#maxNewTokens,
       ...(stopper ? { stopping_criteria: stopper } : {}),
     });

@@ -166,6 +166,9 @@ async function handle(
           text: request.text,
           voice: request.voice,
           speed: request.speed,
+          ...(request.expressiveness === undefined
+            ? {}
+            : { expressiveness: request.expressiveness }),
           // Engines that cannot interrupt a render simply ignore this; the
           // caller still stops waiting.
           ...(signal ? { signal } : {}),

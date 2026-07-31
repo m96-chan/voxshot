@@ -10,6 +10,13 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 
 ### Added
 
+- `expressiveness` on `SpeakOptions` and `SynthesisRequest`, setting how
+  animated a single utterance is without rebuilding the engine — which
+  previously meant reloading the model. `ChatterboxEngine` maps it onto its
+  `exaggeration` control and falls back to the value it was constructed with.
+  It also takes part in the synthesis cache key, so the same line at two
+  settings is rendered twice rather than served from the first. ([#69])
+
 - `SynthesisRequest.signal`, so a render in progress can be abandoned.
   `SpeechPlayback.stop()` now uses it to cancel the lookahead chunk it walks
   away from, instead of leaving it running. ([#67])
@@ -106,3 +113,4 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#46]: https://github.com/m96-chan/voxshot/issues/46
 [#51]: https://github.com/m96-chan/voxshot/issues/51
 [#67]: https://github.com/m96-chan/voxshot/issues/67
+[#69]: https://github.com/m96-chan/voxshot/issues/69
