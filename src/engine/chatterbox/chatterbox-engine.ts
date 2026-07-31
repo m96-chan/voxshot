@@ -200,6 +200,12 @@ export interface ChatterboxEngineOptions {
   /**
    * Called with model download progress forwarded from Transformers.js, and
    * with the engine's own {@link ChatterboxLifecycleEvent} milestones.
+   *
+   * Leaving it unset does not make the load cheaper. Transformers.js is always
+   * given a `progress_callback`, because that is the only heartbeat
+   * {@link stallTimeoutMs} has, and upstream gates a metadata probe per
+   * expected file on its presence. Every load pays for that round of requests
+   * whether or not anything is listening.
    */
   onProgress?: (progress: ChatterboxLoadEvent) => void;
   /**
@@ -455,6 +461,13 @@ export class ChatterboxEngine implements SynthesisEngine {
       return new Float32Array(0);
     }
 
+    // Below the emptiness check on purpose: nothing was going to be rendered
+    // for empty text, so an aborted caller gets the same empty answer as
+    // anyone else. Above everything that costs something — this used to run
+    // only after `generate`, so an abandoned request still paid for the
+    // processor call, the tensors, a forward pass and the whole vocoder pass.
+    request.signal?.throwIfAborted();
+
     const inputs = await processor(trimmed);
     const speaker: Record<string, TensorLike> = {};
     for (const name of SPEAKER_TENSOR_NAMES) {
@@ -471,21 +484,26 @@ export class ChatterboxEngine implements SynthesisEngine {
     // single execution slot busy for its full length (#67).
     const stopper = request.signal ? this.#interrupter(transformers, request.signal) : undefined;
     const counter = this.#counter(transformers);
-    const criteria = [stopper, counter?.criterion].filter((c) => c !== undefined);
+    const criteria = [stopper?.criterion, counter?.criterion].filter((c) => c !== undefined);
 
     // A cap the caller set is honoured as written; otherwise it is sized to
     // this chunk, so a full-length one is not truncated and a short one does
     // not pay for tokens it will never use.
     const budget = this.#maxNewTokens ?? tokenBudgetFor(trimmed);
 
-    const waveform = await model.generate({
-      ...inputs,
-      ...speaker,
-      // Chatterbox's own name for the knob the request calls expressiveness.
-      exaggeration: expressiveness,
-      max_new_tokens: budget,
-      ...(criteria.length > 0 ? { stopping_criteria: criteria } : {}),
-    });
+    let waveform;
+    try {
+      waveform = await model.generate({
+        ...inputs,
+        ...speaker,
+        // Chatterbox's own name for the knob the request calls expressiveness.
+        exaggeration: expressiveness,
+        max_new_tokens: budget,
+        ...(criteria.length > 0 ? { stopping_criteria: criteria } : {}),
+      });
+    } finally {
+      stopper?.release();
+    }
 
     // Interruption leaves a truncated waveform behind; nobody is waiting for
     // it, and returning it would be indistinguishable from a short utterance.
@@ -582,7 +600,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   #interrupter(
     transformers: TransformersModule,
     signal: AbortSignal,
-  ): InterruptableStoppingCriteriaLike | undefined {
+  ): { criterion: InterruptableStoppingCriteriaLike; release: () => void } | undefined {
     const Criteria = transformers.InterruptableStoppingCriteria;
     if (!Criteria) {
       return undefined;
@@ -590,10 +608,18 @@ export class ChatterboxEngine implements SynthesisEngine {
     const stopper = new Criteria();
     if (signal.aborted) {
       stopper.interrupt();
-    } else {
-      signal.addEventListener("abort", () => stopper.interrupt(), { once: true });
+      return { criterion: stopper, release: () => {} };
     }
-    return stopper;
+    const cut = (): void => stopper.interrupt();
+    signal.addEventListener("abort", cut, { once: true });
+    // `once` only removes a listener that fires, and most renders finish
+    // without ever being cancelled. One signal covers a whole utterance, so a
+    // 100-chunk render left 100 listeners on it, each holding a criterion that
+    // will never be asked to stop anything.
+    return {
+      criterion: stopper,
+      release: () => signal.removeEventListener("abort", cut),
+    };
   }
 
   /**

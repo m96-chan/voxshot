@@ -35,6 +35,8 @@ interface ModuleHarness {
   encodeCalls: TensorLike[];
   generateCalls: Record<string, unknown>[];
   processorCalls: string[];
+  /** Runs inside the processor call, so a test can abort mid-preprocessing. */
+  onProcess: (() => Promise<void> | void) | undefined;
   disposeCalls: number;
   failOn: (device: string, modelDtype: string) => boolean;
   /** When true for a plan, `from_pretrained` returns a promise that never settles. */
@@ -67,6 +69,7 @@ function createModule(): ModuleHarness {
     encodeCalls: [],
     generateCalls: [],
     processorCalls: [],
+    onProcess: undefined,
     disposeCalls: 0,
     failOn: () => false,
     hangOn: () => false,
@@ -199,6 +202,7 @@ function createModule(): ModuleHarness {
         }
         return async (text: string) => {
           harness.processorCalls.push(text);
+          await harness.onProcess?.();
           return {
             input_ids: new FakeTensor("int64", BigInt64Array.from([1n, 2n]), [1, 2]),
             attention_mask: new FakeTensor("int64", BigInt64Array.from([1n, 1n]), [1, 2]),
@@ -914,12 +918,14 @@ describe("ChatterboxEngine cancellation", () => {
     expect(harness.stoppers[0]?.interrupted).toBe(true);
   });
 
-  it("discards the truncated waveform an interrupted render leaves behind", async () => {
+  it("starts the criterion interrupted when the abort lands during preprocessing", async () => {
+    // The gap between the up-front abort check and the criterion being built:
+    // `processor(text)` is awaited in between, so a signal can go from live to
+    // aborted while the render is still committing to happen. The criterion
+    // has to notice, or nothing will stop the token loop.
     const controller = new AbortController();
-    controller.abort();
+    harness.onProcess = () => controller.abort();
 
-    // Aborting before the call means the criterion starts interrupted; the
-    // half-rendered result must not be mistaken for a short utterance.
     await expect(
       engine.synthesize({ text: "gone", voice: voice(), speed: 1, signal: controller.signal }),
     ).rejects.toThrow();
@@ -1491,5 +1497,87 @@ describe("ChatterboxEngine stall guard aftermath", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("ChatterboxEngine per-render cleanup", () => {
+  const voice = (): VoiceEmbedding => ({
+    vector: Float32Array.from([0.1]),
+    sampleRate: CHATTERBOX_SAMPLE_RATE,
+    createdAt: 0,
+    engine: "chatterbox",
+    tensors: {
+      audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+      speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+    },
+  });
+
+  const ready = async () => {
+    const harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+    await engine.load("wasm");
+    await engine.embed(audio());
+    return { engine, harness };
+  };
+
+  it("lets go of the signal after every render, not just the aborted one", async () => {
+    // SpeechPlayback uses one controller for a whole utterance, so a 100-chunk
+    // render put 100 listeners on one signal, each holding a stopping
+    // criterion that will never be asked to stop anything.
+    const { engine } = await ready();
+    const controller = new AbortController();
+    const live = new Set<unknown>();
+    const signal = controller.signal;
+    const add = signal.addEventListener.bind(signal);
+    const remove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = ((type: string, fn: never, options?: never) => {
+      live.add(fn);
+      add(type, fn, options);
+    }) as unknown as typeof signal.addEventListener;
+    signal.removeEventListener = ((type: string, fn: never, options?: never) => {
+      live.delete(fn);
+      remove(type, fn, options);
+    }) as unknown as typeof signal.removeEventListener;
+
+    for (let chunk = 0; chunk < 5; chunk += 1) {
+      await engine.synthesize({ text: `chunk ${chunk}`, voice: voice(), speed: 1, signal });
+    }
+
+    expect(live.size).toBe(0);
+  });
+
+  it("does no work at all for a request that is already aborted", async () => {
+    // The check used to run only after `generate`, so an abandoned request
+    // still paid for the processor call, the tensors, a forward pass and the
+    // whole vocoder pass before anyone looked at the signal.
+    const { engine, harness } = await ready();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      engine.synthesize({ text: "never mind", voice: voice(), speed: 1, signal: controller.signal }),
+    ).rejects.toThrow();
+
+    expect(harness.processorCalls).toHaveLength(0);
+    expect(harness.generateCalls).toHaveLength(0);
+  });
+
+  it("still answers empty text before it looks at the signal", async () => {
+    // Ordering: nothing was going to be rendered anyway, so an aborted caller
+    // gets the same empty answer as anyone else rather than an abort.
+    const { engine } = await ready();
+    const controller = new AbortController();
+    controller.abort();
+
+    const samples = await engine.synthesize({
+      text: "   ",
+      voice: voice(),
+      speed: 1,
+      signal: controller.signal,
+    });
+
+    expect(samples).toHaveLength(0);
   });
 });
