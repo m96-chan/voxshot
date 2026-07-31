@@ -34,6 +34,12 @@ jobs:
 
       - run: npm run build
 
+      # Packs the real tarball and inspects it. `npm test` sees the repository;
+      # consumers get whatever `files` happens to include, and 0.2.0 shipped
+      # with no license text and 125 kB of unresolvable source maps while the
+      # suite was fully green (#98).
+      - run: npm run check:package
+
       # examples/browser has its own unit tests for the demo's model-cache
       # logic. It depends on the library via file:../.., so build dist first
       # (done above) before typechecking the example.
