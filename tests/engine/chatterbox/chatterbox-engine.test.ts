@@ -1323,6 +1323,12 @@ describe("ChatterboxEngine option validation", () => {
     ["under a millisecond, which setTimeout rounds up and fires at once", 0.4],
     ["negative", -1],
     ["not a number at all", Number.NaN],
+    // Every comparison against a non-number is false, so one slips past a
+    // check written as a range and reaches setTimeout, which reads it as NaN
+    // and fires in 1 ms. The same shape of failure as Infinity, from JavaScript
+    // rather than from the timer.
+    ["not a number even in type", {} as unknown as number],
+    ["a string that looks like one", "500" as unknown as number],
   ])("refuses a stall timeout that is %s", (_why, stallTimeoutMs) => {
     expect(build({ stallTimeoutMs })).toThrow(InvalidInputError);
   });
@@ -1342,6 +1348,15 @@ describe("ChatterboxEngine option validation", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(settled).not.toHaveBeenCalled();
+  });
+
+  it("reads null as unset, the way ?? did before these checks existed", () => {
+    // Not reachable from TypeScript, but `?? DEFAULT` treated null and
+    // undefined alike and a config deserialised from JSON says null for
+    // "unset". Rejecting it would be a change nobody asked for.
+    expect(
+      build({ stallTimeoutMs: null as unknown as number, maxNewTokens: null as unknown as number }),
+    ).not.toThrow();
   });
 
   it.each([

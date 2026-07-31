@@ -801,7 +801,10 @@ function tokenBudgetFor(text: string): number {
  * as truncated.
  */
 function validateMaxNewTokens(value: number | undefined): number | undefined {
-  if (value === undefined) {
+  // `== null` on purpose: this used to be a plain assignment behind `??`, and
+  // a config deserialised from JSON says null for "unset". Rejecting it would
+  // be a change nobody asked for.
+  if (value == null) {
     return undefined;
   }
   if (!Number.isInteger(value) || value < 1) {
@@ -824,10 +827,14 @@ function validateMaxNewTokens(value: number | undefined): number | undefined {
  * were meant than a real sub-millisecond deadline.
  */
 function validateStallTimeout(value: number | undefined): number {
-  if (value === undefined) {
+  // See validateMaxNewTokens: null means unset here too, as `??` had it.
+  if (value == null) {
     return DEFAULT_STALL_TIMEOUT_MS;
   }
-  if (Number.isNaN(value) || value < 0 || (value > 0 && value < 1)) {
+  // The type check is load-bearing, not belt and braces: every comparison
+  // against a non-number is false, so a range check alone lets one through to
+  // setTimeout, which reads it as NaN and fires in 1 ms.
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0 || (value > 0 && value < 1)) {
     throw new InvalidInputError(
       "stallTimeoutMs must be 0 to disable the guard, or at least 1 millisecond.",
     );
