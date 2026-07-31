@@ -10,6 +10,7 @@ import {
 import type { PcmAudio } from "../../src/platform.js";
 import type { VoiceEmbedding } from "../../src/voice/types.js";
 import { exposeEngine } from "../../src/worker/expose.js";
+import { PROTOCOL_VERSION } from "../../src/worker/protocol.js";
 import { WorkerSynthesisEngine } from "../../src/worker/worker-engine.js";
 import { toArray } from "../helpers/tensor.js";
 
@@ -64,6 +65,8 @@ class RecordingEngine implements SynthesisEngine {
 interface Wired {
   engine: WorkerSynthesisEngine;
   worker: RecordingEngine;
+  /** The main-thread end of the channel, for posting raw protocol messages. */
+  port: MessagePort;
   close: () => void;
 }
 
@@ -79,6 +82,7 @@ function wire(options: Record<string, unknown> = {}): Wired {
   const wired: Wired = {
     engine,
     worker,
+    port: channel.port1,
     close: () => {
       stop();
       engine.disconnect();
@@ -486,6 +490,53 @@ describe("serialized execution", () => {
 
     // The cancelled one must never reach the engine at all.
     expect(worker.requests.map((r) => r.text)).toEqual(["running"]);
+  });
+
+  it("reaches dispose past a render that never finishes", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    // Never opened: this is the wedged render from the report, not a slow one.
+    worker.gate = new Promise<void>(() => {});
+
+    const wedged = engine.synthesize({ text: "never ends", voice, speed: 1 });
+    const abandoned = wedged.catch(() => undefined);
+    await deliver();
+
+    // Teardown has to be reachable even when the thing blocking the queue
+    // will never complete on its own.
+    await expect(engine.dispose()).resolves.toBeUndefined();
+    expect(worker.disposed).toBe(true);
+
+    engine.disconnect();
+    await abandoned;
+  });
+
+  it("ignores a cancel for a request it no longer knows about", async () => {
+    const { engine, worker, port } = wire();
+    await engine.load("wasm");
+
+    // A cancel racing its own reply arrives after the job is gone. The worker
+    // answers every control message, so a missing reply is the signal that
+    // handling it threw instead of treating the unknown id as a no-op.
+    const replies: number[] = [];
+    port.addEventListener("message", (event: MessageEvent) => {
+      const data = event.data as { id?: number };
+      if (typeof data?.id === "number") replies.push(data.id);
+    });
+
+    port.postMessage({
+      voxshot: PROTOCOL_VERSION,
+      id: 9999,
+      method: "cancel",
+      target: 4242,
+    });
+    await deliver();
+
+    expect(replies).toContain(9999);
+
+    const samples = await engine.synthesize({ text: "still fine", voice, speed: 1 });
+    expect(Array.from(samples)).toHaveLength(3);
+    expect(worker.requests.map((r) => r.text)).toEqual(["still fine"]);
   });
 
   it("lets dispose through while a synthesize is still running", async () => {
