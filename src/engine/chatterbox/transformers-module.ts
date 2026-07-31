@@ -107,7 +107,15 @@ export interface TransformersModule {
    * the claim.
    */
   readonly StoppingCriteria?: new () => StoppingCriteriaLike;
-  readonly AutoConfig: {
+  /**
+   * Optional for the same reason as the two above, and with the same shape of
+   * consequence: `loadModule` is public API, so a custom module written before
+   * this member existed must keep working. Without it the architecture goes
+   * unnamed and the load falls back to the layout it used before #45 — two
+   * 404s and a download denominator seeded from `config.json` alone — which is
+   * a worse load, not a failed one.
+   */
+  readonly AutoConfig?: {
     from_pretrained(
       modelId: string,
       options?: FromPretrainedOptions,

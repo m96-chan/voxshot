@@ -28,6 +28,10 @@ interface ModuleHarness {
   /** What the repo's `config.json` contains before the engine touches it. */
   repoConfig: Record<string, unknown>;
   configLoads: number;
+  /** When true, `AutoConfig.from_pretrained` rejects. */
+  configFails: boolean;
+  /** When true, `AutoConfig.from_pretrained` never settles. */
+  configHangs: boolean;
   encodeCalls: TensorLike[];
   generateCalls: Record<string, unknown>[];
   processorCalls: string[];
@@ -58,6 +62,8 @@ function createModule(): ModuleHarness {
     // exactly why resolve_model_type falls back (#45).
     repoConfig: { model_type: "chatterbox", text_config: { hidden: 1 } },
     configLoads: 0,
+    configFails: false,
+    configHangs: false,
     encodeCalls: [],
     generateCalls: [],
     processorCalls: [],
@@ -175,6 +181,12 @@ function createModule(): ModuleHarness {
     AutoConfig: {
       async from_pretrained() {
         harness.configLoads += 1;
+        if (harness.configHangs) {
+          return new Promise<never>(() => {});
+        }
+        if (harness.configFails) {
+          throw new Error("config.json is unreachable");
+        }
         return { ...harness.repoConfig };
       },
     },
@@ -1378,5 +1390,106 @@ describe("ChatterboxEngine budget ceiling", () => {
     await engine.synthesize({ text: "hi", voice: voice(), speed: 1 });
 
     expect(harness.generateCalls[0]?.max_new_tokens).toBe(8_000);
+  });
+});
+
+describe("ChatterboxEngine config resolution", () => {
+  // Naming the architecture is what silences the two 404s and repairs the
+  // download denominator (#45). None of that is worth failing a load over: an
+  // engine that cannot read config.json still loads, exactly as it did before
+  // #45 existed. So absent, failing and hung are all the same answer.
+
+  it("loads on a build that does not export AutoConfig", async () => {
+    const bare = createModule();
+    delete (bare.module as { AutoConfig?: unknown }).AutoConfig;
+    const engine = new ChatterboxEngine({ loadModule: async () => bare.module });
+
+    await engine.load("wasm");
+
+    expect(engine.loadedPlan).toBeDefined();
+    expect(bare.attempts[0]?.config).toBeUndefined();
+  });
+
+  it("loads when the config cannot be read", async () => {
+    const harness = createModule();
+    harness.configFails = true;
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+    await engine.load("wasm");
+
+    expect(engine.loadedPlan).toBeDefined();
+    expect(harness.attempts[0]?.config).toBeUndefined();
+  });
+
+  it("gives up on a config that never arrives instead of waiting forever", async () => {
+    // The first network fetch of the load, and it used to sit outside the
+    // stall guard entirely: a hung config.json left load() pending with no
+    // timer to end it.
+    const harness = createModule();
+    harness.configHangs = true;
+    const engine = new ChatterboxEngine({
+      loadModule: async () => harness.module,
+      stallTimeoutMs: 20,
+    });
+
+    await engine.load("wasm");
+
+    expect(engine.loadedPlan).toBeDefined();
+    expect(harness.attempts[0]?.config).toBeUndefined();
+  });
+
+  it("still names the architecture when the config is readable", async () => {
+    const harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+    await engine.load("wasm");
+
+    expect((harness.attempts[0]?.config as { architectures?: string[] })?.architectures).toEqual([
+      "ChatterboxModel",
+    ]);
+  });
+});
+
+describe("ChatterboxEngine stall guard aftermath", () => {
+  it("goes quiet once it has declared the load stalled", async () => {
+    // The abandoned transfer keeps running and keeps emitting. A consumer that
+    // has already handled LoadStalledError and moved on should not start
+    // receiving download progress again.
+    const harness = createModule();
+    harness.hangOn = () => true;
+    const events: ChatterboxLoadEvent[] = [];
+    const engine = new ChatterboxEngine({
+      loadModule: async () => harness.module,
+      stallTimeoutMs: 20,
+      onProgress: (event) => events.push(event),
+    });
+
+    await expect(engine.load("wasm")).rejects.toBeInstanceOf(LoadStalledError);
+    const before = events.length;
+    harness.lastProgressCallback?.({ status: "progress", file: "model.onnx", progress: 40 });
+
+    expect(events).toHaveLength(before);
+  });
+
+  it("leaves no timer behind when the operation throws on the spot", async () => {
+    // `#resolveConfig` hands the guard a plain arrow, so a module whose
+    // from_pretrained throws synchronously never reaches the guard's own
+    // try/finally. The timer it armed would outlive the call.
+    vi.useFakeTimers();
+    try {
+      const harness = createModule();
+      (harness.module as unknown as { AutoConfig: unknown }).AutoConfig = {
+        from_pretrained: () => {
+          throw new Error("thrown before any promise exists");
+        },
+      };
+      const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+      await engine.load("wasm");
+
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

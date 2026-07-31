@@ -345,13 +345,18 @@ export class ChatterboxEngine implements SynthesisEngine {
       try {
         const loaded = await this.#withStallGuard(async (notice) => {
           const model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
-            config,
+            ...(config === undefined ? {} : { config }),
             device: plan.device,
             dtype: plan.dtype,
             // Always supplied, even without an `onProgress` consumer: the
             // stall guard needs these events to know the transfer is alive.
             progress_callback: (progress: LoadProgress) => {
-              notice();
+              // False once the guard has given up on this transfer. Forwarding
+              // then would restart a download commentary for a load the caller
+              // was already told had failed.
+              if (!notice()) {
+                return;
+              }
               this.#onProgress?.(progress);
             },
           });
@@ -538,8 +543,29 @@ export class ChatterboxEngine implements SynthesisEngine {
    * architecture the repo already declares is left alone: it knows its own
    * layout better than this default does.
    */
-  async #resolveConfig(transformers: TransformersModule): Promise<PretrainedConfigLike> {
-    const config = await transformers.AutoConfig.from_pretrained(this.modelId);
+  async #resolveConfig(
+    transformers: TransformersModule,
+  ): Promise<PretrainedConfigLike | undefined> {
+    const AutoConfig = transformers.AutoConfig;
+    if (!AutoConfig) {
+      return undefined;
+    }
+    let config: PretrainedConfigLike;
+    try {
+      // Inside the guard: this is the load's first network fetch, and a hung
+      // `config.json` is exactly the failure the guard exists for. It used to
+      // run before the guard armed, so that hang had no timer to end it.
+      //
+      // There is no heartbeat to give it — one small file either arrives or it
+      // does not — so the timeout is a plain deadline here rather than a
+      // silence detector.
+      config = await this.#withStallGuard(() => AutoConfig.from_pretrained(this.modelId));
+    } catch {
+      // Best effort by design. Failing the load would make a member that is
+      // allowed to be absent fatal when it is merely unreachable, which is the
+      // asymmetry this used to have.
+      return undefined;
+    }
     if (config.architectures?.length) {
       return config;
     }
@@ -624,32 +650,61 @@ export class ChatterboxEngine implements SynthesisEngine {
    * unhandled rejection.
    */
   async #withStallGuard<T>(
-    operation: (notice: () => void) => Promise<T>,
+    operation: (notice: () => boolean) => Promise<T>,
     discard?: (value: T) => Promise<void> | void,
   ): Promise<T> {
     if (this.#stallTimeoutMs <= 0) {
-      return operation(() => {});
+      return operation(() => true);
     }
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let declareStalled: ((reason: unknown) => void) | undefined;
+    let settled = false;
 
-    const restart = (): void => {
+    const clear = (): void => {
       if (timer !== undefined) {
         clearTimeout(timer);
+        timer = undefined;
       }
+    };
+
+    /**
+     * Report that the operation is alive, and say whether anyone is listening.
+     *
+     * A transfer the guard gave up on keeps running and keeps calling this.
+     * Re-arming then is worse than useless: nothing clears those timers, and
+     * the caller has already been handed its `LoadStalledError`. The return
+     * value lets the operation stay quiet too, rather than resuming a progress
+     * commentary the consumer stopped expecting.
+     */
+    const notice = (): boolean => {
+      if (settled) {
+        return false;
+      }
+      clear();
       timer = setTimeout(() => {
         declareStalled?.(new LoadStalledError(this.#stallTimeoutMs));
       }, this.#stallTimeoutMs);
+      return true;
     };
 
     const stalled = new Promise<never>((_, reject) => {
       declareStalled = reject;
     });
 
-    restart();
+    notice();
     let abandoned = false;
-    const running = operation(restart);
+    let running: Promise<T>;
+    try {
+      running = operation(notice);
+    } catch (cause) {
+      // A synchronous throw skips the try/finally below entirely, so the timer
+      // armed a moment ago would outlive the call. Not every operation is an
+      // async function: `#resolveConfig` hands over a plain arrow.
+      settled = true;
+      clear();
+      throw cause;
+    }
     running.then(
       (value) => {
         // A stalled transfer can recover after the guard has given up. What it
@@ -668,9 +723,8 @@ export class ChatterboxEngine implements SynthesisEngine {
       abandoned = true;
       throw cause;
     } finally {
-      if (timer !== undefined) {
-        clearTimeout(timer);
-      }
+      settled = true;
+      clear();
     }
   }
 
