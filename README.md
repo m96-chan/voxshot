@@ -359,15 +359,20 @@ new ChatterboxEngine({
 });
 ```
 
-`plan` reads as `device/dtype`, e.g. `webgpu/q4f16`. There is deliberately **no**
-"downloads finished, compiling now" event: detecting that transition needs a
-trustworthy count of the files a load will touch, and Transformers.js still
-cannot supply one for this model. Its expected-file list resolves the language
-model to fp32 and seeds the total with a 2.08 GB file that is never fetched
-([#62](https://github.com/m96-chan/voxshot/issues/62)), so the denominator is
-both inflated and unstable. Inferring the transition from silence would be a
-guess dressed up as a fact, so the library does not pretend to know. Tracked in
-[#55](https://github.com/m96-chan/voxshot/issues/55).
+`plan` reads as `device/dtype`, e.g. `webgpu/q4f16`.
+
+`load-compiling` marks the end of downloading and the start of ONNX session
+creation. That step dominates a warm load — roughly 35 s on an idle machine and
+over two minutes on a busy one — and emits nothing while it runs, so without
+this a progress bar sits at its last download value for the whole duration.
+
+It comes from a real signal rather than from silence: Transformers.js resolves
+the expected-file list up front and seeds every entry before any byte arrives,
+so the aggregate total is known in advance and reaching it means downloading is
+finished. When that resolution fails, upstream falls back to accumulating files
+as they start — an aggregate that hits 100% while whole files are unstarted —
+and the library stays quiet rather than reporting it. A milestone you cannot
+justify is worse than none.
 
 #### Handling a stalled load
 

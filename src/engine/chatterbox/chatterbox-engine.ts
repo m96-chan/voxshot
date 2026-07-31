@@ -127,16 +127,21 @@ const SPEAKER_TENSOR_NAMES = [
  * (`initiate` / `download` / `progress` / `progress_total` / `done` / `ready`)
  * and from the generic `ready` that {@link exposeEngine} emits for any engine.
  *
- * Note there is deliberately no "downloads finished / compiling now" event.
- * Detecting that transition needs a trustworthy count of the files a load will
- * touch, and Transformers.js cannot supply one for this model: `chatterbox` is
- * absent from its `MODEL_TYPE_MAPPING`, so its expected-file list resolves to a
- * single-file encoder-only layout that does not exist in the repo. Emitting a
- * milestone inferred from silence would just move the consumer's guess into the
- * library and dress it up as a fact.
+ * `load-compiling` marks the end of downloading and the start of ONNX session
+ * creation — the longest step on a warm load, measured at roughly 35 s idle and
+ * over two minutes on a busy machine, during which nothing else is emitted at
+ * all. It is derived from a real signal rather than from silence: the expected
+ * file list is resolved up front, so the aggregate total is known before any
+ * byte arrives, and reaching it means downloading is finished.
+ *
+ * When that total is *not* known up front the milestone is withheld rather than
+ * guessed. Before #62 the expected-file list resolved to files that 404, the
+ * aggregate was accumulated only over files that had already started, and it
+ * reached 100% while whole files were unstarted — which is exactly the kind of
+ * inference this event exists to avoid.
  */
 export interface ChatterboxLifecycleEvent {
-  readonly status: "load-start" | "load-fallback" | "load-ready";
+  readonly status: "load-start" | "load-compiling" | "load-fallback" | "load-ready";
   /** The plan this event concerns, as `device/dtype` — e.g. `webgpu/q4f16`. */
   readonly plan: string;
   readonly device: ResolvedDevice;
@@ -369,6 +374,9 @@ export class ChatterboxEngine implements SynthesisEngine {
 
     for (const plan of plans) {
       this.#announce("load-start", plan);
+      // Per attempt: a fallback restarts the download, so the aggregate does too.
+      let announcedCompiling = false;
+      let aggregateIsTrustworthy: boolean | undefined;
       try {
         const loaded = await this.#withStallGuard(async (notice) => {
           const model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
@@ -385,6 +393,39 @@ export class ChatterboxEngine implements SynthesisEngine {
                 return;
               }
               this.#onProgress?.(progress);
+
+              const { status, loaded, total, files } = progress as {
+                status?: string;
+                loaded?: number;
+                total?: number;
+                files?: Record<string, unknown>;
+              };
+              if (status !== "progress_total" || typeof loaded !== "number") {
+                return;
+              }
+              if (typeof total !== "number" || total <= 0) {
+                return;
+              }
+
+              // Decided on the first aggregate of the attempt and then left
+              // alone. Upstream resolves the expected-file list up front and
+              // seeds every entry before any byte arrives, so a trustworthy
+              // aggregate covers the whole load from its very first event. When
+              // that resolution fails it falls back to accumulating files as
+              // they start, and then `loaded === total` fires every time the
+              // handful in flight happens to finish — 100% with whole files
+              // unstarted, which is what this milestone was withheld to avoid.
+              // One file in the map means the second thing, and by the time the
+              // map grows the wrong answer would already have been sent.
+              aggregateIsTrustworthy ??= Object.keys(files ?? {}).length > 1;
+              if (!aggregateIsTrustworthy) {
+                return;
+              }
+
+              if (!announcedCompiling && loaded >= total) {
+                announcedCompiling = true;
+                this.#announce("load-compiling", plan);
+              }
             },
           });
           try {
