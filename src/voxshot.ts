@@ -92,6 +92,20 @@ export interface SpeakOptions {
    * Omit it to leave the engine's own default in place.
    */
   expressiveness?: number;
+  /**
+   * Stops the utterance when it aborts.
+   *
+   * A long text is many renders, not one: a paper-sized input is hundreds of
+   * chunks and can occupy the engine for the better part of an hour. Dropping
+   * the promise does not stop any of that — and since the engine runs one call
+   * at a time, abandoned work blocks everything queued behind it.
+   *
+   * {@link stream} and {@link speak} stop at the next chunk boundary and hand
+   * the signal to the engine, so an engine that can interrupt a render in
+   * flight does. {@link play} stops playback, exactly as calling `stop()` on
+   * its handle would.
+   */
+  signal?: AbortSignal;
 }
 
 export interface PlayOptions extends SpeakOptions {
@@ -256,12 +270,19 @@ export class VoxShot {
     }
 
     const speed = options.speed ?? 1;
+    const signal = options.signal;
     for (const chunk of chunks) {
+      // Checked at the top of every turn, not once before the loop: `yield`
+      // suspends here for as long as the consumer wants, and that pause is
+      // exactly when a caller decides it has heard enough. Checking here also
+      // covers an already-aborted signal, while still leaving unspeakable text
+      // to report itself above.
+      signal?.throwIfAborted();
       const samples = await this.#synthesizeChunk(
         chunk,
         voice,
         speed,
-        undefined,
+        signal,
         options.expressiveness,
       );
       yield new SynthesizedAudio(samples, this.#engine.sampleRate, this.#platform.player);
@@ -308,6 +329,11 @@ export class VoxShot {
         this.#synthesizeChunk(chunk, voice, speed, signal, expressiveness),
       open: () => streaming.open(this.#engine.sampleRate),
       ...(options.volume !== undefined ? { volume: options.volume } : {}),
+      // Playback owns its own abort, so a caller's signal is routed through
+      // stop() rather than handed to the engine: that is the one path that also
+      // closes the output. Ignoring the option would be worse — it is inherited
+      // from SpeakOptions, so passing one is a reasonable thing to expect to work.
+      ...(options.signal ? { signal: options.signal } : {}),
     });
   }
 

@@ -27,6 +27,18 @@ export interface SpeechPlaybackInput {
   open(): Promise<StreamingPlayback>;
   /** Initial gain. */
   volume?: number;
+  /**
+   * Stops playback when it aborts, exactly as {@link SpeechPlayback.stop}
+   * would.
+   *
+   * Held here rather than by the caller so the subscription can be dropped the
+   * moment the utterance ends. A page-lifetime signal — one stop button — would
+   * otherwise collect a listener per utterance, each holding a finished
+   * playback. Watching `done` from outside would do it too, but attaching a
+   * handler marks its rejection as handled, and a caller who never reads `done`
+   * would stop hearing about failures purely because they passed a signal.
+   */
+  signal?: AbortSignal;
 }
 
 /** What the device currently holds of one chunk, in stream sample offsets. */
@@ -69,9 +81,22 @@ class SpeechPlaybackController implements SpeechPlayback {
   #stopped = false;
   #finished = false;
 
+  /** Removes the caller's abort subscription. No-op when there was none. */
+  #unsubscribe: () => void = () => {};
+
   constructor(input: SpeechPlaybackInput) {
     this.#input = input;
     this.#pendingVolume = input.volume;
+
+    const { signal } = input;
+    if (signal?.aborted) {
+      this.#stopped = true;
+    } else if (signal) {
+      const cut = (): void => void this.stop();
+      signal.addEventListener("abort", cut, { once: true });
+      this.#unsubscribe = () => signal.removeEventListener("abort", cut);
+    }
+
     this.done = this.#run();
   }
 
@@ -180,6 +205,8 @@ class SpeechPlaybackController implements SpeechPlayback {
       if (!cancelled) {
         throw cause;
       }
+    } finally {
+      this.#unsubscribe();
     }
   }
 

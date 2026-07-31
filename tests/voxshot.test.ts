@@ -35,8 +35,11 @@ class FakeEngine implements SynthesisEngine {
     return this.embedResult ?? Float32Array.from([audio.samples.length, audio.sampleRate]);
   }
 
+  onSynthesize: (() => void) | undefined;
+
   async synthesize(request: SynthesisRequest): Promise<Float32Array> {
     this.requests.push(request);
+    this.onSynthesize?.();
     // One sample per character keeps assertions about chunking readable.
     return new Float32Array([...request.text].map((_, index) => (index % 2 === 0 ? 0.5 : -0.5)));
   }
@@ -268,6 +271,18 @@ describe("VoxShot", () => {
       await tts.cloneVoice(new ArrayBuffer(16));
     });
 
+    it("stops when its signal aborts, leaving the rest unrendered", async () => {
+      const controller = new AbortController();
+      // `speak` has no yield point of its own, so the abort has to land while
+      // the engine holds the first chunk.
+      harness.engine.onSynthesize = () => controller.abort();
+
+      await expect(
+        tts.speak("One here. Two here. Three here.", { signal: controller.signal }),
+      ).rejects.toThrow();
+      expect(harness.engine.requests).toHaveLength(1);
+    });
+
     it("synthesizes normalized text with the active voice", async () => {
       const audio = await tts.speak("  Hello   world  ");
 
@@ -359,6 +374,57 @@ describe("VoxShot", () => {
 
     it("rejects empty text", async () => {
       await expect(tts.stream("  ").next()).rejects.toBeInstanceOf(InvalidInputError);
+    });
+
+    describe("cancellation", () => {
+      it("stops at the next chunk boundary when the signal aborts", async () => {
+        const controller = new AbortController();
+        const chunks: SynthesizedAudio[] = [];
+
+        await expect(async () => {
+          for await (const chunk of tts.stream("One here. Two here. Three here.", {
+            signal: controller.signal,
+          })) {
+            chunks.push(chunk);
+            controller.abort();
+          }
+        }).rejects.toThrow();
+
+        // The engine request count is the point: a consumer that stops reading
+        // must stop the work, not just stop looking at it.
+        expect(chunks).toHaveLength(1);
+        expect(harness.engine.requests).toHaveLength(1);
+      });
+
+      it("hands the signal to the engine so a render in flight can stop", async () => {
+        const controller = new AbortController();
+
+        await tts.stream("Hello there.", { signal: controller.signal }).next();
+
+        expect(harness.engine.requests[0]?.signal).toBe(controller.signal);
+      });
+
+      it("renders nothing when the signal is already aborted", async () => {
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(
+          tts.stream("Hello there.", { signal: controller.signal }).next(),
+        ).rejects.toThrow();
+        expect(harness.engine.requests).toHaveLength(0);
+      });
+
+      it("reports unusable text rather than the abort", async () => {
+        // Ordering, not cancellation: an aborted caller still deserves to hear
+        // that the text was never speakable. Guards the abort check against
+        // drifting above the input validation.
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(
+          tts.stream("  ", { signal: controller.signal }).next(),
+        ).rejects.toBeInstanceOf(InvalidInputError);
+      });
     });
   });
 
@@ -536,6 +602,57 @@ describe("VoxShot.play", () => {
 
     expect(harness.engine.requests[0]?.speed).toBe(1.5);
     expect(playback.volumes[0]).toBe(0.4);
+  });
+
+  it("stops when an external signal aborts", async () => {
+    const tts = await createWithVoice();
+    const controller = new AbortController();
+
+    const speech = tts.play("One. Two. Three.", { signal: controller.signal });
+    controller.abort();
+    await speech.done;
+
+    expect(playback.stopped).toBe(true);
+    // Not just "playback ended": the work has to stop too. Three chunks were
+    // queued and the cut lands during the first.
+    expect(harness.engine.requests.length).toBeLessThan(3);
+  });
+
+  it("stops immediately when handed a signal that has already aborted", async () => {
+    const tts = await createWithVoice();
+    const controller = new AbortController();
+    controller.abort();
+
+    const speech = tts.play("One. Two. Three.", { signal: controller.signal });
+    await speech.done;
+
+    expect(playback.stopped).toBe(true);
+  });
+
+  it("lets go of the signal once playback has finished", async () => {
+    const tts = await createWithVoice();
+    const controller = new AbortController();
+    // A controller can outlive the utterance — one per page is the obvious way
+    // to wire a stop button — so a listener left behind keeps a finished
+    // playback alive for as long as the page runs. Nothing observable happens
+    // when a stale listener fires (stopping a closed playback is a no-op), so
+    // the registration itself is the only honest place to look.
+    const live = new Set<unknown>();
+    const signal = controller.signal as AbortSignal & Record<string, unknown>;
+    const add = signal.addEventListener.bind(signal);
+    const remove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = ((type: string, fn: never, options?: never) => {
+      live.add(fn);
+      add(type, fn, options);
+    }) as unknown as typeof signal.addEventListener;
+    signal.removeEventListener = ((type: string, fn: never, options?: never) => {
+      live.delete(fn);
+      remove(type, fn, options);
+    }) as unknown as typeof signal.removeEventListener;
+
+    await tts.play("One. Two.", { signal }).done;
+
+    expect(live.size).toBe(0);
   });
 
   it("stop() prevents further synthesis", async () => {
