@@ -174,5 +174,6 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#65]: https://github.com/m96-chan/voxshot/issues/65
 [#69]: https://github.com/m96-chan/voxshot/issues/69
 [#81]: https://github.com/m96-chan/voxshot/issues/81
+[#86]: https://github.com/m96-chan/voxshot/issues/86
 [#90]: https://github.com/m96-chan/voxshot/issues/90
 [#92]: https://github.com/m96-chan/voxshot/issues/92

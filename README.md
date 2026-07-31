@@ -346,10 +346,13 @@ new ChatterboxEngine({
 
 `plan` reads as `device/dtype`, e.g. `webgpu/q4f16`. There is deliberately **no**
 "downloads finished, compiling now" event: detecting that transition needs a
-trustworthy count of the files a load will touch, and Transformers.js cannot
-supply one for this model
-([#45](https://github.com/m96-chan/voxshot/issues/45)). Inferring it from silence
-would be a guess dressed up as a fact, so the library does not pretend to know.
+trustworthy count of the files a load will touch, and Transformers.js still
+cannot supply one for this model. Its expected-file list resolves the language
+model to fp32 and seeds the total with a 2.08 GB file that is never fetched
+([#62](https://github.com/m96-chan/voxshot/issues/62)), so the denominator is
+both inflated and unstable. Inferring the transition from silence would be a
+guess dressed up as a fact, so the library does not pretend to know. Tracked in
+[#55](https://github.com/m96-chan/voxshot/issues/55).
 
 #### Handling a stalled load
 
@@ -488,19 +491,32 @@ Contribution rules — TDD, coverage, and ticket-driven development — are in
 
 ## Performance
 
-Measured on an RTX 5090 / Linux Chrome, English Chatterbox on WebGPU:
+Two machines have been measured, English Chatterbox on WebGPU. They point
+opposite ways, so both are given rather than averaged into a single number.
 
-| | |
-| --- | --- |
-| Synthesis | ~0.5× real time (5.3 s of speech in 2.7 s) |
-| Model load, warm cache | ~56 s — dominated by ONNX session creation, not download |
-| Model download, first run | ~1.5 GB |
+| | RTX 5090 / Linux Chrome | Apple M3 / Chrome 150 |
+| --- | --- | --- |
+| Adapter | ANGLE OpenGL ES, compatibility mode | Metal 3, 24 features |
+| `shader-f16` | not advertised | advertised |
+| Plan selected | `webgpu/q4` | `webgpu/q4f16` |
+| Synthesis | ~0.5× real time (5.3 s of speech in 2.7 s) | 1.07–1.48× real time |
+| Model load, warm cache | ~56 s — ONNX session creation, not download | — |
+| Model download, first run | ~1.5 GB | ~1.5 GB |
 
 Notes:
 
-* Linux Chrome does not expose `shader-f16`, so the engine automatically
-  degrades from the `q4f16` language model to `q4` (bigger, slower). On
-  Windows / macOS the f16 path is selected and is faster.
+* **Selecting the f16 path is not what determines throughput.** The machine
+  without `shader-f16`, running the larger `q4` model, is the fast one; the
+  machine with it, running `q4f16`, does not reach real time. On the M3 a
+  least-squares fit gives `synthesis ≈ 0.31 s + 1.09 × audio seconds`, so it
+  never beats real time however long the utterance. Diagnosis is in
+  [#66](https://github.com/m96-chan/voxshot/issues/66).
+* The RTX 5090 numbers were taken with Chrome's Vulkan backend **disabled**,
+  which is why Dawn fell back to the compatibility adapter and `shader-f16` was
+  absent — it is not a property of Linux. Vulkan has since been enabled on that
+  machine and nothing has been re-measured, so treat that column as a snapshot
+  of a configuration that no longer exists there.
+* No Windows measurement exists. Nothing here should be read as covering it.
 * Loading is the bottleneck, not synthesis. Start `VoxShot.create()` early —
   the [demo](./examples/browser) begins loading as soon as an engine is
   picked. Tuning work is tracked in
