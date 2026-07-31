@@ -1114,3 +1114,62 @@ describe("ChatterboxEngine load lifetime", () => {
     expect(leaked()).toBe(0);
   });
 });
+
+/**
+ * #86, self-review. Two ways the state can be handed to the wrong owner.
+ */
+describe("ChatterboxEngine load state ownership", () => {
+  let harness: ModuleHarness;
+
+  const createEngine = (overrides: Record<string, unknown> = {}) =>
+    new ChatterboxEngine({ loadModule: async () => harness.module, ...overrides });
+
+  beforeEach(() => {
+    harness = createModule();
+  });
+
+  it("does not let an abandoned load reset a newer one", async () => {
+    harness.hangOn = () => true;
+    const engine = createEngine({ stallTimeoutMs: 0 });
+
+    const first = engine.load("wasm").catch(() => undefined);
+    await vi.waitFor(() => expect(harness.releaseLoad).toBeDefined());
+    const releaseFirst = harness.releaseLoad as () => void;
+    harness.releaseLoad = undefined;
+
+    await engine.dispose();
+
+    // A second load takes ownership.
+    const second = engine.load("wasm").catch(() => undefined);
+    await vi.waitFor(() => expect(harness.releaseLoad).toBeDefined());
+
+    // The abandoned first load finishes now. Its cleanup must not hand the
+    // engine back to `idle` while the second one still owns it — that would
+    // let a third caller start yet another load.
+    releaseFirst();
+    await first;
+    await Promise.resolve();
+
+    const third = engine.load("wasm").catch(() => undefined);
+    // Re-read after the wait: assigning undefined above narrows the type, and
+    // the waitFor that repopulates it is invisible to the checker.
+    const releaseSecond = harness.releaseLoad as (() => void) | undefined;
+    releaseSecond?.();
+    await Promise.all([second, third]);
+
+    expect(harness.modelsCreated - harness.disposeCalls).toBe(1);
+  });
+
+  it("gives a concurrent caller the same failure, not a false success", async () => {
+    harness.failOn = () => true;
+    const engine = createEngine();
+
+    const first = engine.load("wasm");
+    const second = engine.load("wasm");
+
+    await expect(first).rejects.toBeInstanceOf(VoxShotError);
+    // Sharing the attempt must share its outcome. Resolving here would leave
+    // the caller believing the engine is ready.
+    await expect(second).rejects.toBeInstanceOf(VoxShotError);
+  });
+});

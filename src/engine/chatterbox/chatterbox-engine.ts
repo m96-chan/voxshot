@@ -267,23 +267,27 @@ export class ChatterboxEngine implements SynthesisEngine {
     }
     let abandoned = false;
     const settled = this.#load(device, () => abandoned).finally(() => {
-      // Only a load that still owns the engine may leave it in `loading`;
-      // one that failed or was abandoned hands it back to `idle` so a retry
-      // is possible. `dispose()` documents that a reload is allowed.
-      if (this.#state.kind === "loading") {
+      // Compare by identity, not by kind: an abandoned load finishing after a
+      // newer one has taken over would otherwise hand the engine back to
+      // `idle` while that newer load is still running, and the next caller
+      // would start a third.
+      if (this.#state === loading) {
         this.#state = { kind: "idle" };
       }
     });
-    this.#state = {
+    // Mark the stored promise observed. A concurrent caller receives this same
+    // promise and its rejection, because sharing an attempt has to mean
+    // sharing its outcome — resolving would leave them believing the engine is
+    // ready.
+    settled.catch(() => undefined);
+    const loading: EngineState = {
       kind: "loading",
-      settled: settled.then(
-        () => undefined,
-        () => undefined,
-      ),
+      settled,
       abandon: () => {
         abandoned = true;
       },
     };
+    this.#state = loading;
     return settled;
   }
 
