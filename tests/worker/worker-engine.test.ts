@@ -37,6 +37,9 @@ class RecordingEngine implements SynthesisEngine {
 
   /** Set to hold every synthesize open until the test releases it. */
   gate: Promise<void> | undefined;
+  /** When true the fake ignores its abort signal, like an engine that cannot
+   *  interrupt work already started. */
+  stubborn = false;
   /** Highest number of synthesize calls that were ever in flight at once. */
   peakConcurrency = 0;
   #inFlight = 0;
@@ -50,14 +53,33 @@ class RecordingEngine implements SynthesisEngine {
     this.requests.push(request);
     this.signals.push(request.signal);
     try {
-      if (this.gate) await this.gate;
+      if (this.gate) {
+        // A well-behaved engine stops when told to; one that ignores the
+        // signal cannot have its slot freed by anyone, which is a property of
+        // the engine rather than of the RPC.
+        if (this.stubborn) {
+          await this.gate;
+        } else {
+          await Promise.race([
+            this.gate,
+            new Promise<void>((resolve) => {
+              request.signal?.addEventListener("abort", () => resolve(), { once: true });
+            }),
+          ]);
+          request.signal?.throwIfAborted();
+        }
+      }
       return Float32Array.from([0.1, 0.2, 0.3]);
     } finally {
       this.#inFlight -= 1;
     }
   }
 
+  /** How many synthesize calls were running when dispose was invoked. */
+  peakConcurrencyAtDispose = -1;
+
   async dispose(): Promise<void> {
+    this.peakConcurrencyAtDispose = this.#inFlight;
     this.disposed = true;
   }
 }
@@ -555,5 +577,115 @@ describe("serialized execution", () => {
 
     open();
     await rendering.catch(() => undefined);
+  });
+});
+
+/**
+ * #80: serialization closed the wedge in #67 but opened three more routes to
+ * the same outcome — a request the caller waits on forever. Each of these was
+ * reproduced against the real RPC before being written.
+ */
+describe("lifecycle after teardown and failure", () => {
+  const deliver = async (): Promise<void> => {
+    for (let tick = 0; tick < 4; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  it("answers requests that arrive after dispose", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    worker.gate = new Promise<void>(() => {}); // a render that never settles
+
+    const wedged = engine.synthesize({ text: "wedged", voice, speed: 1 });
+    const abandoned = wedged.catch(() => undefined);
+    await deliver();
+    await engine.dispose();
+
+    // Before the fix this stayed pending forever: dispose left the drain loop
+    // parked, so nothing ever entered it again.
+    await expect(
+      engine.embed({ samples: new Float32Array(4), sampleRate: 16_000 }),
+    ).rejects.toBeInstanceOf(VoxShotError);
+
+    engine.disconnect();
+    await abandoned;
+  });
+
+  it("answers after dispose even when the running call cannot be interrupted", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    worker.stubborn = true;
+    worker.gate = new Promise<void>(() => {});
+
+    const wedged = engine.synthesize({ text: "wedged", voice, speed: 1 });
+    const abandoned = wedged.catch(() => undefined);
+    await deliver();
+    await engine.dispose();
+
+    // The drain loop is still parked on a render that will never end. Nothing
+    // may be allowed to queue behind it silently.
+    await expect(
+      engine.embed({ samples: new Float32Array(4), sampleRate: 16_000 }),
+    ).rejects.toBeInstanceOf(VoxShotError);
+
+    engine.disconnect();
+    await abandoned;
+  });
+
+  it("does not dispose the engine while a call is still running", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    worker.gate = new Promise<void>(() => {});
+
+    const wedged = engine.synthesize({ text: "wedged", voice, speed: 1 });
+    const abandoned = wedged.catch(() => undefined);
+    await deliver();
+    await engine.dispose();
+
+    // The queue exists to keep engine calls from overlapping; teardown must
+    // not be the one thing that breaks that.
+    expect(worker.peakConcurrencyAtDispose).toBe(0);
+
+    engine.disconnect();
+    await abandoned;
+  });
+
+  it("frees the slot when a request times out", async () => {
+    const { engine, worker } = wire({ timeoutMs: 30 });
+    await engine.load("wasm");
+    worker.gate = new Promise<void>(() => {});
+
+    await expect(
+      engine.synthesize({ text: "slow", voice, speed: 1 }),
+    ).rejects.toBeInstanceOf(VoxShotError);
+    worker.gate = undefined;
+    await deliver();
+
+    // Before the fix the timed-out render kept the only slot and every later
+    // request queued behind it for the life of the worker.
+    await expect(engine.synthesize({ text: "next", voice, speed: 1 })).resolves.toBeDefined();
+    expect(worker.requests.map((r) => r.text)).toContain("next");
+  });
+
+  it("stops serving without leaving queued work to run", async () => {
+    const { engine, worker, close } = wire();
+    await engine.load("wasm");
+    let release!: () => void;
+    worker.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const first = engine.synthesize({ text: "running", voice, speed: 1 }).catch(() => undefined);
+    const second = engine.synthesize({ text: "queued", voice, speed: 1 }).catch(() => undefined);
+    await deliver();
+
+    close();
+    release();
+    await deliver();
+    await Promise.all([first, second]);
+
+    // "queued" must never reach the engine after the server was told to stop.
+    expect(worker.requests.map((r) => r.text)).not.toContain("queued");
   });
 });

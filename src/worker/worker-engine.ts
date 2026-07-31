@@ -27,7 +27,12 @@ export interface WorkerSynthesisEngineOptions {
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
-  timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Release everything attached to this call: its timeout and its abort
+   * listener. The listener matters because one `AbortController` covers a
+   * whole utterance, so without this the listeners grow with the chunk count.
+   */
+  settle: () => void;
 }
 
 /**
@@ -126,12 +131,29 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
 
     const error = new VoxShotError("The worker connection was closed.");
     for (const [id, pending] of this.#pending) {
-      if (pending.timer) {
-        clearTimeout(pending.timer);
-      }
+      pending.settle();
       this.#pending.delete(id);
       pending.reject(error);
     }
+  }
+
+  /**
+   * Tell the worker to drop a request we have stopped waiting for.
+   *
+   * Every path that abandons a request needs this, not just cancellation:
+   * the worker runs one call at a time, so an abandoned render holds the only
+   * slot and everything behind it waits for work nobody wants (#80).
+   */
+  #abandon(id: number): void {
+    if (!this.#connected) {
+      return;
+    }
+    this.#endpoint.postMessage({
+      voxshot: PROTOCOL_VERSION,
+      id: this.#nextId++,
+      method: "cancel",
+      target: id,
+    });
   }
 
   async #send(
@@ -145,38 +167,32 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
 
     const id = this.#nextId++;
     return new Promise<unknown>((resolve, reject) => {
+      const onAbort = (): void => {
+        const pending = this.#pending.get(id);
+        if (!pending) {
+          return;
+        }
+        pending.settle();
+        this.#pending.delete(id);
+        this.#abandon(id);
+        reject(new VoxShotError("The request was cancelled."));
+      };
       if (signal) {
-        const onAbort = (): void => {
-          const pending = this.#pending.get(id);
-          if (!pending) {
-            return;
-          }
-          if (pending.timer) {
-            clearTimeout(pending.timer);
-          }
-          this.#pending.delete(id);
-          // Tell the worker to drop it too. Without this the render keeps
-          // running and holds the single execution slot (#67).
-          if (this.#connected) {
-            this.#endpoint.postMessage({
-              voxshot: PROTOCOL_VERSION,
-              id: this.#nextId++,
-              method: "cancel",
-              target: id,
-            });
-          }
-          reject(new VoxShotError("The request was cancelled."));
-        };
         if (signal.aborted) {
           queueMicrotask(onAbort);
         } else {
-          signal.addEventListener("abort", onAbort, { once: true });
+          signal.addEventListener("abort", onAbort);
         }
       }
       const timer =
         this.#timeoutMs > 0
           ? setTimeout(() => {
+              const pending = this.#pending.get(id);
+              pending?.settle();
               this.#pending.delete(id);
+              // The worker is still rendering; without this it keeps the only
+              // execution slot and every later request queues behind it.
+              this.#abandon(id);
               reject(
                 new VoxShotError(
                   `The worker did not answer "${request.method}" within ${this.#timeoutMs}ms.`,
@@ -185,7 +201,13 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
             }, this.#timeoutMs)
           : undefined;
 
-      this.#pending.set(id, { resolve, reject, timer });
+      const settle = (): void => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+        signal?.removeEventListener("abort", onAbort);
+      };
+      this.#pending.set(id, { resolve, reject, settle });
       this.#endpoint.postMessage({ voxshot: PROTOCOL_VERSION, id, ...request }, transfer);
     });
   }
@@ -203,9 +225,7 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
     if (!pending) {
       return;
     }
-    if (pending.timer) {
-      clearTimeout(pending.timer);
-    }
+    pending.settle();
     this.#pending.delete(data.id);
 
     if (data.ok) {

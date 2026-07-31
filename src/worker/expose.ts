@@ -7,7 +7,7 @@ import type {
   RpcEndpoint,
   SerializedError,
 } from "./protocol.js";
-import { PROTOCOL_VERSION, isRequestMessage } from "./protocol.js";
+import { CONTROL_METHODS, PROTOCOL_VERSION, isRequestMessage } from "./protocol.js";
 
 /**
  * Serve `engine` over a message port, so inference runs off the UI thread.
@@ -41,7 +41,19 @@ export function exposeEngine(
   // never came back (#67).
   const queue: Job[] = [];
   const jobs = new Map<number, Job>();
+  let running: Job | undefined;
   let draining = false;
+  let disposed = false;
+  let disposeWhenIdle = false;
+
+  /** Answer a job that will never reach the engine. */
+  const abandon = (job: Job, reason: string): void => {
+    if (jobs.get(job.request.id) === job) {
+      jobs.delete(job.request.id);
+    }
+    job.controller.abort();
+    fail(endpoint, job.request.id, new VoxShotError(reason));
+  };
 
   const drain = async (): Promise<void> => {
     if (draining) {
@@ -50,18 +62,29 @@ export function exposeEngine(
     draining = true;
     try {
       for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
-        if (job.cancelled) {
-          // Never started, so there is nothing to interrupt — just answer.
-          jobs.delete(job.request.id);
-          fail(endpoint, job.request.id, new VoxShotError("The request was cancelled."));
+        if (job.cancelled || disposed) {
+          abandon(job, job.cancelled ? "The request was cancelled." : "The engine was disposed.");
           continue;
         }
+        running = job;
         try {
-          // Stays registered while it runs: a cancel arriving mid-render has
-          // to be able to find it, which is the case that matters most.
           await handle(engine, job.request, endpoint, emitProgress, job.controller.signal);
+        } catch (cause) {
+          // `handle` answers its own failures; reaching here means replying
+          // itself threw. Answering is impossible, so drop this job rather
+          // than let one bad reply strand everything queued behind it.
+          fail(endpoint, job.request.id, cause);
         } finally {
-          jobs.delete(job.request.id);
+          running = undefined;
+          if (disposeWhenIdle) {
+            disposeWhenIdle = false;
+            await engine.dispose().catch(() => undefined);
+          }
+          // Compare by identity: a second engine sharing this endpoint starts
+          // its ids at 1 too, so deleting by id alone can remove its entry.
+          if (jobs.get(job.request.id) === job) {
+            jobs.delete(job.request.id);
+          }
         }
       }
     } finally {
@@ -80,30 +103,55 @@ export function exposeEngine(
     job.controller.abort();
   };
 
+  /**
+   * Abandon everything and dispose the engine.
+   *
+   * Teardown jumps the queue — waiting its turn behind a wedged render is how
+   * consumers were left with no way out.
+   *
+   * Disposing an ONNX session while a call is still inside it is the exact
+   * overlap the queue exists to prevent, and abort is only advisory: an engine
+   * that cannot interrupt keeps running whatever it started. So neither
+   * waiting nor disposing underneath it is acceptable. Instead the engine is
+   * marked unusable and answered immediately, and the disposal itself is left
+   * for whenever the running call finishes. A caller that cannot wait for that
+   * terminates the worker, which is the documented recovery.
+   */
+  const teardown = async (request: RequestMessage): Promise<void> => {
+    disposed = true;
+    for (const job of queue.splice(0)) {
+      abandon(job, "The engine was disposed.");
+    }
+
+    if (running) {
+      running.controller.abort();
+      disposeWhenIdle = true;
+      reply(endpoint, request.id, null);
+      return;
+    }
+    await handle(engine, request, endpoint, emitProgress, undefined);
+  };
+
   const listener = (event: { data: unknown }): void => {
     const request = event.data;
     if (!isRequestMessage(request)) {
       return;
     }
 
-    if (request.method === "cancel") {
-      cancel(request.target);
-      reply(endpoint, request.id, undefined);
+    if (CONTROL_METHODS.has(request.method)) {
+      if (request.method === "cancel") {
+        cancel(request.target);
+        reply(endpoint, request.id, undefined);
+      } else {
+        void teardown(request);
+      }
       return;
     }
 
-    if (request.method === "dispose") {
-      // Teardown jumps the queue. Waiting its turn behind a render is how a
-      // wedged engine became impossible to shut down.
-      for (const job of queue.splice(0)) {
-        jobs.delete(job.request.id);
-        job.controller.abort();
-        fail(endpoint, job.request.id, new VoxShotError("The engine was disposed."));
-      }
-      for (const job of jobs.values()) {
-        job.controller.abort();
-      }
-      void handle(engine, request, endpoint, emitProgress, undefined);
+    if (disposed) {
+      // Silence here is what left callers waiting forever once teardown had
+      // parked the drain loop.
+      fail(endpoint, request.id, new VoxShotError("The engine was disposed."));
       return;
     }
 
@@ -118,6 +166,14 @@ export function exposeEngine(
 
   const stop = (): void => {
     endpoint.removeEventListener("message", listener);
+    // Leaving the queue to run would keep the engine working for a server
+    // that has been told to stop, and those jobs are no longer reachable by
+    // `cancel` because the listener is gone.
+    disposed = true;
+    for (const job of queue.splice(0)) {
+      abandon(job, "The worker stopped serving.");
+    }
+    running?.controller.abort();
   };
   return Object.assign(stop, { emitProgress });
 }

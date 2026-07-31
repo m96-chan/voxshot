@@ -547,7 +547,7 @@ export class ChatterboxEngine implements SynthesisEngine {
  *
  * See {@link TOKENS_PER_CHARACTER} for the measurement this comes from.
  */
-export function tokenBudgetFor(text: string): number {
+function tokenBudgetFor(text: string): number {
   const estimate = TOKENS_PER_CHARACTER * text.length + TOKEN_BUDGET_BASE;
   return Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
 }
