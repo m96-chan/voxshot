@@ -73,10 +73,17 @@ function setup(options: Setup = {}) {
   const synthesized: string[] = [];
   const resolvers = new Map<string, (samples: Float32Array) => void>();
 
-  const synthesize = vi.fn(async (chunk: string) => {
+  const signals = new Map<string, AbortSignal | undefined>();
+  const synthesize = vi.fn(async (chunk: string, signal?: AbortSignal) => {
     synthesized.push(chunk);
-    return new Promise<Float32Array>((resolve) => {
+    signals.set(chunk, signal);
+    return new Promise<Float32Array>((resolve, reject) => {
       resolvers.set(chunk, resolve);
+      signal?.addEventListener(
+        "abort",
+        () => reject(new Error("The request was cancelled.")),
+        { once: true },
+      );
     });
   });
   const resolveSynthesis = (chunk: string) => {
@@ -95,7 +102,7 @@ function setup(options: Setup = {}) {
     open,
     ...(options.volume !== undefined ? { volume: options.volume } : {}),
   });
-  return { chunks, playback, synthesize, synthesized, resolveSynthesis, speech };
+  return { chunks, playback, synthesize, synthesized, signals, resolveSynthesis, speech };
 }
 
 describe("startSpeechPlayback", () => {
@@ -284,5 +291,66 @@ describe("startSpeechPlayback", () => {
     });
 
     await expect(speech.done).rejects.toThrow("no audio output");
+  });
+});
+
+/**
+ * #67: stopping mid-utterance used to leave the lookahead render running.
+ * Serialising the worker turns that from a deadlock into a queue of work
+ * nobody wants, so the render has to actually be called off.
+ */
+describe("cancellation on stop", () => {
+  it("hands every render a signal", async () => {
+    const { signals, speech } = setup();
+    await flushMicrotasks();
+
+    expect(signals.get("one")).toBeInstanceOf(AbortSignal);
+    expect(signals.get("one")?.aborted).toBe(false);
+
+    await speech.stop();
+  });
+
+  it("aborts the in-flight lookahead when stopped", async () => {
+    const { signals, resolveSynthesis, speech, synthesized } = setup();
+    await flushMicrotasks();
+    resolveSynthesis("one");
+    await flushMicrotasks();
+
+    // "two" is now being rendered ahead of playback — exactly the render that
+    // used to be abandoned and keep the engine busy.
+    expect(synthesized).toEqual(["one", "two"]);
+    expect(signals.get("two")?.aborted).toBe(false);
+
+    await speech.stop();
+
+    expect(signals.get("two")?.aborted).toBe(true);
+  });
+
+  it("still resolves cleanly when the cancelled render rejects", async () => {
+    const { resolveSynthesis, speech } = setup();
+    await flushMicrotasks();
+    resolveSynthesis("one");
+    await flushMicrotasks();
+
+    await speech.stop();
+
+    // A rejection we caused by stopping is not an error to report back.
+    await expect(speech.done).resolves.toBeUndefined();
+  });
+
+  it("does not abort anything when playback finishes normally", async () => {
+    const { signals, resolveSynthesis, playback, speech, chunks } = setup();
+    for (const chunk of chunks) {
+      await flushMicrotasks();
+      resolveSynthesis(chunk);
+      await flushMicrotasks();
+      playback.resolveWrite();
+    }
+    await flushMicrotasks();
+    await speech.done;
+
+    for (const chunk of chunks) {
+      expect(signals.get(chunk)?.aborted).toBe(false);
+    }
   });
 });

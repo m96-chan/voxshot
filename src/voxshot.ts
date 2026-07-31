@@ -287,7 +287,7 @@ export class VoxShot {
     const speed = options.speed ?? 1;
     return startSpeechPlayback({
       chunks,
-      synthesize: (chunk) => this.#synthesizeChunk(chunk, voice, speed),
+      synthesize: (chunk, signal) => this.#synthesizeChunk(chunk, voice, speed, signal),
       open: () => streaming.open(this.#engine.sampleRate),
       ...(options.volume !== undefined ? { volume: options.volume } : {}),
     });
@@ -298,12 +298,18 @@ export class VoxShot {
     chunk: string,
     voice: VoiceEmbedding,
     speed: number,
+    signal?: AbortSignal,
   ): Promise<Float32Array> {
     const cached = this.#cache?.get(voice, chunk, speed);
     if (cached) {
       return cached;
     }
-    const samples = await this.#engine.synthesize({ text: chunk, voice, speed });
+    const samples = await this.#engine.synthesize({
+      text: chunk,
+      voice,
+      speed,
+      ...(signal ? { signal } : {}),
+    });
     this.#cache?.set(voice, chunk, speed, samples);
     return samples;
   }

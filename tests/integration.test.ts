@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import type { SynthesisEngine, SynthesisRequest } from "../src/engine/types.js";
 import type { PcmAudio, Platform } from "../src/platform.js";
+import { exposeEngine } from "../src/worker/expose.js";
+import { WorkerSynthesisEngine } from "../src/worker/worker-engine.js";
 import { MemoryVoiceStore } from "../src/voice/memory-store.js";
 import { VoxShot } from "../src/voxshot.js";
 
@@ -123,5 +126,106 @@ describe("end to end with the built in engine", () => {
     expect(Array.from(low.samples)).not.toEqual(Array.from(high.samples));
 
     await tts.dispose();
+  });
+});
+
+/**
+ * #67, end to end: cutting an utterance used to leave a render running in the
+ * worker, and the next request re-entered the same session and never came
+ * back. This drives the real RPC over a MessageChannel, so the whole chain is
+ * exercised — playback, cancellation, the worker queue and the reply path.
+ */
+describe("cutting an utterance mid-render", () => {
+  /** Engine that never finishes a render until the test lets it. */
+  class GatedEngine implements SynthesisEngine {
+    readonly name = "gated";
+    readonly sampleRate = 24_000;
+    readonly started: string[] = [];
+    readonly signals: (AbortSignal | undefined)[] = [];
+    peakConcurrency = 0;
+    #inFlight = 0;
+    #release: (() => void)[] = [];
+
+    async load(): Promise<void> {}
+    async embed(): Promise<Float32Array> {
+      return Float32Array.from([0.5]);
+    }
+    async synthesize(request: SynthesisRequest): Promise<Float32Array> {
+      this.#inFlight += 1;
+      this.peakConcurrency = Math.max(this.peakConcurrency, this.#inFlight);
+      this.started.push(request.text);
+      this.signals.push(request.signal);
+      try {
+        await new Promise<void>((resolve) => {
+          this.#release.push(resolve);
+          request.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        request.signal?.throwIfAborted();
+        return Float32Array.from([0.1, 0.2, 0.3, 0.4]);
+      } finally {
+        this.#inFlight -= 1;
+      }
+    }
+    releaseAll(): void {
+      for (const resolve of this.#release.splice(0)) resolve();
+    }
+    async dispose(): Promise<void> {}
+  }
+
+  const settle = async (): Promise<void> => {
+    for (let tick = 0; tick < 5; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  it("cancels the abandoned render and answers the next utterance", async () => {
+    const channel = new MessageChannel();
+    const worker = new GatedEngine();
+    const stop = exposeEngine(worker, channel.port2);
+    const engine = new WorkerSynthesisEngine(channel.port1, { sampleRate: 24_000 });
+
+    const written: Float32Array[] = [];
+    const platform: Platform = {
+      ...testPlatform([]),
+      streamingPlayer: {
+        open: async () => ({
+          write: async (samples: Float32Array) => {
+            written.push(samples);
+          },
+          flush: async () => 0,
+          end: async () => {},
+          stop: async () => {},
+          setVolume: () => {},
+        }),
+      },
+    } as unknown as Platform;
+
+    const tts = await VoxShot.create({ platform, engine, voiceStore: new MemoryVoiceStore() });
+    await tts.cloneVoice(referenceAudio());
+
+    const speech = tts.play("First one. Second one. Third one.");
+    await settle();
+    expect(worker.started).toHaveLength(1);
+
+    // Cut it while the worker is still rendering.
+    await speech.stop();
+    await settle();
+
+    expect(worker.signals[0]?.aborted).toBe(true);
+
+    // The engine has to be usable straight afterwards — this is the request
+    // that used to go out and never come back.
+    const next = tts.play("A brand new line.");
+    await settle();
+    worker.releaseAll();
+    await next.done;
+
+    expect(written.length).toBeGreaterThan(0);
+    expect(worker.peakConcurrency).toBe(1);
+
+    stop();
+    engine.disconnect();
+    channel.port1.close();
+    channel.port2.close();
   });
 });
