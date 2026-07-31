@@ -243,6 +243,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   readonly #stallTimeoutMs: number;
 
   #module: TransformersModule | undefined;
+  #loading: Promise<void> | undefined;
   /**
    * Everything a loaded engine consists of, replaced as one value.
    *
@@ -297,6 +298,16 @@ export class ChatterboxEngine implements SynthesisEngine {
     if (this.#loaded) {
       return;
     }
+    // Two callers racing here would each build a full set of sessions, and
+    // one set would end up with nothing referring to it and nothing to
+    // dispose it. They share the first attempt instead.
+    this.#loading ??= this.#load(device).finally(() => {
+      this.#loading = undefined;
+    });
+    return this.#loading;
+  }
+
+  async #load(device: ResolvedDevice): Promise<void> {
 
     const transformers = (this.#module ??= await this.#importModule());
     // Inside the guard and inside the error contract: this is the first
@@ -337,7 +348,7 @@ export class ChatterboxEngine implements SynthesisEngine {
           });
           const processor = await transformers.AutoProcessor.from_pretrained(this.modelId);
           return { model, processor, plan };
-        });
+        }, discardLoaded);
         this.#announce("load-ready", plan);
         return;
       } catch (cause) {
@@ -461,6 +472,12 @@ export class ChatterboxEngine implements SynthesisEngine {
     // Counted, not inferred. The waveform's length depends on the reference
     // voice as well as the token count, so recovering one from it was never
     // sound — see #81.
+    //
+    // The criteria are evaluated once per token, after it is appended, so a
+    // run stopped by the cap ends with exactly `budget` steps. An utterance
+    // that finishes naturally on its very last allowed token also lands on
+    // `budget` and is reported; the two are indistinguishable from here, and
+    // over-reporting at the boundary is the safer way round.
     if (counter !== undefined && counter.steps >= budget) {
       this.#onProgress?.({ status: "synthesize-truncated", text: trimmed, tokens: budget });
     }
@@ -580,7 +597,10 @@ export class ChatterboxEngine implements SynthesisEngine {
    * rejection it produces later is swallowed instead of surfacing as an
    * unhandled rejection.
    */
-  async #withStallGuard<T>(operation: (notice: () => void) => Promise<T>): Promise<T> {
+  async #withStallGuard<T>(
+    operation: (notice: () => void) => Promise<T>,
+    discard?: (value: T) => void,
+  ): Promise<T> {
     if (this.#stallTimeoutMs <= 0) {
       return operation(() => {});
     }
@@ -608,11 +628,25 @@ export class ChatterboxEngine implements SynthesisEngine {
     });
 
     restart();
+    let abandoned = false;
     const running = operation(restart);
-    running.catch(() => {});
+    running.then(
+      (value) => {
+        // A stalled transfer can recover after the guard has given up. What
+        // it produces is unreachable — nothing else holds a reference — so
+        // whoever owns the result has to be given the chance to release it.
+        if (abandoned) {
+          discard?.(value);
+        }
+      },
+      () => undefined,
+    );
 
     try {
       return await Promise.race([running, stalled]);
+    } catch (cause) {
+      abandoned = true;
+      throw cause;
     } finally {
       settled = true;
       if (timer !== undefined) {
@@ -658,6 +692,11 @@ export function tokenBudgetFor(text: string): number {
   const estimate = TOKENS_PER_CHARACTER * text.length + TOKEN_BUDGET_BASE;
   const wanted = Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
   return Math.min(MAX_TOKEN_BUDGET, wanted);
+}
+
+/** Release sessions produced by a load nobody is waiting for any more. */
+function discardLoaded(loaded: Loaded): void {
+  void loaded.model.dispose().catch(() => undefined);
 }
 
 /** What a successful load produces, replaced as one value. */

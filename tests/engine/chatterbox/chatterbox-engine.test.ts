@@ -35,6 +35,8 @@ interface ModuleHarness {
   failOn: (device: string, modelDtype: string) => boolean;
   /** When true for a plan, `from_pretrained` returns a promise that never settles. */
   hangOn: (device: string, modelDtype: string) => boolean;
+  /** Resolve a hung `from_pretrained`, as a stalled transfer that recovers. */
+  releaseLoad: (() => void) | undefined;
   /** Last `progress_callback` handed to `from_pretrained`, so tests can drive it. */
   lastProgressCallback: ((progress: Record<string, unknown>) => void) | undefined;
   /** Every stopping criterion the engine constructed. */
@@ -58,6 +60,7 @@ function createModule(): ModuleHarness {
     disposeCalls: 0,
     failOn: () => false,
     hangOn: () => false,
+    releaseLoad: undefined,
     lastProgressCallback: undefined,
     stoppers: [],
     tokensUsed: undefined,
@@ -88,14 +91,19 @@ function createModule(): ModuleHarness {
           | undefined;
         options.progress_callback?.({ status: "progress", file: modelId });
         if (harness.hangOn(options.device as string, dtype.language_model as string)) {
-          // Models the reported bug: a dangling transfer leaves `from_pretrained`
-          // pending forever — it neither resolves nor rejects.
-          return new Promise(() => {});
+          // A dangling transfer: neither resolves nor rejects, unless the
+          // test later lets it recover the way a stalled socket can.
+          return new Promise((resolve) => {
+            harness.releaseLoad = () => resolve(makeModel());
+          });
         }
         if (harness.failOn(options.device as string, dtype.language_model as string)) {
           throw new Error(`no ${options.device} support`);
         }
-        return {
+        return makeModel();
+
+        function makeModel() {
+          return {
           async encode_speech(audioValues: TensorLike) {
             harness.encodeCalls.push(audioValues);
             return speakerOutputs();
@@ -124,7 +132,8 @@ function createModule(): ModuleHarness {
           async dispose() {
             harness.disposeCalls += 1;
           },
-        };
+          };
+        }
       },
     },
     StoppingCriteria: class {
@@ -597,6 +606,39 @@ describe("ChatterboxEngine", () => {
         // The timer must be cleared on success; a late fire would reject a
         // promise nobody is holding any more.
         expect(stalling.loadedPlan?.device).toBe("wasm");
+      });
+
+      it("disposes a load that lands after it was abandoned", async () => {
+        harness.hangOn = () => true;
+        const stalling = createEngine({ stallTimeoutMs: 1000 });
+
+        const load = stalling.load("wasm");
+        const assertion = expect(load).rejects.toBeInstanceOf(LoadStalledError);
+        await vi.advanceTimersByTimeAsync(1000);
+        await assertion;
+
+        // A stalled transfer can recover. The sessions it produces are a full
+        // model — around 1.5 GB, GPU buffers on WebGPU — and nothing else
+        // holds a reference to them.
+        harness.releaseLoad?.();
+        await vi.advanceTimersByTimeAsync(0);
+        await Promise.resolve();
+
+        expect(harness.disposeCalls).toBe(1);
+        expect(stalling.loadedPlan).toBeUndefined();
+      });
+
+      it("does not build the model twice for two concurrent loads", async () => {
+        vi.useRealTimers();
+        const shared = createEngine();
+
+        await Promise.all([shared.load("wasm"), shared.load("wasm")]);
+
+        // Two loads each producing a full set of sessions leaves one set with
+        // nothing referring to it and nothing to dispose it.
+        expect(harness.attempts).toHaveLength(1);
+        expect(shared.loadedPlan?.device).toBe("wasm");
+        vi.useFakeTimers();
       });
 
       it("guards against a load that is silent from the very first moment", async () => {
