@@ -32,6 +32,14 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   away from, instead of leaving it running. ([#67])
 
 ### Fixed
+- The published package now contains its license. `package.json` declared MIT
+  while no license text was shipped or even present in the repository, so what
+  reached npm granted nothing on its own terms. ([#98])
+- Source maps resolve. `src` is now part of the package, so the `../../src/…`
+  paths every `.js.map` and `.d.ts.map` already carried point at real files:
+  stack traces land on TypeScript and go-to-definition reaches the source
+  rather than stopping at the declaration. Previously 125 kB of the 331 kB
+  tarball was maps that resolved to nothing. ([#98])
 - `ChatterboxEngine` rejects `stallTimeoutMs` and `maxNewTokens` values that
   used to do the opposite of what they read like. `stallTimeoutMs: Infinity`
   spelled "wait forever" and failed the load in about a millisecond, because
@@ -175,4 +183,5 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#69]: https://github.com/m96-chan/voxshot/issues/69
 [#81]: https://github.com/m96-chan/voxshot/issues/81
 [#90]: https://github.com/m96-chan/voxshot/issues/90
+[#98]: https://github.com/m96-chan/voxshot/issues/98
 [#92]: https://github.com/m96-chan/voxshot/issues/92
