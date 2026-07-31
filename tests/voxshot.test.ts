@@ -141,6 +141,20 @@ describe("VoxShot.create", () => {
       await expect(create({ engine: gpuOnly() })).rejects.toThrow(/fake/);
     });
 
+    it("does not claim the GPU is missing when the caller chose otherwise", async () => {
+      // `device: "wasm"` never probes the GPU, so it may well be there. Saying
+      // it "is not available in this environment" would send someone hunting a
+      // driver problem that does not exist.
+      harness.gpuAvailable.value = true;
+
+      await expect(create({ engine: gpuOnly(), device: "wasm" })).rejects.toThrow(
+        /requires a GPU/,
+      );
+      await expect(create({ engine: gpuOnly(), device: "wasm" })).rejects.not.toThrow(
+        /is not available in this environment/,
+      );
+    });
+
     it("runs normally when a GPU is there", async () => {
       harness.gpuAvailable.value = true;
       const engine = gpuOnly();

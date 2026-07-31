@@ -12,6 +12,17 @@ export interface WorkerSynthesisEngineOptions {
    * @defaultValue 24000 (Chatterbox)
    */
   sampleRate?: number;
+  /**
+   * Declare that the engine on the other side needs a GPU.
+   *
+   * Stated here rather than asked for, because the check runs before `load()`
+   * and there is nothing to ask yet — the same reason {@link name} and
+   * {@link sampleRate} are supplied locally. It has to match whatever the
+   * worker actually constructs; nothing verifies that for you.
+   *
+   * @defaultValue false
+   */
+  requiresGpu?: boolean;
   /** Engine name reported before `load()` has answered. */
   name?: string;
   /** Receives progress events pushed by the worker (model download, ready). */
@@ -49,6 +60,8 @@ interface Pending {
  * the caller's `Float32Array` is never detached.
  */
 export class WorkerSynthesisEngine implements SynthesisEngine {
+  readonly requiresGpu: boolean;
+
   #name: string;
   #sampleRate: number;
 
@@ -65,6 +78,7 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
     this.#endpoint = endpoint;
     this.#name = options.name ?? "worker";
     this.#sampleRate = options.sampleRate ?? CHATTERBOX_SAMPLE_RATE;
+    this.requiresGpu = options.requiresGpu ?? false;
     this.#onProgress = options.onProgress;
     this.#timeoutMs = options.timeoutMs ?? 0;
 

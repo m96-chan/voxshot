@@ -17,6 +17,10 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   broken one, arriving with no error after a ~1.5 GB download. Left off by
   default, because whether CPU is usable depends entirely on the model.
   ([#107])
+- `requiresGpu` on `WorkerSynthesisEngineOptions`. The engine that needs the
+  GPU lives in the worker and the main thread only sees the proxy, so without
+  this the requirement could not be expressed in the deployment shape the
+  library is built around. ([#107])
 
 
 ## [0.3.0] - 2026-08-01

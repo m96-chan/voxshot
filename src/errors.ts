@@ -32,14 +32,14 @@ export class DeviceUnavailableError extends VoxShotError {
   readonly device: string;
 
   /**
-   * @param reason - Appended to the message. Use it when the device is
-   * present but something above it refused — an engine that requires a GPU,
-   * say — so the caller is not left to guess which of the two happened.
+   * @param message - Replaces the default text. Use it when the device was not
+   * probed at all — an engine refusing a caller's explicit `wasm`, say. The
+   * default sentence would assert the GPU is missing, and send someone hunting
+   * a driver problem that does not exist.
    */
-  constructor(device: string, reason?: string, options?: ErrorOptions) {
+  constructor(device: string, message?: string, options?: ErrorOptions) {
     super(
-      `Inference device "${device}" is not available in this environment.` +
-        (reason === undefined ? "" : ` ${reason}`),
+      message ?? `Inference device "${device}" is not available in this environment.`,
       "DEVICE_UNAVAILABLE",
       options,
     );

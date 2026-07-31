@@ -939,3 +939,20 @@ describe("per utterance expressiveness across the boundary", () => {
     expect(worker.requests[1]?.expressiveness).toBe(0.5);
   });
 });
+
+describe("WorkerSynthesisEngine requiresGpu", () => {
+  it("carries the requirement so the main thread can act on it", () => {
+    // The engine that actually needs the GPU lives in the worker, and the main
+    // thread only ever sees this proxy. Without it here, the requirement
+    // cannot be expressed at all in the deployment shape the library is built
+    // around — the check runs before load, so asking the worker is too late.
+    const channel = new MessageChannel();
+    try {
+      expect(new WorkerSynthesisEngine(channel.port1, { requiresGpu: true }).requiresGpu).toBe(true);
+      expect(new WorkerSynthesisEngine(channel.port1).requiresGpu).toBe(false);
+    } finally {
+      channel.port1.close();
+      channel.port2.close();
+    }
+  });
+});
