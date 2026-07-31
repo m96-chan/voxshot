@@ -34,6 +34,18 @@ worse than the gap they fill — assert behaviour a consumer could observe, and 
 a branch is genuinely unreachable, say so in the code rather than writing a test
 that pretends otherwise.
 
+**Watch each new test fail before you make it pass**, individually and for the
+reason it is meant to catch. A failure count is not enough: if you add five
+tests and three fail, the two that passed are the interesting ones — a test that
+never reproduces its condition is green against the unfixed code too.
+
+**When fixing a bug, disable the fix and confirm the new test goes red**, then
+restore it. Without that step you can only claim a test was added, not that it
+guards anything. And if a test still passes with the code under test removed,
+the observable is wrong rather than the code.
+
+Coverage will not catch any of this. The lines run either way.
+
 ## Read before you write
 
 Do not infer an API's behaviour and build on the guess. Read the existing
