@@ -323,36 +323,18 @@ export class VoxShot {
 
     const speed = options.speed ?? 1;
     const expressiveness = options.expressiveness;
-    const playback = startSpeechPlayback({
+    return startSpeechPlayback({
       chunks,
       synthesize: (chunk, signal) =>
         this.#synthesizeChunk(chunk, voice, speed, signal, expressiveness),
       open: () => streaming.open(this.#engine.sampleRate),
       ...(options.volume !== undefined ? { volume: options.volume } : {}),
+      // Playback owns its own abort, so a caller's signal is routed through
+      // stop() rather than handed to the engine: that is the one path that also
+      // closes the output. Ignoring the option would be worse — it is inherited
+      // from SpeakOptions, so passing one is a reasonable thing to expect to work.
+      ...(options.signal ? { signal: options.signal } : {}),
     });
-
-    // Playback owns its own abort internally, so an external signal is routed
-    // through `stop()` rather than handed down: that is the one path that also
-    // closes the output. Ignoring the option here would be the worse answer —
-    // it is inherited from `SpeakOptions`, so a caller passing one has every
-    // reason to expect it to work.
-    const signal = options.signal;
-    if (signal) {
-      if (signal.aborted) {
-        void playback.stop();
-      } else {
-        const cut = (): void => void playback.stop();
-        signal.addEventListener("abort", cut, { once: true });
-        // `once` only removes a listener that fires. One controller reused
-        // across many utterances — a page-lifetime one, say — would otherwise
-        // collect a listener per finished playback, each keeping it alive.
-        playback.done.then(
-          () => signal.removeEventListener("abort", cut),
-          () => signal.removeEventListener("abort", cut),
-        );
-      }
-    }
-    return playback;
   }
 
   /** Render one chunk, going through the synthesis cache when enabled. */

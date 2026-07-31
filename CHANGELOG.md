@@ -16,6 +16,10 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   of minutes of work, and dropping the promise stopped none of it. Since the
   worker runs one call at a time, that abandoned work also blocked everything
   queued behind it. ([#92])
+- `signal` on `SpeechPlaybackInput`, which is how `play()` honours the option.
+  The subscription belongs to the playback so it can be dropped the moment the
+  utterance ends — a page-lifetime signal would otherwise collect a listener per
+  utterance, each holding a finished playback. ([#92])
 - `expressiveness` on `SpeakOptions` and `SynthesisRequest`, setting how
   animated a single utterance is without rebuilding the engine — which
   previously meant reloading the model. `ChatterboxEngine` maps it onto its
