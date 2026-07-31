@@ -61,6 +61,15 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   away from, instead of leaving it running. ([#67])
 
 ### Fixed
+- Loads no longer probe a language model that is never fetched. Transformers.js
+  reads `dtype` by **session key** when it builds the list of files a load will
+  touch, and Chatterbox maps `model` to the file `language_model` — so a record
+  keyed only by file name missed, and the expected-file list fell through to the
+  device default: `onnx/language_model.onnx` (fp32, 2.08 GB) on WebGPU and
+  `onnx/language_model_quantized.onnx` (a 404) on WASM. Both keys are carried
+  now. The fp32 file was never downloaded but was seeded into `progress_total`,
+  which is what made the download denominator roughly twice the real transfer.
+  ([#62])
 - The published package now contains its license. `package.json` declared MIT
   while no license text was shipped or even present in the repository, so what
   reached npm granted nothing on its own terms. ([#98])
@@ -209,6 +218,7 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#46]: https://github.com/m96-chan/voxshot/issues/46
 [#51]: https://github.com/m96-chan/voxshot/issues/51
 [#67]: https://github.com/m96-chan/voxshot/issues/67
+[#62]: https://github.com/m96-chan/voxshot/issues/62
 [#65]: https://github.com/m96-chan/voxshot/issues/65
 [#69]: https://github.com/m96-chan/voxshot/issues/69
 [#81]: https://github.com/m96-chan/voxshot/issues/81

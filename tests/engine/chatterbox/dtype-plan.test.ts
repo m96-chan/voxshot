@@ -11,6 +11,7 @@ describe("buildLoadPlans", () => {
       embed_tokens: "fp32",
       speech_encoder: "fp32",
       language_model: "q4f16",
+      model: "q4f16",
       conditional_decoder: "fp32",
     });
   });
@@ -50,6 +51,7 @@ describe("buildLoadPlans", () => {
       embed_tokens: "fp32",
       speech_encoder: "fp32",
       language_model: "q4",
+      model: "q4",
       conditional_decoder: "q8",
     });
   });
@@ -99,5 +101,42 @@ describe("an engine that requires a GPU", () => {
   it("leaves the tail alone for an engine that did not ask", () => {
     const plans = buildLoadPlans("webgpu");
     expect(plans[plans.length - 1]?.device).toBe("wasm");
+  });
+});
+
+describe("the language model's dtype key", () => {
+  it("is carried under the session key as well as the file name", () => {
+    // Transformers.js reads dtype by **session key** when it builds the list of
+    // files a load will touch: `get_model_files` iterates the session map and
+    // calls `selectDtype(dtype, sessionKey, device)`, and Chatterbox maps
+    // `model -> language_model`. With only a `language_model` key, that lookup
+    // misses and falls through to the device default. Verified against the
+    // vendored 4.2.0:
+    //
+    //   without `model`  webgpu -> onnx/language_model.onnx           (fp32)
+    //                    wasm   -> onnx/language_model_quantized.onnx (404)
+    //   with `model`     both   -> onnx/language_model_q4.onnx
+    //
+    // The fp32 file is never fetched but is seeded into `progress_total`, which
+    // is what inflates the download denominator (#55).
+    for (const plan of [...buildLoadPlans("webgpu"), ...buildLoadPlans("wasm")]) {
+      expect(plan.dtype.model).toBe(plan.dtype.language_model);
+    }
+  });
+
+  it("keeps the file-name key, which builds the actual session", () => {
+    // `session.js` resolves the session by file name (`names[name]`), so this
+    // has to be an addition. Renaming would regress #11 — the load itself would
+    // stop finding its quantization.
+    for (const plan of buildLoadPlans("webgpu")) {
+      expect(plan.dtype.language_model).toBeDefined();
+    }
+  });
+
+  it("lets an override reach both", () => {
+    const [plan] = buildLoadPlans("webgpu", { language_model: "q8" });
+
+    expect(plan?.dtype.language_model).toBe("q8");
+    expect(plan?.dtype.model).toBe("q8");
   });
 });
