@@ -218,6 +218,9 @@ async function handle(
         const description: EngineDescription = {
           name: engine.name,
           sampleRate: engine.sampleRate,
+          // Only when the engine tracks it: reporting the requested device
+          // would defeat the point, which is to surface a degrade.
+          ...(engine.loadedDevice === undefined ? {} : { device: engine.loadedDevice }),
         };
         // Tell the main thread the model is usable before the reply is read,
         // so a UI can drop its loading indicator as early as possible.

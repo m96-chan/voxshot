@@ -20,6 +20,7 @@ class RecordingEngine implements SynthesisEngine {
   readonly sampleRate = 24_000;
 
   loadedOn: string | undefined;
+  loadedDevice: "webgpu" | "wasm" | undefined;
   embedded: PcmAudio[] = [];
   requests: SynthesisRequest[] = [];
   disposed = false;
@@ -141,6 +142,27 @@ describe("WorkerSynthesisEngine", () => {
     await engine.load("webgpu");
 
     expect(worker.loadedOn).toBe("webgpu");
+  });
+
+  it("adopts where the worker engine actually loaded", async () => {
+    // The engine that may degrade lives on the far side, so the main thread
+    // cannot see the outcome unless the load reply carries it.
+    const { engine, worker } = wire();
+    worker.loadedDevice = "wasm";
+
+    await engine.load("webgpu");
+
+    expect(engine.loadedDevice).toBe("wasm");
+  });
+
+  it("says nothing when the worker side does not report a device", async () => {
+    // An older worker predates the field. Silence is right: better than
+    // asserting the device the caller asked for.
+    const { engine } = wire();
+
+    await engine.load("webgpu");
+
+    expect(engine.loadedDevice).toBeUndefined();
   });
 
   it("adopts the worker engine's name and sample rate after loading", async () => {

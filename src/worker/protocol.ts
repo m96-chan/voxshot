@@ -65,6 +65,14 @@ export interface ProgressMessage {
 export interface EngineDescription {
   readonly name: string;
   readonly sampleRate: number;
+  /**
+   * Where the worker's engine actually loaded.
+   *
+   * Optional so a worker built before this field keeps working: the main
+   * thread reports nothing rather than guessing, which is the same answer an
+   * engine that does not track it gives.
+   */
+  readonly device?: ResolvedDevice;
 }
 
 /**

@@ -11,8 +11,18 @@ export type ResolvedDevice = "webgpu" | "wasm";
  * Decide which backend to run inference on.
  *
  * - `auto` (default): WebGPU when present, WASM otherwise.
- * - `webgpu`: WebGPU or a {@link DeviceUnavailableError}; never silently slow.
+ * - `webgpu`: WebGPU or a {@link DeviceUnavailableError}.
  * - `wasm`: WASM without probing the GPU at all.
+ *
+ * This picks what to *try*, and nothing more. An engine may still degrade
+ * internally — `ChatterboxEngine`'s fallback chain ends on WASM so a GPU that
+ * cannot run the model still produces audio — so `webgpu` here does not
+ * promise you will end up there.
+ *
+ * Two things follow. `VoxShot.device` reports where the engine actually
+ * landed, so a degrade is observable rather than silent. And an engine that
+ * should refuse rather than degrade says so itself, with `requiresGpu`:
+ * whether CPU is usable depends on the model, not on the caller's preference.
  */
 export async function resolveDevice(
   preference: DevicePreference | undefined,
