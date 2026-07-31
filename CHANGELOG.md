@@ -8,6 +8,29 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 
 ## [Unreleased]
 
+### Added
+
+- `SynthesisRequest.signal`, so a render in progress can be abandoned.
+  `SpeechPlayback.stop()` now uses it to cancel the lookahead chunk it walks
+  away from, instead of leaving it running. ([#67])
+
+### Fixed
+
+- The engine no longer stops answering after an utterance is cut mid-render.
+  Requests to the worker are serialized, so a second call cannot re-enter an
+  ONNX session that is not re-entrant, and `cancel` / `dispose` bypass the
+  queue so teardown stays reachable behind a render that never finishes.
+  ([#67])
+
+### Note
+
+- The worker protocol gained a `cancel` method, but `PROTOCOL_VERSION` is
+  unchanged: old worker bundles still serve every other method. A stale worker
+  paired with a new main bundle therefore degrades rather than breaks — the
+  cancel is answered with an unknown-method error nobody is waiting for, and
+  the abandoned render runs to completion. **Rebuild the worker alongside the
+  main bundle** for cancellation to take effect.
+
 ## [0.2.0] - 2026-07-30
 
 Model loading is the theme of this release: it no longer hangs forever, it
@@ -82,3 +105,4 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#45]: https://github.com/m96-chan/voxshot/issues/45
 [#46]: https://github.com/m96-chan/voxshot/issues/46
 [#51]: https://github.com/m96-chan/voxshot/issues/51
+[#67]: https://github.com/m96-chan/voxshot/issues/67
