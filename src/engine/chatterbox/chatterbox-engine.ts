@@ -459,9 +459,6 @@ export class ChatterboxEngine implements SynthesisEngine {
 
     const samples = Float32Array.from(waveform.data as Float32Array);
 
-    // `generate` returns only a waveform, so whether it stopped early has to
-    // be recovered from its length. Silence here is how #65 went unnoticed:
-    // the audio simply ended, with no error to catch.
     // Counted, not inferred. The waveform's length depends on the reference
     // voice as well as the token count, so recovering one from it was never
     // sound — see #90.
