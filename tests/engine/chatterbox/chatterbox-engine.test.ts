@@ -1650,3 +1650,98 @@ describe("ChatterboxEngine loadedDevice", () => {
     expect(engine.loadedDevice).toBeUndefined();
   });
 });
+
+describe("ChatterboxEngine compile milestone", () => {
+  const compiling = (events: ChatterboxLoadEvent[]) =>
+    events.filter((e) => (e as { status: string }).status === "load-compiling");
+
+  /**
+   * Drives progress while the load is still in flight. It has to be in flight:
+   * once the attempt settles the engine deliberately stops listening (#81), so
+   * events pushed afterwards are ignored — correctly, but invisibly.
+   */
+  const during = async (drive: (emit: (p: Record<string, unknown>) => void) => void) => {
+    const harness = createModule();
+    harness.hangOn = () => true;
+    const events: ChatterboxLoadEvent[] = [];
+    const engine = new ChatterboxEngine({
+      loadModule: async () => harness.module,
+      onProgress: (event) => events.push(event),
+    });
+
+    const loading = engine.load("wasm");
+    // Wait for the transfer to actually be in flight; the engine imports the
+    // module and resolves the config before it gets there.
+    for (let tick = 0; tick < 50 && harness.releaseLoad === undefined; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    drive((p) => harness.lastProgressCallback?.(p));
+    const mid = compiling(events).length;
+    harness.releaseLoad?.();
+    await loading;
+    return { events, mid };
+  };
+
+  /** Aggregate as upstream emits it once the expected-file list resolved. */
+  const seeded = (loaded: number, total: number) => ({
+    status: "progress_total",
+    loaded,
+    total,
+    files: { "config.json": {}, "onnx/language_model_q4.onnx": {}, "onnx/embed_tokens.onnx": {} },
+  });
+
+  it("announces compiling when the aggregate download completes", async () => {
+    // Pre-populated from the expected-file list: the total is known before any
+    // byte arrives and never moves.
+    const { mid } = await during((emit) => {
+      emit(seeded(0, 1000));
+      emit(seeded(600, 1000));
+      emit(seeded(1000, 1000));
+    });
+
+    expect(mid).toBe(1);
+  });
+
+  it("says nothing until the aggregate is actually complete", async () => {
+    const { mid } = await during((emit) => {
+      emit(seeded(0, 1000));
+      emit(seeded(999, 1000));
+    });
+
+    expect(mid).toBe(0);
+  });
+
+  it("announces it once, not on every further event", async () => {
+    const { mid } = await during((emit) => {
+      emit(seeded(0, 1000));
+      emit(seeded(1000, 1000));
+      emit(seeded(1000, 1000));
+    });
+
+    expect(mid).toBe(1);
+  });
+
+  it("stays silent when the aggregate only covers the file in flight", async () => {
+    // What an unresolved expected-file list produces: the aggregate is
+    // accumulated from files as they start, so it hits 100% the moment the
+    // first one finishes, with everything else unstarted. That is the guess
+    // this milestone was withheld to avoid — and the map has grown by the time
+    // it could be detected after the fact, so it is judged on the first event.
+    const { mid } = await during((emit) => {
+      emit({ status: "progress_total", loaded: 0, total: 400, files: { "a.onnx": {} } });
+      emit({ status: "progress_total", loaded: 400, total: 400, files: { "a.onnx": {} } });
+      emit({ status: "progress_total", loaded: 400, total: 900, files: { "a.onnx": {}, "b.onnx": {} } });
+      emit({ status: "progress_total", loaded: 900, total: 900, files: { "a.onnx": {}, "b.onnx": {} } });
+    });
+
+    expect(mid).toBe(0);
+  });
+
+  it("stays silent when no aggregate arrives at all", async () => {
+    const { mid } = await during((emit) => {
+      emit({ status: "progress", file: "a.onnx", loaded: 10, total: 10 });
+    });
+
+    expect(mid).toBe(0);
+  });
+});

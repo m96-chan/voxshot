@@ -9,6 +9,13 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 ## [Unreleased]
 
 ### Added
+- A `load-compiling` milestone on `ChatterboxLifecycleEvent`, marking the end of
+  downloading and the start of ONNX session creation. That step dominates a warm
+  load — roughly 35 s idle, over two minutes on a busy machine — and emitted
+  nothing, so a progress bar sat at its last download value throughout. It comes
+  from the aggregate reaching a total resolved before any byte arrives, not from
+  silence, and is withheld when that total was accumulated from files as they
+  started rather than known up front. ([#55])
 
 - `requiresGpu` on `SynthesisEngine` and on `ChatterboxEngineOptions`. An
   engine that says so is refused before `load()` on a machine without WebGPU,
@@ -218,6 +225,7 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#46]: https://github.com/m96-chan/voxshot/issues/46
 [#51]: https://github.com/m96-chan/voxshot/issues/51
 [#67]: https://github.com/m96-chan/voxshot/issues/67
+[#55]: https://github.com/m96-chan/voxshot/issues/55
 [#62]: https://github.com/m96-chan/voxshot/issues/62
 [#65]: https://github.com/m96-chan/voxshot/issues/65
 [#69]: https://github.com/m96-chan/voxshot/issues/69

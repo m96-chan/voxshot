@@ -63,6 +63,11 @@ function createProgressLogger(): (progress: Record<string, unknown>) => void {
     // dtype fallback used to be invisible from out here.
     if (progress.status === "load-start") {
       log(`Trying ${progress.plan}…`);
+    } else if (progress.status === "load-compiling") {
+      // The one step that used to look like a stall: downloads are done and
+      // ONNX session creation has started, which emits nothing for tens of
+      // seconds to a couple of minutes.
+      log("Downloads finished. Compiling kernels — this is the slow part…");
     } else if (progress.status === "load-fallback") {
       log(`⚠ ${progress.plan} failed (${progress.reason}); falling back.`);
     } else if (progress.status === "load-ready") {
