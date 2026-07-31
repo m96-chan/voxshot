@@ -1296,3 +1296,87 @@ describe("ChatterboxEngine truncation detection", () => {
     expect(truncations(events)).toHaveLength(0);
   });
 });
+
+describe("ChatterboxEngine option validation", () => {
+  const build = (options: Record<string, unknown>) => () =>
+    new ChatterboxEngine({ loadModule: async () => createModule().module, ...options });
+
+  it.each([
+    ["under a millisecond, which setTimeout rounds up and fires at once", 0.4],
+    ["negative", -1],
+    ["not a number at all", Number.NaN],
+  ])("refuses a stall timeout that is %s", (_why, stallTimeoutMs) => {
+    expect(build({ stallTimeoutMs })).toThrow(InvalidInputError);
+  });
+
+  it("waits forever when the stall timeout is Infinity", async () => {
+    // The intuitive spelling of "never give up". It used to arm the guard and
+    // reject in about a millisecond, because setTimeout coerces Infinity to 1.
+    const harness = createModule();
+    harness.hangOn = () => true;
+    const engine = new ChatterboxEngine({
+      loadModule: async () => harness.module,
+      stallTimeoutMs: Number.POSITIVE_INFINITY,
+    });
+
+    const settled = vi.fn();
+    void engine.load("wasm").then(settled, settled);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(settled).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["zero, which reaches generate as a cap of nothing", 0],
+    ["fractional", 12.5],
+    ["negative", -8],
+  ])("refuses a token cap that is %s", (_why, maxNewTokens) => {
+    expect(build({ maxNewTokens })).toThrow(InvalidInputError);
+  });
+});
+
+describe("ChatterboxEngine budget ceiling", () => {
+  let harness: ModuleHarness;
+
+  const voice = (): VoiceEmbedding => ({
+    vector: Float32Array.from([0.1]),
+    sampleRate: CHATTERBOX_SAMPLE_RATE,
+    createdAt: 0,
+    engine: "chatterbox",
+    tensors: {
+      audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+      speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+    },
+  });
+
+  const ready = async (overrides: Record<string, unknown> = {}) => {
+    harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module, ...overrides });
+    await engine.load("wasm");
+    await engine.embed(audio());
+    return engine;
+  };
+
+  it("caps the budget it derives, however long the chunk", async () => {
+    // `synthesize` is public and takes any length, and maxChunkLength is the
+    // caller's to set, so the derived budget has to stop somewhere: minutes of
+    // audio in one call is not a request anyone meant to make.
+    const engine = await ready();
+
+    await engine.synthesize({ text: "a".repeat(20_000), voice: voice(), speed: 1 });
+
+    const budget = harness.generateCalls[0]?.max_new_tokens as number;
+    expect(budget).toBeLessThan(2_000);
+  });
+
+  it("still honours a cap the caller named, above the ceiling or not", async () => {
+    // Documented as honoured as written. Someone who names a number means it.
+    const engine = await ready({ maxNewTokens: 8_000 });
+
+    await engine.synthesize({ text: "hi", voice: voice(), speed: 1 });
+
+    expect(harness.generateCalls[0]?.max_new_tokens).toBe(8_000);
+  });
+});

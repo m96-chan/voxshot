@@ -75,6 +75,27 @@ const TOKEN_BUDGET_BASE = 20;
 const TOKEN_BUDGET_SAFETY = 1.25;
 /** Enough for a very short prompt to finish naturally. */
 const MIN_TOKEN_BUDGET = 96;
+/**
+ * Ceiling on a budget this engine derives for itself.
+ *
+ * `synthesize` is public and bounds nothing, and `maxChunkLength` belongs to
+ * the caller, so without a ceiling a long chunk asks for minutes of audio in a
+ * single call — and the upstream KV-cache growth (#76) scales with the budget,
+ * so the cost is not only time. 1024 is what the probe in #65 generated with,
+ * about 40 seconds of speech, and far above what a full default chunk needs
+ * (120 characters measured at 331 tokens).
+ *
+ * A cap the caller names is honoured as written and is not clamped by this:
+ * naming a number is a deliberate act, and the documentation promises it.
+ */
+const MAX_TOKEN_BUDGET = 1024;
+
+/**
+ * Above this, `setTimeout` overflows its 32-bit delay and fires at once — the
+ * opposite of the "wait a very long time" the number asks for. Treated as no
+ * guard at all, which is what such a value means.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 
 const DEFAULT_EXAGGERATION = 0.5;
@@ -165,6 +186,9 @@ export interface ChatterboxEngineOptions {
    * for the text ends the audio mid-sentence; see {@link TOKENS_PER_CHARACTER}
    * for the measured relationship, and the `synthesize-truncated` event for
    * when it happens anyway.
+   *
+   * Must be a positive integer. It is honoured as written, including above the
+   * ceiling that applies to a derived budget: naming a number is deliberate.
    */
   maxNewTokens?: number;
   /**
@@ -185,8 +209,13 @@ export interface ChatterboxEngineOptions {
    * because a 1.5 GB download legitimately takes minutes.
    *
    * A hung transfer never rejects on its own, so without this `load()` stays
-   * pending forever and the caller has no error to catch. Set `0` to wait
-   * indefinitely.
+   * pending forever and the caller has no error to catch. Set `0` — or
+   * `Infinity`, which means the same thing — to wait indefinitely.
+   *
+   * Anything else must be at least 1 millisecond. A smaller value is rejected
+   * rather than rounded: `setTimeout` would round it up and fire before the
+   * transfer could produce anything, and it is far more likely to be seconds
+   * written where milliseconds were meant.
    *
    * @defaultValue 300000
    */
@@ -246,12 +275,12 @@ export class ChatterboxEngine implements SynthesisEngine {
   constructor(options: ChatterboxEngineOptions = {}) {
     this.modelId = options.modelId ?? DEFAULT_MODEL_ID;
     this.#dtypeOverrides = options.dtype;
-    this.#maxNewTokens = options.maxNewTokens;
+    this.#maxNewTokens = validateMaxNewTokens(options.maxNewTokens);
     this.#exaggeration = options.exaggeration ?? DEFAULT_EXAGGERATION;
     this.#onProgress = options.onProgress;
     this.#loadModule = options.loadModule ?? defaultModuleLoader;
     this.#supportsFp16 = options.supportsFp16 ?? webGpuSupportsFp16;
-    this.#stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+    this.#stallTimeoutMs = validateStallTimeout(options.stallTimeoutMs);
   }
 
   /** The device / dtype combination that actually loaded, once `load` ran. */
@@ -680,7 +709,50 @@ export class ChatterboxEngine implements SynthesisEngine {
  */
 function tokenBudgetFor(text: string): number {
   const estimate = TOKENS_PER_CHARACTER * text.length + TOKEN_BUDGET_BASE;
-  return Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
+  const wanted = Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
+  return Math.min(MAX_TOKEN_BUDGET, wanted);
+}
+
+/**
+ * A cap has to be a whole number of tokens, and at least one.
+ *
+ * `0` is the one that matters: it is not nullish, so it used to reach
+ * `generate` as a cap of nothing, producing no audio and reporting every call
+ * as truncated.
+ */
+function validateMaxNewTokens(value: number | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || value < 1) {
+    throw new InvalidInputError("maxNewTokens must be a positive integer.");
+  }
+  return value;
+}
+
+/**
+ * Resolve `stallTimeoutMs`, returning 0 for "no guard".
+ *
+ * `0` is the documented escape hatch, but `Infinity` is the intuitive spelling
+ * of the same intent and used to do the opposite: the guard armed, `setTimeout`
+ * coerced the delay to 1 ms, and the load failed almost immediately. Anything
+ * beyond what a timer can express is read as the same request.
+ *
+ * A value between 0 and 1 is rejected rather than rounded. `setTimeout` rounds
+ * it up to 1 ms, so it would arm a guard that fires before anything can
+ * happen — and it is far more likely to be seconds written where milliseconds
+ * were meant than a real sub-millisecond deadline.
+ */
+function validateStallTimeout(value: number | undefined): number {
+  if (value === undefined) {
+    return DEFAULT_STALL_TIMEOUT_MS;
+  }
+  if (Number.isNaN(value) || value < 0 || (value > 0 && value < 1)) {
+    throw new InvalidInputError(
+      "stallTimeoutMs must be 0 to disable the guard, or at least 1 millisecond.",
+    );
+  }
+  return value > MAX_TIMER_DELAY_MS ? 0 : value;
 }
 
 /**
