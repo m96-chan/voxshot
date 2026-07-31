@@ -38,11 +38,16 @@ Open the printed URL (default <http://localhost:5173>).
   bash scripts/download-multilingual.sh
   ```
 
-  **Known blocker:** the multilingual checkpoint requires classifier-free
-  guidance during generation, which Transformers.js has not shipped yet
-  (open PR: [huggingface/transformers.js#1705](https://github.com/huggingface/transformers.js/pull/1705)).
-  Until that lands, this engine loads and runs but produces only short
-  unintelligible vocalizations — for any language, on any backend (verified
-  against native CPU inference as well). The English Chatterbox engine is
-  unaffected. Once the PR is released, updating `@huggingface/transformers`
-  and passing `guidance_scale` should make this variant work.
+  **Blocked upstream, with a workaround.** The multilingual checkpoint is
+  generated with classifier-free guidance in the reference implementation, and
+  Transformers.js has not shipped it (open PR:
+  [huggingface/transformers.js#1705](https://github.com/huggingface/transformers.js/pull/1705)).
+  Without it the engine loads and runs and produces sound, so nothing looks
+  broken — it simply rambles. The English Chatterbox engine is unaffected.
+
+  [`patches/`](./patches) carries the backport, together with a patch that
+  teaches `ChatterboxEngine` to pass `guidance_scale`. On the assembled
+  checkpoint, one Japanese sentence went from **16.08 s** of output to
+  **2.52 s** — the length it should be. Take them if you want this working
+  before upstream releases; see [patches/README.md](./patches/README.md) for
+  how they were built and which one applies where.
