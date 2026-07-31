@@ -125,12 +125,13 @@ function createModule(): ModuleHarness {
               harness.tokensUsed === "cap"
                 ? (params.max_new_tokens as number)
                 : (harness.tokensUsed ?? 0);
+            // Called as a function, which is how StoppingCriteriaList does it.
             const criteria = params.stopping_criteria as
-              | { _call?: (ids: number[][], scores: unknown) => boolean[] }[]
+              | ((ids: number[][], scores: unknown) => boolean[])[]
               | undefined;
             for (let step = 0; step < steps; step += 1) {
               for (const criterion of criteria ?? []) {
-                criterion._call?.([[0]], null);
+                criterion([[0]], null);
               }
             }
 
@@ -146,7 +147,18 @@ function createModule(): ModuleHarness {
         }
       },
     },
+    // Mirrors the library's `Callable`: the constructor returns a *closure*
+    // whose prototype is the subclass, so instances are invoked as functions
+    // rather than through `._call`. The engine's counter subclasses this, and
+    // a base that were an ordinary class would let a counter that is not
+    // callable pass here while failing against the real build.
     StoppingCriteria: class {
+      constructor() {
+        const closure = function (this: unknown, ...args: unknown[]): unknown {
+          return (closure as unknown as { _call: (...a: unknown[]) => unknown })._call(...args);
+        };
+        return Object.setPrototypeOf(closure, new.target.prototype) as unknown as never;
+      }
       _call(_inputIds: number[][], _scores: unknown): boolean[] {
         return [false];
       }
