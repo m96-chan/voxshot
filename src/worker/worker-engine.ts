@@ -94,12 +94,16 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
   }
 
   async synthesize(request: SynthesisRequest): Promise<Float32Array> {
-    return (await this.#send({
-      method: "synthesize",
-      text: request.text,
-      voice: request.voice,
-      speed: request.speed,
-    })) as Float32Array;
+    return (await this.#send(
+      {
+        method: "synthesize",
+        text: request.text,
+        voice: request.voice,
+        speed: request.speed,
+      },
+      undefined,
+      request.signal,
+    )) as Float32Array;
   }
 
   async dispose(): Promise<void> {
@@ -127,13 +131,45 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
     }
   }
 
-  async #send(request: EngineRequest, transfer?: Transferable[]): Promise<unknown> {
+  async #send(
+    request: EngineRequest,
+    transfer?: Transferable[],
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     if (!this.#connected) {
       throw new VoxShotError("This worker engine has been disconnected.");
     }
 
     const id = this.#nextId++;
     return new Promise<unknown>((resolve, reject) => {
+      if (signal) {
+        const onAbort = (): void => {
+          const pending = this.#pending.get(id);
+          if (!pending) {
+            return;
+          }
+          if (pending.timer) {
+            clearTimeout(pending.timer);
+          }
+          this.#pending.delete(id);
+          // Tell the worker to drop it too. Without this the render keeps
+          // running and holds the single execution slot (#67).
+          if (this.#connected) {
+            this.#endpoint.postMessage({
+              voxshot: PROTOCOL_VERSION,
+              id: this.#nextId++,
+              method: "cancel",
+              target: id,
+            });
+          }
+          reject(new VoxShotError("The request was cancelled."));
+        };
+        if (signal.aborted) {
+          queueMicrotask(onAbort);
+        } else {
+          signal.addEventListener("abort", onAbort, { once: true });
+        }
+      }
       const timer =
         this.#timeoutMs > 0
           ? setTimeout(() => {

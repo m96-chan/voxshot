@@ -65,6 +65,11 @@ export type ChatterboxProcessorLike = (
   audio?: unknown,
 ) => Promise<Record<string, unknown>>;
 
+/** Stopping criterion whose `interrupt()` ends generation at the next token. */
+export interface InterruptableStoppingCriteriaLike {
+  interrupt(): void;
+}
+
 export interface TransformersModule {
   readonly Tensor: new (
     type: string,
@@ -77,6 +82,12 @@ export interface TransformersModule {
       options: FromPretrainedOptions,
     ): Promise<ChatterboxModelLike>;
   };
+  /**
+   * Optional so an older build, or a test double, still satisfies the type.
+   * Without it a cancelled render cannot be interrupted — the caller stops
+   * waiting, but the work runs to completion.
+   */
+  readonly InterruptableStoppingCriteria?: new () => InterruptableStoppingCriteriaLike;
   readonly AutoConfig: {
     from_pretrained(
       modelId: string,

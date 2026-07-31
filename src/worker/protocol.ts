@@ -19,7 +19,18 @@ export type EngineRequest =
       readonly voice: VoiceEmbedding;
       readonly speed: number;
     }
-  | { readonly method: "dispose" };
+  | { readonly method: "dispose" }
+  /**
+   * Abandon a request that is queued or already running.
+   *
+   * A control message: it jumps the queue, because the whole point is to reach
+   * work that is currently blocking it. Cancelling an unknown id is a no-op, so
+   * a cancel racing its own reply is harmless.
+   */
+  | { readonly method: "cancel"; readonly target: number };
+
+/** Requests that bypass the queue instead of waiting their turn behind it. */
+export const CONTROL_METHODS = new Set<EngineRequest["method"]>(["cancel", "dispose"]);
 
 /** A request as it travels over the port. */
 export type RequestMessage = EngineRequest & {
