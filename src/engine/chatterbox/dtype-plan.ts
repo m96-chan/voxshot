@@ -1,16 +1,36 @@
 import type { ResolvedDevice } from "../../device.js";
 
 /**
- * The four ONNX sessions a Chatterbox model is split into, named by their
- * *file* names: Transformers.js resolves per-session `dtype` entries against
- * the ONNX file name (`language_model`), not the session key (`model`) — a
- * mismatched key is silently ignored and the device default (fp32 on WebGPU,
- * 2 GB for the language model) loads instead.
+ * The ONNX sessions a Chatterbox model is split into.
+ *
+ * Transformers.js reads `dtype` under **two different keys for the same
+ * session**, and the language model is the one where they differ — Chatterbox
+ * maps the session key `model` to the file `language_model`:
+ *
+ * - `session.js` builds the session by **file name**, so `language_model` is
+ *   what makes the right weights load.
+ * - `get_model_files` builds the list of files a load will touch by **session
+ *   key**, calling `selectDtype(dtype, "model", device)`. Miss that and it
+ *   falls through to the device default.
+ *
+ * Verified against the vendored 4.2.0:
+ *
+ * ```
+ * without `model`   webgpu -> onnx/language_model.onnx           (fp32, 2.08 GB)
+ *                   wasm   -> onnx/language_model_quantized.onnx (404)
+ * with `model`      both   -> onnx/language_model_q4.onnx
+ * ```
+ *
+ * The fp32 file is never fetched, but it is seeded into `progress_total`,
+ * which is what inflates the download denominator (#55). So both keys are
+ * carried, and `model` always mirrors `language_model` — one session, two
+ * names, never allowed to drift (#62).
  */
 export type ChatterboxSession =
   | "embed_tokens"
   | "speech_encoder"
   | "language_model"
+  | "model"
   | "conditional_decoder";
 
 /** Per-session quantization, as accepted by `from_pretrained({ dtype })`. */
@@ -35,6 +55,9 @@ function plan(device: ResolvedDevice, languageModel: string): LoadPlan {
       embed_tokens: "fp32",
       speech_encoder: "fp32",
       language_model: languageModel,
+      // Same session as `language_model`, under the key the expected-file list
+      // uses. See ChatterboxSession.
+      model: languageModel,
       conditional_decoder: "fp32",
     },
   };
@@ -70,5 +93,10 @@ export function buildLoadPlans(
   if (!overrides) {
     return plans;
   }
-  return plans.map((entry) => ({ device: entry.device, dtype: { ...entry.dtype, ...overrides } }));
+  return plans.map((entry) => {
+    const dtype = { ...entry.dtype, ...overrides };
+    // Kept in step after overrides too: a caller who quantizes the language
+    // model should not have to know it is addressed twice.
+    return { device: entry.device, dtype: { ...dtype, model: dtype.language_model } };
+  });
 }
