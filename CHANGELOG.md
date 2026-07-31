@@ -8,6 +8,8 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-01
+
 ### Added
 
 - `signal` on `SpeakOptions`, so `speak()`, `stream()` and `play()` can be
@@ -169,7 +171,8 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 - Browser demo under `examples/browser`
 - CI and npm publish workflows
 
-[Unreleased]: https://github.com/m96-chan/voxshot/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/m96-chan/voxshot/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/m96-chan/voxshot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/m96-chan/voxshot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/m96-chan/voxshot/releases/tag/v0.1.0
 [#40]: https://github.com/m96-chan/voxshot/issues/40
