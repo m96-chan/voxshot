@@ -10,6 +10,7 @@ import {
 import type { PcmAudio } from "../../src/platform.js";
 import type { VoiceEmbedding } from "../../src/voice/types.js";
 import { exposeEngine } from "../../src/worker/expose.js";
+import type { RpcEndpoint } from "../../src/worker/protocol.js";
 import { PROTOCOL_VERSION } from "../../src/worker/protocol.js";
 import { WorkerSynthesisEngine } from "../../src/worker/worker-engine.js";
 import { toArray } from "../helpers/tensor.js";
@@ -37,6 +38,9 @@ class RecordingEngine implements SynthesisEngine {
 
   /** Set to hold every synthesize open until the test releases it. */
   gate: Promise<void> | undefined;
+  /** When true the fake ignores its abort signal, like an engine that cannot
+   *  interrupt work already started. */
+  stubborn = false;
   /** Highest number of synthesize calls that were ever in flight at once. */
   peakConcurrency = 0;
   #inFlight = 0;
@@ -50,14 +54,33 @@ class RecordingEngine implements SynthesisEngine {
     this.requests.push(request);
     this.signals.push(request.signal);
     try {
-      if (this.gate) await this.gate;
+      if (this.gate) {
+        // A well-behaved engine stops when told to; one that ignores the
+        // signal cannot have its slot freed by anyone, which is a property of
+        // the engine rather than of the RPC.
+        if (this.stubborn) {
+          await this.gate;
+        } else {
+          await Promise.race([
+            this.gate,
+            new Promise<void>((resolve) => {
+              request.signal?.addEventListener("abort", () => resolve(), { once: true });
+            }),
+          ]);
+          request.signal?.throwIfAborted();
+        }
+      }
       return Float32Array.from([0.1, 0.2, 0.3]);
     } finally {
       this.#inFlight -= 1;
     }
   }
 
+  /** How many synthesize calls were running when dispose was invoked. */
+  peakConcurrencyAtDispose = -1;
+
   async dispose(): Promise<void> {
+    this.peakConcurrencyAtDispose = this.#inFlight;
     this.disposed = true;
   }
 }
@@ -67,6 +90,8 @@ interface Wired {
   worker: RecordingEngine;
   /** The main-thread end of the channel, for posting raw protocol messages. */
   port: MessagePort;
+  /** The worker end, for observing what the main thread sends. */
+  workerPort: MessagePort;
   close: () => void;
 }
 
@@ -83,6 +108,7 @@ function wire(options: Record<string, unknown> = {}): Wired {
     engine,
     worker,
     port: channel.port1,
+    workerPort: channel.port2,
     close: () => {
       stop();
       engine.disconnect();
@@ -555,5 +581,318 @@ describe("serialized execution", () => {
 
     open();
     await rendering.catch(() => undefined);
+  });
+});
+
+/**
+ * #80: serialization closed the wedge in #67 but opened three more routes to
+ * the same outcome — a request the caller waits on forever. Each of these was
+ * reproduced against the real RPC before being written.
+ */
+describe("lifecycle after teardown and failure", () => {
+  const deliver = async (): Promise<void> => {
+    for (let tick = 0; tick < 4; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  it("answers requests that arrive after dispose", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    worker.gate = new Promise<void>(() => {}); // a render that never settles
+
+    const wedged = engine.synthesize({ text: "wedged", voice, speed: 1 });
+    const abandoned = wedged.catch(() => undefined);
+    await deliver();
+    await engine.dispose();
+
+    // Before the fix this stayed pending forever: dispose left the drain loop
+    // parked, so nothing ever entered it again.
+    await expect(
+      engine.embed({ samples: new Float32Array(4), sampleRate: 16_000 }),
+    ).rejects.toBeInstanceOf(VoxShotError);
+
+    engine.disconnect();
+    await abandoned;
+  });
+
+  it("answers after dispose even when the running call cannot be interrupted", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    worker.stubborn = true;
+    worker.gate = new Promise<void>(() => {});
+
+    const wedged = engine.synthesize({ text: "wedged", voice, speed: 1 });
+    const abandoned = wedged.catch(() => undefined);
+    await deliver();
+    await engine.dispose();
+
+    // The drain loop is still parked on a render that will never end. Nothing
+    // may be allowed to queue behind it silently.
+    await expect(
+      engine.embed({ samples: new Float32Array(4), sampleRate: 16_000 }),
+    ).rejects.toBeInstanceOf(VoxShotError);
+
+    engine.disconnect();
+    await abandoned;
+  });
+
+  it("does not dispose the engine while a call is still running", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+    worker.gate = new Promise<void>(() => {});
+
+    const wedged = engine.synthesize({ text: "wedged", voice, speed: 1 });
+    const abandoned = wedged.catch(() => undefined);
+    await deliver();
+    await engine.dispose();
+
+    // The queue exists to keep engine calls from overlapping; teardown must
+    // not be the one thing that breaks that.
+    expect(worker.peakConcurrencyAtDispose).toBe(0);
+
+    engine.disconnect();
+    await abandoned;
+  });
+
+  it("frees the slot when a request times out", async () => {
+    const { engine, worker } = wire({ timeoutMs: 30 });
+    await engine.load("wasm");
+    worker.gate = new Promise<void>(() => {});
+
+    await expect(
+      engine.synthesize({ text: "slow", voice, speed: 1 }),
+    ).rejects.toBeInstanceOf(VoxShotError);
+    worker.gate = undefined;
+    await deliver();
+
+    // Before the fix the timed-out render kept the only slot and every later
+    // request queued behind it for the life of the worker.
+    await expect(engine.synthesize({ text: "next", voice, speed: 1 })).resolves.toBeDefined();
+    expect(worker.requests.map((r) => r.text)).toContain("next");
+  });
+
+  it("stops serving without leaving queued work to run", async () => {
+    const { engine, worker, close } = wire();
+    await engine.load("wasm");
+    let release!: () => void;
+    worker.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const first = engine.synthesize({ text: "running", voice, speed: 1 }).catch(() => undefined);
+    const second = engine.synthesize({ text: "queued", voice, speed: 1 }).catch(() => undefined);
+    await deliver();
+
+    close();
+    release();
+    await deliver();
+    await Promise.all([first, second]);
+
+    // "queued" must never reach the engine after the server was told to stop.
+    expect(worker.requests.map((r) => r.text)).not.toContain("queued");
+  });
+});
+
+/**
+ * Replying is the one thing that cannot be assumed to work: `postMessage`
+ * throws on a closed port, and on a payload that cannot be cloned. A failure
+ * there must not take the rest of the queue with it.
+ */
+describe("when replying itself fails", () => {
+  const deliver = async (): Promise<void> => {
+    for (let tick = 0; tick < 4; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  /** A port on which every reply to one particular request fails to send. */
+  function brittlePort(port: MessagePort, doomedId: number): RpcEndpoint {
+    return {
+      postMessage(message: unknown, transfer?: Transferable[]) {
+        if ((message as { id?: number })?.id === doomedId) {
+          throw new DOMException("could not be cloned", "DataCloneError");
+        }
+        port.postMessage(message, transfer ?? []);
+      },
+      addEventListener: (type: string, listener: EventListener) =>
+        port.addEventListener(type, listener),
+      removeEventListener: (type: string, listener: EventListener) =>
+        port.removeEventListener(type, listener),
+      start: () => port.start(),
+    } as unknown as RpcEndpoint;
+  }
+
+  it("keeps serving the queue when a job cannot be answered at all", async () => {
+    const channel = new MessageChannel();
+    const worker = new RecordingEngine();
+    // load is id 1, so the first synthesize is id 2. Every attempt to answer
+    // that one fails: its reply, the failure notice sent in its place, and the
+    // drain loop's fallback.
+    const stop = exposeEngine(worker, brittlePort(channel.port2, 2));
+    const engine = new WorkerSynthesisEngine(channel.port1, { timeoutMs: 800 });
+    await engine.load("wasm");
+
+    // The first render is held open so the second is genuinely queued behind
+    // it — otherwise the first finishes before the second even arrives, and
+    // the second starts a fresh drain that hides the problem.
+    let release!: () => void;
+    worker.stubborn = true;
+    worker.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const first = engine.synthesize({ text: "doomed", voice, speed: 1 }).catch(() => undefined);
+    const second = engine.synthesize({ text: "behind it", voice, speed: 1 });
+    await deliver();
+    worker.gate = undefined;
+    release();
+
+    await expect(second).resolves.toBeDefined();
+    await first;
+
+    stop();
+    channel.port1.close();
+    channel.port2.close();
+  });
+});
+
+/**
+ * #80, second pass. Each of these is a route to the same outcome the first
+ * pass was written to close — a promise nothing can settle — reached through
+ * a path that pass did not consider.
+ */
+describe("when the transport fails at an awkward moment", () => {
+  const deliver = async (): Promise<void> => {
+    for (let tick = 0; tick < 4; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  /** An endpoint whose outgoing messages fail when `refuse` says so. */
+  function filteredPort(port: MessagePort, refuse: (message: unknown) => boolean): RpcEndpoint {
+    return {
+      postMessage(message: unknown, transfer?: Transferable[]) {
+        if (refuse(message)) {
+          throw new DOMException("could not be cloned", "DataCloneError");
+        }
+        port.postMessage(message, transfer ?? []);
+      },
+      addEventListener: (type: string, listener: EventListener) =>
+        port.addEventListener(type, listener),
+      removeEventListener: (type: string, listener: EventListener) =>
+        port.removeEventListener(type, listener),
+      start: () => port.start(),
+    } as unknown as RpcEndpoint;
+  }
+
+  it("still rejects a cancelled request when the cancel cannot be sent", async () => {
+    const channel = new MessageChannel();
+    const worker = new RecordingEngine();
+    const stop = exposeEngine(worker, channel.port2);
+    const engine = new WorkerSynthesisEngine(
+      filteredPort(channel.port1, (m) => (m as { method?: string })?.method === "cancel"),
+    );
+    await engine.load("wasm");
+    worker.gate = new Promise<void>(() => {});
+    const controller = new AbortController();
+
+    const call = engine.synthesize({
+      text: "cut me",
+      voice,
+      speed: 1,
+      signal: controller.signal,
+    });
+    const rejected = expect(call).rejects.toBeInstanceOf(VoxShotError);
+    await deliver();
+    controller.abort();
+
+    // Telling the worker is best effort; telling the caller is not.
+    await rejected;
+
+    stop();
+    channel.port1.close();
+    channel.port2.close();
+  });
+
+  it("rejects rather than hangs when the request itself cannot be sent", async () => {
+    const channel = new MessageChannel();
+    const worker = new RecordingEngine();
+    const stop = exposeEngine(worker, channel.port2);
+    const engine = new WorkerSynthesisEngine(
+      filteredPort(channel.port1, (m) => (m as { method?: string })?.method === "embed"),
+      { timeoutMs: 200 },
+    );
+
+    await expect(
+      engine.embed({ samples: new Float32Array(4), sampleRate: 16_000 }),
+    ).rejects.toThrow();
+
+    // A request that never left must not leave a timer behind that later
+    // cancels something the worker never received.
+    await deliver();
+    expect(worker.embedded).toHaveLength(0);
+
+    stop();
+    channel.port1.close();
+    channel.port2.close();
+  });
+
+  it("answers dispose even when its reply cannot be sent", async () => {
+    const channel = new MessageChannel();
+    const worker = new RecordingEngine();
+    let refuseDispose = false;
+    // Only the success reply is refused; the failure notice sent in its place
+    // must still get through, or the fix has nothing to demonstrate.
+    const stop = exposeEngine(
+      worker,
+      filteredPort(channel.port2, (m) => refuseDispose && (m as { ok?: boolean })?.ok === true),
+    );
+    const engine = new WorkerSynthesisEngine(channel.port1, { timeoutMs: 500 });
+    await engine.load("wasm");
+    worker.stubborn = true;
+    worker.gate = new Promise<void>(() => {});
+
+    const wedged = engine.synthesize({ text: "wedged", voice, speed: 1 }).catch(() => undefined);
+    await deliver();
+
+    // The deferred-teardown reply is sent outside `handle`, so nothing there
+    // turns a failed send into an answer.
+    refuseDispose = true;
+    // Without the guard this rejects too — but only once the client's timeout
+    // expires, and with an unhandled rejection on the worker side. The
+    // distinguishing observable is that the failure is reported, not waited out.
+    await expect(engine.dispose()).rejects.not.toThrow(/did not answer/);
+
+    engine.disconnect();
+    await wedged;
+    stop();
+    channel.port1.close();
+    channel.port2.close();
+  });
+
+  it("cancels what it abandons when disconnecting", async () => {
+    const { engine, worker, workerPort } = wire();
+    await engine.load("wasm");
+    const cancelled: number[] = [];
+    // Observe on the worker end: a cancel sent from the main thread arrives
+    // there, not back on the port it was sent from.
+    workerPort.addEventListener("message", (event: MessageEvent) => {
+      const data = event.data as { method?: string; target?: number };
+      if (data?.method === "cancel" && typeof data.target === "number") {
+        cancelled.push(data.target);
+      }
+    });
+    worker.gate = new Promise<void>(() => {});
+
+    const call = engine.synthesize({ text: "running", voice, speed: 1 }).catch(() => undefined);
+    await deliver();
+    engine.disconnect();
+    await deliver();
+
+    // The worker keeps the only slot busy otherwise, and the port may outlive
+    // this engine.
+    expect(cancelled).toHaveLength(1);
+    await call;
   });
 });

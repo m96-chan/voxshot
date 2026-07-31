@@ -77,11 +77,18 @@ export class SynthesisCache {
 /**
  * Anything that changes the rendered audio has to be in the key.
  *
+ * Fields are joined with NUL because it cannot occur in any of them, so no
+ * combination of values can be mistaken for another. Speed and
+ * expressiveness happen to be numbers today, which would make a printable
+ * separator safe, but the guarantee should not depend on that — and a file
+ * containing NUL is treated as binary by git, so a separator quietly
+ * downgraded to a space would not show up in a diff.
+ *
  * An unspecified `expressiveness` keys separately from any explicit value,
- * even one that happens to equal the engine's default: the cache cannot know
- * what that default is, so treating the two as equal would risk handing back
- * audio rendered at a different setting.
+ * even one equal to the engine's default: the cache cannot know what that
+ * default is, so treating the two as equal would risk handing back audio
+ * rendered at a different setting.
  */
 function cacheKey(text: string, speed: number, expressiveness?: number): string {
-  return `${speed} ${expressiveness ?? "default"} ${text}`;
+  return `${speed}\0${expressiveness ?? "default"}\0${text}`;
 }
