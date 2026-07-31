@@ -75,3 +75,29 @@ describe("buildLoadPlans", () => {
     expect(plans[0]?.dtype.language_model).toBe("q4");
   });
 });
+
+describe("an engine that requires a GPU", () => {
+  it("drops the wasm tail", () => {
+    // Not a preference: this pipeline measures ~5.8x slower than real time on
+    // CPU, and it arrives with no error after a ~1.5 GB download. An engine
+    // that knows that should be able to say so.
+    for (const fp16 of [true, false]) {
+      const plans = buildLoadPlans("webgpu", undefined, fp16, false);
+      expect(plans.map((plan) => plan.device)).not.toContain("wasm");
+      expect(plans.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps degrading dtype within webgpu", () => {
+    // Dropping wasm must not also drop the q4f16 -> q4 step, which is the
+    // fallback that actually works.
+    expect(
+      buildLoadPlans("webgpu", undefined, true, false).map((p) => p.dtype.language_model),
+    ).toEqual(["q4f16", "q4"]);
+  });
+
+  it("leaves the tail alone for an engine that did not ask", () => {
+    const plans = buildLoadPlans("webgpu");
+    expect(plans[plans.length - 1]?.device).toBe("wasm");
+  });
+});

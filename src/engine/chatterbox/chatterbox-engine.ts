@@ -198,6 +198,20 @@ export interface ChatterboxEngineOptions {
    */
   exaggeration?: number;
   /**
+   * Refuse to run anywhere but a GPU.
+   *
+   * This pipeline measures ~5.8x slower than real time on CPU — not a degraded
+   * experience but a broken one, and it arrives with no error after a ~1.5 GB
+   * download. Set this and an unsuitable machine is told so before paying for
+   * the weights, instead of after.
+   *
+   * Left off by default because it is a change in what a caller receives, not
+   * a correction: a build that is happy to be slow keeps working.
+   *
+   * @defaultValue false
+   */
+  requiresGpu?: boolean;
+  /**
    * Called with model download progress forwarded from Transformers.js, and
    * with the engine's own {@link ChatterboxLifecycleEvent} milestones.
    *
@@ -259,6 +273,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   readonly modelId: string;
 
   readonly #dtypeOverrides: Partial<DtypeConfig> | undefined;
+  readonly requiresGpu: boolean;
   readonly #maxNewTokens: number | undefined;
   readonly #exaggeration: number;
   readonly #onProgress: ((progress: ChatterboxLoadEvent) => void) | undefined;
@@ -283,6 +298,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     this.#dtypeOverrides = options.dtype;
     this.#maxNewTokens = validateMaxNewTokens(options.maxNewTokens);
     this.#exaggeration = options.exaggeration ?? DEFAULT_EXAGGERATION;
+    this.requiresGpu = options.requiresGpu ?? false;
     this.#onProgress = options.onProgress;
     this.#loadModule = options.loadModule ?? defaultModuleLoader;
     this.#supportsFp16 = options.supportsFp16 ?? webGpuSupportsFp16;
@@ -343,7 +359,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     // and re-reading it per attempt would repeat work on every fallback.
     const config = await this.#resolveConfig(transformers);
     const fp16 = device === "webgpu" ? await this.#supportsFp16() : true;
-    const plans = buildLoadPlans(device, this.#dtypeOverrides, fp16);
+    const plans = buildLoadPlans(device, this.#dtypeOverrides, fp16, !this.requiresGpu);
     const failures: string[] = [];
 
     for (const plan of plans) {

@@ -1596,3 +1596,32 @@ describe("ChatterboxEngine per-render cleanup", () => {
     expect(samples).toHaveLength(0);
   });
 });
+
+describe("ChatterboxEngine requiresGpu", () => {
+  it("fails rather than finishing on wasm when every webgpu plan fails", async () => {
+    const harness = createModule();
+    harness.failOn = (device) => device === "webgpu";
+    const engine = new ChatterboxEngine({
+      loadModule: async () => harness.module,
+      requiresGpu: true,
+    });
+
+    await expect(engine.load("webgpu")).rejects.toBeInstanceOf(VoxShotError);
+    expect(harness.attempts.map((a) => a.device)).not.toContain("wasm");
+  });
+
+  it("still finishes on wasm when the engine did not ask", async () => {
+    const harness = createModule();
+    harness.failOn = (device) => device === "webgpu";
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+    await engine.load("webgpu");
+
+    expect(engine.loadedPlan?.device).toBe("wasm");
+  });
+
+  it("reports the requirement so a caller can check before loading", () => {
+    expect(new ChatterboxEngine({ requiresGpu: true }).requiresGpu).toBe(true);
+    expect(new ChatterboxEngine({}).requiresGpu).toBe(false);
+  });
+});

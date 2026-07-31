@@ -31,8 +31,18 @@ export class VoxShotError extends Error {
 export class DeviceUnavailableError extends VoxShotError {
   readonly device: string;
 
-  constructor(device: string, options?: ErrorOptions) {
-    super(`Inference device "${device}" is not available in this environment.`, "DEVICE_UNAVAILABLE", options);
+  /**
+   * @param reason - Appended to the message. Use it when the device is
+   * present but something above it refused — an engine that requires a GPU,
+   * say — so the caller is not left to guess which of the two happened.
+   */
+  constructor(device: string, reason?: string, options?: ErrorOptions) {
+    super(
+      `Inference device "${device}" is not available in this environment.` +
+        (reason === undefined ? "" : ` ${reason}`),
+      "DEVICE_UNAVAILABLE",
+      options,
+    );
     this.name = "DeviceUnavailableError";
     this.device = device;
   }

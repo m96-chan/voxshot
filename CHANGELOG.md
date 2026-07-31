@@ -8,6 +8,17 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 
 ## [Unreleased]
 
+### Added
+
+- `requiresGpu` on `SynthesisEngine` and on `ChatterboxEngineOptions`. An
+  engine that says so is refused before `load()` on a machine without WebGPU,
+  and drops the WASM plan from its fallback chain. The Chatterbox pipeline
+  measures ~5.8x slower than real time on CPU — not a degraded experience but a
+  broken one, arriving with no error after a ~1.5 GB download. Left off by
+  default, because whether CPU is usable depends entirely on the model.
+  ([#107])
+
+
 ## [0.3.0] - 2026-08-01
 
 ### Added
@@ -188,4 +199,5 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#86]: https://github.com/m96-chan/voxshot/issues/86
 [#90]: https://github.com/m96-chan/voxshot/issues/90
 [#98]: https://github.com/m96-chan/voxshot/issues/98
+[#107]: https://github.com/m96-chan/voxshot/issues/107
 [#92]: https://github.com/m96-chan/voxshot/issues/92
