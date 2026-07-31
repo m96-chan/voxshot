@@ -39,6 +39,8 @@ interface ModuleHarness {
   lastProgressCallback: ((progress: Record<string, unknown>) => void) | undefined;
   /** Every stopping criterion the engine constructed. */
   stoppers: { interrupted: boolean }[];
+  /** Tokens the fake should claim to have produced; "cap" means it ran out. */
+  tokensUsed: number | "cap" | undefined;
   waveform: Float32Array;
   progressEvents: unknown[];
 }
@@ -58,6 +60,7 @@ function createModule(): ModuleHarness {
     hangOn: () => false,
     lastProgressCallback: undefined,
     stoppers: [],
+    tokensUsed: undefined,
     waveform: Float32Array.from([0, 0.5, -0.5, 0.25]),
     progressEvents: [],
     module: undefined as unknown as TransformersModule,
@@ -99,6 +102,16 @@ function createModule(): ModuleHarness {
           },
           async generate(params: Record<string, unknown>) {
             harness.generateCalls.push(params);
+            if (harness.tokensUsed !== undefined) {
+              // The vocoder emits a fixed 960 samples per token, plus the
+              // trailing silence — see CHATTERBOX_SAMPLES_PER_TOKEN.
+              const used =
+                harness.tokensUsed === "cap"
+                  ? (params.max_new_tokens as number)
+                  : harness.tokensUsed;
+              const length = 960 * used + 2400;
+              return new FakeTensor("float32", new Float32Array(length), [1, length]);
+            }
             return new FakeTensor("float32", harness.waveform, [1, harness.waveform.length]);
           },
           async dispose() {
@@ -932,5 +945,93 @@ describe("ChatterboxEngine expressiveness", () => {
     await expect(
       engine.synthesize({ text: "hi", voice: voice(), speed: 1, expressiveness: Number.NaN }),
     ).rejects.toBeInstanceOf(InvalidInputError);
+  });
+});
+
+/**
+ * #65: the chunk budget is in characters and the generation cap is in tokens,
+ * and nothing related the two. Measured on this checkpoint, a chunk needs
+ * roughly 2.4 tokens per character, so the 256-token default runs out at about
+ * 89 characters — well inside the 120-character chunks the splitter produces.
+ * Generation then stopped at the cap and the audio simply ended early, with no
+ * error and no event.
+ */
+describe("ChatterboxEngine generation budget", () => {
+  let harness: ModuleHarness;
+
+  const voice = (): VoiceEmbedding => ({
+    vector: Float32Array.from([0.1]),
+    sampleRate: CHATTERBOX_SAMPLE_RATE,
+    createdAt: 0,
+    engine: "chatterbox",
+    tensors: {
+      audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+      speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+    },
+  });
+
+  const ready = async (overrides: Record<string, unknown> = {}) => {
+    harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module, ...overrides });
+    await engine.load("wasm");
+    await engine.embed(audio());
+    return engine;
+  };
+
+  const capFor = (text: string) => harness.generateCalls[0]?.max_new_tokens as number;
+
+  it("gives a longer chunk a larger budget", async () => {
+    const engine = await ready();
+
+    await engine.synthesize({ text: "a".repeat(30), voice: voice(), speed: 1 });
+    const small = capFor("");
+    harness.generateCalls.length = 0;
+    await engine.synthesize({ text: "a".repeat(120), voice: voice(), speed: 1 });
+    const large = harness.generateCalls[0]?.max_new_tokens as number;
+
+    expect(large).toBeGreaterThan(small);
+  });
+
+  it("covers what a full-length chunk actually needs", async () => {
+    const engine = await ready();
+
+    // 120 characters measured at 331 tokens on this checkpoint; the budget has
+    // to clear that, or the splitter's own maximum truncates by construction.
+    await engine.synthesize({ text: "a".repeat(120), voice: voice(), speed: 1 });
+
+    expect(capFor("")).toBeGreaterThan(331);
+  });
+
+  it("uses an explicitly configured cap verbatim", async () => {
+    const engine = await ready({ maxNewTokens: 200 });
+
+    await engine.synthesize({ text: "a".repeat(120), voice: voice(), speed: 1 });
+
+    // Someone who set a cap meant it, even where the derived one would differ.
+    expect(capFor("")).toBe(200);
+  });
+
+  it("reports when generation stopped because it ran out of budget", async () => {
+    const events: { status: string }[] = [];
+    const engine = await ready({ onProgress: (e: { status: string }) => events.push(e) });
+    harness.tokensUsed = "cap";
+
+    await engine.synthesize({ text: "a".repeat(120), voice: voice(), speed: 1 });
+
+    const truncated = events.filter((e) => e.status === "synthesize-truncated");
+    expect(truncated).toHaveLength(1);
+    expect(truncated[0]).toMatchObject({ text: "a".repeat(120) });
+  });
+
+  it("says nothing when generation finished on its own", async () => {
+    const events: { status: string }[] = [];
+    const engine = await ready({ onProgress: (e: { status: string }) => events.push(e) });
+    harness.tokensUsed = 40;
+
+    await engine.synthesize({ text: "a".repeat(120), voice: voice(), speed: 1 });
+
+    expect(events.filter((e) => e.status === "synthesize-truncated")).toHaveLength(0);
   });
 });

@@ -247,6 +247,38 @@ await (await tts.speak("Cloned from a few seconds of reference audio.")).play();
   speech needs the multilingual checkpoint —
   [#25](https://github.com/m96-chan/voxshot/issues/25).
 
+#### Long text
+
+Chunks are sized in characters, but the model generates in speech tokens, and
+the two are related: measured on this checkpoint a chunk needs roughly **2.4
+tokens per character**.
+
+```
+chars   30    60    90   120   160
+tokens  92   185   257   331   403
+```
+
+The generation budget is therefore sized to each chunk rather than fixed, so a
+full-length chunk is not cut off mid-sentence. If you set `maxNewTokens`
+yourself it is honoured as written — and if the text needs more than you
+allowed, the engine says so rather than letting the audio just end:
+
+```ts
+new ChatterboxEngine({
+  onProgress: (event) => {
+    if (event.status === "synthesize-truncated") {
+      console.warn("ran out of tokens for:", event.text);
+    }
+  },
+});
+```
+
+Keep chunks short. Beyond roughly 160 characters this checkpoint stops
+tracking the text and drifts into sounds that resemble another language — at
+200 characters a measurement produced 41 seconds of audio for what should have
+been about 13. `maxChunkLength` defaults to 120 for that reason, not only for
+latency.
+
 #### Changing the delivery per line
 
 `expressiveness` sets how animated a single utterance is, overriding whatever
