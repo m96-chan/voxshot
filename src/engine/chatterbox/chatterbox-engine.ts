@@ -222,9 +222,16 @@ export class ChatterboxEngine implements SynthesisEngine {
   readonly #stallTimeoutMs: number;
 
   #module: TransformersModule | undefined;
-  #model: ChatterboxModelLike | undefined;
-  #processor: ChatterboxProcessorLike | undefined;
-  #plan: LoadPlan | undefined;
+  /**
+   * The engine's whole lifetime, as one value.
+   *
+   * Held in separate fields, "model built but processor not yet" and "loaded
+   * but no plan" were both representable and both reachable — a load can be
+   * abandoned while its operation is still running and still writing. One
+   * value means a load either lands whole or not at all, and every state
+   * carries what is needed to release whatever it holds.
+   */
+  #state: EngineState = { kind: "idle" };
 
   constructor(options: ChatterboxEngineOptions = {}) {
     this.modelId = options.modelId ?? DEFAULT_MODEL_ID;
@@ -239,7 +246,7 @@ export class ChatterboxEngine implements SynthesisEngine {
 
   /** The device / dtype combination that actually loaded, once `load` ran. */
   get loadedPlan(): LoadPlan | undefined {
-    return this.#plan;
+    return this.#state.kind === "loaded" ? this.#state.plan : undefined;
   }
 
   /**
@@ -249,9 +256,38 @@ export class ChatterboxEngine implements SynthesisEngine {
    * fp16 support degrades instead of failing outright.
    */
   async load(device: ResolvedDevice): Promise<void> {
-    if (this.#model) {
+    if (this.#state.kind === "loaded") {
       return;
     }
+    if (this.#state.kind === "loading") {
+      // Two callers racing would each build a full set of sessions, and one
+      // set would end up with nothing referring to it and nothing to dispose
+      // it. They share the first attempt.
+      return this.#state.settled;
+    }
+    let abandoned = false;
+    const settled = this.#load(device, () => abandoned).finally(() => {
+      // Only a load that still owns the engine may leave it in `loading`;
+      // one that failed or was abandoned hands it back to `idle` so a retry
+      // is possible. `dispose()` documents that a reload is allowed.
+      if (this.#state.kind === "loading") {
+        this.#state = { kind: "idle" };
+      }
+    });
+    this.#state = {
+      kind: "loading",
+      settled: settled.then(
+        () => undefined,
+        () => undefined,
+      ),
+      abandon: () => {
+        abandoned = true;
+      },
+    };
+    return settled;
+  }
+
+  async #load(device: ResolvedDevice, abandoned: () => boolean): Promise<void> {
 
     const transformers = (this.#module ??= await this.#importModule());
     // Resolved once, outside the plan loop: the config does not vary by plan,
@@ -264,8 +300,8 @@ export class ChatterboxEngine implements SynthesisEngine {
     for (const plan of plans) {
       this.#announce("load-start", plan);
       try {
-        await this.#withStallGuard(async (notice) => {
-          this.#model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
+        const loaded = await this.#withStallGuard(async (notice) => {
+          const model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
             config,
             device: plan.device,
             dtype: plan.dtype,
@@ -276,9 +312,23 @@ export class ChatterboxEngine implements SynthesisEngine {
               this.#onProgress?.(progress);
             },
           });
-          this.#processor = await transformers.AutoProcessor.from_pretrained(this.modelId);
-        });
-        this.#plan = plan;
+          try {
+            const processor = await transformers.AutoProcessor.from_pretrained(this.modelId);
+            return { kind: "loaded" as const, model, processor, plan };
+          } catch (cause) {
+            // The model exists and nothing else refers to it yet. Releasing it
+            // here is the only chance — the caller never sees it.
+            await model.dispose().catch(() => undefined);
+            throw cause;
+          }
+        }, release);
+
+        if (abandoned()) {
+          // Disposed while this was in flight. The result belongs to nobody.
+          await release(loaded);
+          return;
+        }
+        this.#state = loaded;
         this.#announce("load-ready", plan);
         return;
       } catch (cause) {
@@ -417,11 +467,20 @@ export class ChatterboxEngine implements SynthesisEngine {
 
   /** Free the ONNX sessions. A later `load()` re-creates them. */
   async dispose(): Promise<void> {
-    const model = this.#model;
-    this.#model = undefined;
-    this.#processor = undefined;
-    this.#plan = undefined;
-    await model?.dispose();
+    const previous = this.#state;
+    // Back to `idle`, not a terminal state: a reload after dispose is part of
+    // the contract. What must not survive is the *result* of a load that was
+    // in flight, which `abandon` takes care of.
+    this.#state = { kind: "idle" };
+    if (previous.kind === "loading") {
+      // Tell the load its result is unwanted, so whatever it builds is
+      // released rather than assigned to an engine that has gone.
+      previous.abandon();
+      return;
+    }
+    if (previous.kind === "loaded") {
+      await previous.model.dispose();
+    }
   }
 
   /**
@@ -484,7 +543,10 @@ export class ChatterboxEngine implements SynthesisEngine {
    * rejection it produces later is swallowed instead of surfacing as an
    * unhandled rejection.
    */
-  async #withStallGuard<T>(operation: (notice: () => void) => Promise<T>): Promise<T> {
+  async #withStallGuard<T>(
+    operation: (notice: () => void) => Promise<T>,
+    discard?: (value: T) => Promise<void> | void,
+  ): Promise<T> {
     if (this.#stallTimeoutMs <= 0) {
       return operation(() => {});
     }
@@ -506,11 +568,25 @@ export class ChatterboxEngine implements SynthesisEngine {
     });
 
     restart();
+    let abandoned = false;
     const running = operation(restart);
-    running.catch(() => {});
+    running.then(
+      (value) => {
+        // A stalled transfer can recover after the guard has given up. What it
+        // produced is unreachable, so whoever owns the result has to be given
+        // the chance to release it.
+        if (abandoned) {
+          void discard?.(value);
+        }
+      },
+      () => undefined,
+    );
 
     try {
       return await Promise.race([running, stalled]);
+    } catch (cause) {
+      abandoned = true;
+      throw cause;
     } finally {
       if (timer !== undefined) {
         clearTimeout(timer);
@@ -535,10 +611,14 @@ export class ChatterboxEngine implements SynthesisEngine {
     processor: ChatterboxProcessorLike;
     transformers: TransformersModule;
   } {
-    if (!this.#model || !this.#processor || !this.#module) {
+    if (this.#state.kind !== "loaded" || !this.#module) {
       throw new VoxShotError("ChatterboxEngine is not loaded. Call load() first.");
     }
-    return { model: this.#model, processor: this.#processor, transformers: this.#module };
+    return {
+      model: this.#state.model,
+      processor: this.#state.processor,
+      transformers: this.#module,
+    };
   }
 }
 
@@ -550,6 +630,27 @@ export class ChatterboxEngine implements SynthesisEngine {
 function tokenBudgetFor(text: string): number {
   const estimate = TOKENS_PER_CHARACTER * text.length + TOKEN_BUDGET_BASE;
   return Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
+}
+
+/**
+ * Every state the engine can be in, and what each one owns.
+ *
+ * `loading` carries the handles needed to disown a load in flight; `loaded`
+ * carries everything a synthesis needs. No other combination is expressible.
+ */
+type EngineState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "loading"; readonly settled: Promise<void>; readonly abandon: () => void }
+  | {
+      readonly kind: "loaded";
+      readonly model: ChatterboxModelLike;
+      readonly processor: ChatterboxProcessorLike;
+      readonly plan: LoadPlan;
+    };
+
+/** Release sessions nobody is waiting for any more. */
+async function release(loaded: { model: ChatterboxModelLike }): Promise<void> {
+  await loaded.model.dispose().catch(() => undefined);
 }
 
 /** Render a plan as `device/dtype`, the form used in events and error text. */

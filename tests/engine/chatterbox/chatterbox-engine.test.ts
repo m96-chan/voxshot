@@ -35,6 +35,12 @@ interface ModuleHarness {
   failOn: (device: string, modelDtype: string) => boolean;
   /** When true for a plan, `from_pretrained` returns a promise that never settles. */
   hangOn: (device: string, modelDtype: string) => boolean;
+  /** Resolve a hung `from_pretrained`, as a stalled transfer that recovers. */
+  releaseLoad: (() => void) | undefined;
+  /** When true, `AutoProcessor.from_pretrained` throws after the model is built. */
+  failProcessor: boolean;
+  /** Models handed out, so leaks show up as created minus disposed. */
+  modelsCreated: number;
   /** Last `progress_callback` handed to `from_pretrained`, so tests can drive it. */
   lastProgressCallback: ((progress: Record<string, unknown>) => void) | undefined;
   /** Every stopping criterion the engine constructed. */
@@ -58,6 +64,9 @@ function createModule(): ModuleHarness {
     disposeCalls: 0,
     failOn: () => false,
     hangOn: () => false,
+    releaseLoad: undefined,
+    failProcessor: false,
+    modelsCreated: 0,
     lastProgressCallback: undefined,
     stoppers: [],
     tokensUsed: undefined,
@@ -88,14 +97,20 @@ function createModule(): ModuleHarness {
           | undefined;
         options.progress_callback?.({ status: "progress", file: modelId });
         if (harness.hangOn(options.device as string, dtype.language_model as string)) {
-          // Models the reported bug: a dangling transfer leaves `from_pretrained`
-          // pending forever — it neither resolves nor rejects.
-          return new Promise(() => {});
+          // A dangling transfer: neither resolves nor rejects, unless the test
+          // later lets it recover the way a stalled socket can.
+          return new Promise((resolve) => {
+            harness.releaseLoad = () => resolve(makeModel());
+          });
         }
         if (harness.failOn(options.device as string, dtype.language_model as string)) {
           throw new Error(`no ${options.device} support`);
         }
-        return {
+        return makeModel();
+
+        function makeModel() {
+          harness.modelsCreated += 1;
+          return {
           async encode_speech(audioValues: TensorLike) {
             harness.encodeCalls.push(audioValues);
             return speakerOutputs();
@@ -117,7 +132,8 @@ function createModule(): ModuleHarness {
           async dispose() {
             harness.disposeCalls += 1;
           },
-        };
+          };
+        }
       },
     },
     InterruptableStoppingCriteria: class {
@@ -137,6 +153,11 @@ function createModule(): ModuleHarness {
     },
     AutoProcessor: {
       async from_pretrained() {
+        if (harness.failProcessor) {
+          // The model is already built by now; whatever holds it has to
+          // release it on this path too.
+          throw new Error("preprocessor_config.json is missing");
+        }
         return async (text: string) => {
           harness.processorCalls.push(text);
           return {
@@ -1033,5 +1054,63 @@ describe("ChatterboxEngine generation budget", () => {
     await engine.synthesize({ text: "a".repeat(120), voice: voice(), speed: 1 });
 
     expect(events.filter((e) => e.status === "synthesize-truncated")).toHaveLength(0);
+  });
+});
+
+/**
+ * #86: the loaded state lives in four fields assigned at different moments, so
+ * a load that is abandoned, duplicated, or disposed underneath can leave the
+ * engine half-loaded or leave a full set of ONNX sessions with nothing left to
+ * release them.
+ */
+describe("ChatterboxEngine load lifetime", () => {
+  let harness: ModuleHarness;
+
+  const createEngine = (overrides: Record<string, unknown> = {}) =>
+    new ChatterboxEngine({ loadModule: async () => harness.module, ...overrides });
+
+  beforeEach(() => {
+    harness = createModule();
+  });
+
+  const leaked = () => harness.modelsCreated - harness.disposeCalls;
+
+  it("releases the model when the processor fails after it is built", async () => {
+    harness.failProcessor = true;
+    const engine = createEngine();
+
+    await expect(engine.load("wasm")).rejects.toBeInstanceOf(VoxShotError);
+
+    // One model was built and the load failed. Nothing else refers to it.
+    expect(harness.modelsCreated).toBeGreaterThan(0);
+    expect(leaked()).toBe(0);
+  });
+
+  it("builds the model once for two concurrent loads", async () => {
+    const engine = createEngine();
+
+    await Promise.all([engine.load("wasm"), engine.load("wasm")]);
+
+    expect(harness.modelsCreated).toBe(1);
+    expect(engine.loadedPlan?.device).toBe("wasm");
+  });
+
+  it("does not come back to life when disposed during a load", async () => {
+    harness.hangOn = () => true;
+    const engine = createEngine({ stallTimeoutMs: 0 });
+
+    const loading = engine.load("wasm").catch(() => undefined);
+    // The load reaches `from_pretrained` only after several awaits; releasing
+    // before it gets there would resolve nothing.
+    await vi.waitFor(() => expect(harness.releaseLoad).toBeDefined());
+    await engine.dispose();
+
+    // The transfer completes after the owner has gone.
+    harness.releaseLoad?.();
+    await loading;
+    await Promise.resolve();
+
+    expect(engine.loadedPlan).toBeUndefined();
+    expect(leaked()).toBe(0);
   });
 });

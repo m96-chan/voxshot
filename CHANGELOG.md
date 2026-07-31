@@ -23,6 +23,13 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 
 ### Fixed
 
+- A load that is abandoned, duplicated or disposed underneath no longer leaves
+  the engine half-loaded or leaves ONNX sessions with nothing to release them.
+  The lifetime is one state value rather than four fields assigned at different
+  moments, so a load lands whole or not at all — and every failure path,
+  including a processor that fails after the model is built, releases what it
+  already holds. ([#86])
+
 - Long chunks are no longer truncated mid-sentence. The chunk budget is
   measured in characters and the generation cap in tokens, and nothing related
   the two: at roughly 2.4 tokens per character the old fixed cap of 256 ran out
