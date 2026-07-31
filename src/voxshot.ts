@@ -208,7 +208,12 @@ export class VoxShot {
 
   /** The backend inference actually runs on. */
   get device(): ResolvedDevice {
-    return this.#device;
+    // What the engine is actually on, not what device resolution picked. An
+    // engine may degrade internally — the Chatterbox chain ends on WASM so a
+    // GPU that cannot run the model still produces audio — and a caller told
+    // "webgpu" while running on WASM has no way to notice. Engines that do not
+    // track it fall back to the resolved value rather than reporting nothing.
+    return this.#engine.loadedDevice ?? this.#device;
   }
 
   /** Sample rate of the audio this instance produces. */

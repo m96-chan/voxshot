@@ -310,6 +310,11 @@ export class ChatterboxEngine implements SynthesisEngine {
     return this.#state.kind === "loaded" ? this.#state.plan : undefined;
   }
 
+  /** The device the winning plan used, which the fallback chain may have moved. */
+  get loadedDevice(): ResolvedDevice | undefined {
+    return this.#state.kind === "loaded" ? this.#state.plan.device : undefined;
+  }
+
   /**
    * Download (or read from the browser cache) and initialise the model.
    *

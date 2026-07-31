@@ -1625,3 +1625,28 @@ describe("ChatterboxEngine requiresGpu", () => {
     expect(new ChatterboxEngine({}).requiresGpu).toBe(false);
   });
 });
+
+describe("ChatterboxEngine loadedDevice", () => {
+  it("reports the device the winning plan actually used", async () => {
+    const harness = createModule();
+    harness.failOn = (device) => device === "webgpu";
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+    await engine.load("webgpu");
+
+    // Asked for webgpu, every webgpu plan failed, landed on wasm. Anything
+    // that says "webgpu" here is describing a load that did not happen.
+    expect(engine.loadedDevice).toBe("wasm");
+  });
+
+  it("says nothing before a load and after a dispose", async () => {
+    const harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+    expect(engine.loadedDevice).toBeUndefined();
+    await engine.load("wasm");
+    expect(engine.loadedDevice).toBe("wasm");
+    await engine.dispose();
+    expect(engine.loadedDevice).toBeUndefined();
+  });
+});

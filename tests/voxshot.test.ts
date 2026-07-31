@@ -174,6 +174,25 @@ describe("VoxShot.create", () => {
     });
   });
 
+  it("reports where the engine actually loaded, not what was resolved", async () => {
+    // An engine may degrade to a different device internally — the Chatterbox
+    // chain ends on wasm so a GPU that cannot run the model still produces
+    // audio. Reporting the resolved device would make this getter, documented
+    // as "the backend that was actually selected", say the opposite.
+    harness.gpuAvailable.value = true;
+    const engine = Object.assign(new FakeEngine(), { loadedDevice: "wasm" as const });
+
+    expect((await create({ engine })).device).toBe("wasm");
+  });
+
+  it("falls back to the resolved device when the engine does not say", async () => {
+    // Optional on the interface, so an engine written before it existed — or a
+    // worker whose other side is older — keeps reporting something sensible.
+    harness.gpuAvailable.value = true;
+
+    expect((await create()).device).toBe("webgpu");
+  });
+
   it("exposes the engine sample rate", async () => {
     expect((await create()).sampleRate).toBe(16_000);
   });

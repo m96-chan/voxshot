@@ -133,6 +133,21 @@ await audio.play();
 WebGPU is recommended for the best performance; environments without it fall
 back to WASM automatically (`device: "auto"`).
 
+That fallback is a long way from parity. The Chatterbox pipeline measures
+around **5.8x slower than real time** on CPU — 2.52 s of audio in 14.7 s — so
+it is a way to get *something* out of a machine without a GPU, not a second
+supported target. `device: "webgpu"` picks what to try; it does not promise the
+engine will stay there, because an engine may degrade internally. Two ways to
+deal with that:
+
+```ts
+const tts = await VoxShot.create({ engine });
+tts.device;   // where the engine actually landed, not what was requested
+
+// or refuse outright, if the model is unusable without a GPU
+new ChatterboxEngine({ requiresGpu: true });
+```
+
 ---
 
 ## API

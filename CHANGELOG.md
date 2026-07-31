@@ -21,6 +21,18 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   GPU lives in the worker and the main thread only sees the proxy, so without
   this the requirement could not be expressed in the deployment shape the
   library is built around. ([#107])
+- `loadedDevice` on `SynthesisEngine`, reported by `VoxShot.device`. The getter
+  is documented as "the backend that was actually selected" and returned the
+  resolved device, so an engine that degraded to WASM internally was still
+  reported as running on WebGPU. A degrade is observable now instead of
+  silent. ([#107])
+
+### Changed
+
+- `device: "webgpu"` no longer documents itself as "never silently slow". It
+  picks what to try; an engine may still degrade internally. Use
+  `VoxShot.device` to see where it landed, or `requiresGpu` to refuse. No
+  behaviour changed — the promise was never kept. ([#107])
 
 
 ## [0.3.0] - 2026-08-01

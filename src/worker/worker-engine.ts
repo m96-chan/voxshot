@@ -1,4 +1,5 @@
 import { CHATTERBOX_SAMPLE_RATE } from "../engine/chatterbox/chatterbox-engine.js";
+import type { ResolvedDevice } from "../device.js";
 import type { SynthesisEngine, SynthesisRequest } from "../engine/types.js";
 import { VoxShotError } from "../errors.js";
 import type { PcmAudio } from "../platform.js";
@@ -62,6 +63,9 @@ interface Pending {
 export class WorkerSynthesisEngine implements SynthesisEngine {
   readonly requiresGpu: boolean;
 
+  /** Where the worker's engine loaded, once it has told us. */
+  loadedDevice: ResolvedDevice | undefined;
+
   #name: string;
   #sampleRate: number;
 
@@ -100,6 +104,7 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
   async load(device: "webgpu" | "wasm"): Promise<void> {
     const description = (await this.#send({ method: "load", device })) as EngineDescription;
     this.#name = description.name;
+    this.loadedDevice = description.device;
     this.#sampleRate = description.sampleRate;
   }
 

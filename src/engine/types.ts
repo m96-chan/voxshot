@@ -68,6 +68,18 @@ export interface SynthesisEngine {
    * @defaultValue false
    */
   readonly requiresGpu?: boolean;
+  /**
+   * The device the weights are actually on, once loaded.
+   *
+   * Not necessarily the one {@link SynthesisEngine.load} was given: an engine
+   * may degrade internally, and the Chatterbox chain ends on WASM so a GPU
+   * that cannot run the model still produces audio. `VoxShot.device` reports
+   * this when it is available, because a caller that is told "webgpu" while
+   * running on WASM has no way to notice.
+   *
+   * Undefined before a load and after a dispose.
+   */
+  readonly loadedDevice?: ResolvedDevice;
   /** Prepare weights for the given device. Called once before use. */
   load(device: ResolvedDevice): Promise<void>;
   /** Extract a speaker embedding from mono reference audio. */
