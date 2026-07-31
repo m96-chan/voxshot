@@ -24,6 +24,7 @@ export type {
   ChatterboxEngineOptions,
   ChatterboxLifecycleEvent,
   ChatterboxLoadEvent,
+  ChatterboxTruncationEvent,
 } from "./engine/chatterbox/chatterbox-engine.js";
 export { buildLoadPlans } from "./engine/chatterbox/dtype-plan.js";
 export type {

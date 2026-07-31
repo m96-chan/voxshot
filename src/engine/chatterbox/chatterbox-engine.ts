@@ -11,6 +11,7 @@ import type {
   ChatterboxProcessorLike,
   InterruptableStoppingCriteriaLike,
   LoadProgress,
+  StoppingCriteriaLike,
   PretrainedConfigLike,
   TensorLike,
   TransformersModule,
@@ -75,17 +76,7 @@ const TOKEN_BUDGET_SAFETY = 1.25;
 /** Enough for a very short prompt to finish naturally. */
 const MIN_TOKEN_BUDGET = 96;
 
-/**
- * Samples the vocoder emits per speech token, plus its trailing silence.
- *
- * A fixed rate of 25 tokens per second at 24 kHz, confirmed across generations
- * from 92 to 1024 tokens (957-965 samples/token, the spread being rounding in
- * the measurement). It is what lets the engine tell "stopped because it had
- * finished" from "stopped because it ran out of budget" — `generate` returns
- * only a waveform, so the token count has to be recovered from its length.
- */
-const CHATTERBOX_SAMPLES_PER_TOKEN = 960;
-const CHATTERBOX_TRAILING_SAMPLES = 2400;
+
 const DEFAULT_EXAGGERATION = 0.5;
 /**
  * How long loading may stay silent before it is declared stalled.
@@ -134,8 +125,27 @@ export interface ChatterboxLifecycleEvent {
   readonly reason?: string;
 }
 
+/**
+ * Generation stopped because it reached its token budget rather than because
+ * the utterance had finished, so the audio ends early.
+ *
+ * Carried on the same channel as the load milestones because that is the only
+ * channel there is. A declared variant rather than something cast into place,
+ * so consumers can narrow to it.
+ */
+export interface ChatterboxTruncationEvent {
+  readonly status: "synthesize-truncated";
+  /** The chunk that did not fit. */
+  readonly text: string;
+  /** The budget it ran out of. */
+  readonly tokens: number;
+}
+
 /** Everything {@link ChatterboxEngineOptions.onProgress} may receive. */
-export type ChatterboxLoadEvent = LoadProgress | ChatterboxLifecycleEvent;
+export type ChatterboxLoadEvent =
+  | LoadProgress
+  | ChatterboxLifecycleEvent
+  | ChatterboxTruncationEvent;
 
 export interface ChatterboxEngineOptions {
   /**
@@ -426,6 +436,8 @@ export class ChatterboxEngine implements SynthesisEngine {
     // at the next step. Without this an abandoned render keeps the worker's
     // single execution slot busy for its full length (#67).
     const stopper = request.signal ? this.#interrupter(transformers, request.signal) : undefined;
+    const counter = this.#counter(transformers);
+    const criteria = [stopper, counter?.criterion].filter((c) => c !== undefined);
 
     // A cap the caller set is honoured as written; otherwise it is sized to
     // this chunk, so a full-length one is not truncated and a short one does
@@ -438,7 +450,7 @@ export class ChatterboxEngine implements SynthesisEngine {
       // Chatterbox's own name for the knob the request calls expressiveness.
       exaggeration: expressiveness,
       max_new_tokens: budget,
-      ...(stopper ? { stopping_criteria: stopper } : {}),
+      ...(criteria.length > 0 ? { stopping_criteria: criteria } : {}),
     });
 
     // Interruption leaves a truncated waveform behind; nobody is waiting for
@@ -450,15 +462,21 @@ export class ChatterboxEngine implements SynthesisEngine {
     // `generate` returns only a waveform, so whether it stopped early has to
     // be recovered from its length. Silence here is how #65 went unnoticed:
     // the audio simply ended, with no error to catch.
-    const tokensUsed = Math.round(
-      (samples.length - CHATTERBOX_TRAILING_SAMPLES) / CHATTERBOX_SAMPLES_PER_TOKEN,
-    );
-    if (tokensUsed >= budget) {
+    // Counted, not inferred. The waveform's length depends on the reference
+    // voice as well as the token count, so recovering one from it was never
+    // sound — see #90.
+    //
+    // The criteria run once per token, after it is appended, so a run stopped
+    // by the cap ends on exactly `budget` steps. An utterance that finishes
+    // naturally on its very last allowed token lands there too and is also
+    // reported; the two are indistinguishable from here, and over-reporting at
+    // the boundary is the safer way round.
+    if (counter !== undefined && counter.steps >= budget) {
       this.#onProgress?.({
         status: "synthesize-truncated",
         text: trimmed,
         tokens: budget,
-      } as unknown as ChatterboxLoadEvent);
+      });
     }
 
     if (speed === 1) {
@@ -524,6 +542,38 @@ export class ChatterboxEngine implements SynthesisEngine {
       signal.addEventListener("abort", () => stopper.interrupt(), { once: true });
     }
     return stopper;
+  }
+
+  /**
+   * A stopping criterion that stops nothing and counts everything.
+   *
+   * `StoppingCriteriaList` invokes each criterion once per generated token, so
+   * the call count is exactly what generation produced — independent of the
+   * reference voice, which is what the waveform-derived version was not.
+   * Returns undefined on builds without `StoppingCriteria`, in which case
+   * truncation goes unreported rather than reported from a number that cannot
+   * support the claim.
+   */
+  #counter(
+    transformers: TransformersModule,
+  ): { criterion: StoppingCriteriaLike; readonly steps: number } | undefined {
+    const Base = transformers.StoppingCriteria;
+    if (!Base) {
+      return undefined;
+    }
+    const state = { steps: 0 };
+    class Counter extends (Base as new () => StoppingCriteriaLike) {
+      override _call(inputIds: number[][]): boolean[] {
+        state.steps += 1;
+        return new Array(inputIds.length).fill(false);
+      }
+    }
+    return {
+      criterion: new Counter(),
+      get steps() {
+        return state.steps;
+      },
+    };
   }
 
   /** Emit one engine-level milestone, if anyone is listening. */
