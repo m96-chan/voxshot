@@ -115,6 +115,19 @@
 
     <button id="speak">Speak</button>
 
+    <h2>Streaming playback</h2>
+    <p>
+      <code>play()</code> starts speaking before the whole text is rendered, and keeps one
+      chunk of lookahead. "Cut and start the next line" interrupts an utterance while that
+      lookahead is still being rendered, then immediately asks for a different one — the
+      sequence that used to wedge the engine
+      (<a href="https://github.com/m96-chan/voxshot/issues/67">#67</a>). Watch the log: the
+      abandoned render should be cancelled, and the next line should still be answered.
+    </p>
+
+    <button id="stream">Play a long line</button>
+    <button id="cut">Cut and start the next line</button>
+
     <audio id="player" controls hidden></audio>
     <pre id="status"></pre>
 

@@ -5,6 +5,7 @@ import {
   toJapaneseReading,
   type LoadProgress,
   type PcmAudio,
+  type SpeechPlayback,
 } from "voxshot";
 
 import { prewarmModelCache } from "./model-cache.js";
@@ -25,6 +26,8 @@ const engineSelect = element<HTMLSelectElement>("engine");
 const referenceInput = element<HTMLInputElement>("reference");
 const referenceLabel = element<HTMLLabelElement>("reference-label");
 const speakButton = element<HTMLButtonElement>("speak");
+const streamButton = element<HTMLButtonElement>("stream");
+const cutButton = element<HTMLButtonElement>("cut");
 const statusOutput = element<HTMLPreElement>("status");
 const player = element<HTMLAudioElement>("player");
 
@@ -224,6 +227,70 @@ async function speak(): Promise<void> {
   await audio.play();
   log("Playback finished");
 }
+
+/**
+ * Streaming playback, and the interruption that used to wedge the engine.
+ *
+ * Borrowed in spirit from the radio consumer app, where switching stations
+ * cuts the current utterance mid-render. `play()` keeps one chunk of
+ * lookahead, so a cut almost always lands while a render nobody will hear is
+ * still running — see #67.
+ */
+const LONG_LINE =
+  "This line is deliberately long, so that rendering it takes long enough to interrupt. " +
+  "While you hear this sentence, the next one is already being synthesized ahead of playback. " +
+  "That lookahead is the render that gets abandoned when you cut the utterance.";
+const NEXT_LINE = "And this is the line that has to be answered after the cut.";
+
+let current: SpeechPlayback | undefined;
+
+async function startStreaming(text: string): Promise<void> {
+  const kind = engineSelect.value as EngineKind;
+  const tts = await getInstance(kind);
+  if (!(await ensureVoice(kind, tts))) {
+    return;
+  }
+  log(`Streaming: "${text.slice(0, 40)}…"`);
+  const speech = tts.play(text);
+  current = speech;
+  speech.done
+    .then(() => log("Streaming finished"))
+    .catch((cause) => log(`Streaming ended: ${describe(cause)}`));
+}
+
+async function cutAndContinue(): Promise<void> {
+  if (!current) {
+    log("Nothing is playing — press \"Play a long line\" first.");
+    return;
+  }
+  const started = performance.now();
+  log("Cutting mid-render…");
+  await current.stop();
+  current = undefined;
+  log(`Stopped in ${((performance.now() - started) / 1000).toFixed(2)}s. Asking for the next line…`);
+  await startStreaming(NEXT_LINE);
+}
+
+const describe = (cause: unknown) =>
+  isVoxShotError(cause) ? `[${cause.code}] ${cause.message}` : String(cause);
+
+streamButton.addEventListener("click", () => {
+  streamButton.disabled = true;
+  startStreaming(LONG_LINE)
+    .catch((cause) => log(`Error: ${describe(cause)}`))
+    .finally(() => {
+      streamButton.disabled = false;
+    });
+});
+
+cutButton.addEventListener("click", () => {
+  cutButton.disabled = true;
+  cutAndContinue()
+    .catch((cause) => log(`Error: ${describe(cause)}`))
+    .finally(() => {
+      cutButton.disabled = false;
+    });
+});
 
 const DEFAULT_SAMPLE = "Hello from VoxShot! This is a browser text to speech demo.";
 const JAPANESE_SAMPLE = "会議は3月4日の14:00からです。参加費は1,000円で、AIが50%の確率で答えます。";
