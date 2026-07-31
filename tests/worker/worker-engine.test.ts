@@ -447,12 +447,16 @@ describe("serialized execution", () => {
       speed: 1,
       signal: controller.signal,
     });
+    // Attach the handler before aborting: abort rejects synchronously, and a
+    // rejection left unobserved across a turn of the microtask queue is
+    // reported as unhandled even though the test does await it later.
+    const rejected = expect(call).rejects.toBeInstanceOf(VoxShotError);
     await deliver();
     controller.abort();
     await vi.waitFor(() => expect(worker.signals[0]?.aborted).toBe(true));
 
     open();
-    await expect(call).rejects.toBeInstanceOf(VoxShotError);
+    await rejected;
   });
 
   it("drops a queued request without ever starting it", async () => {
@@ -469,9 +473,10 @@ describe("serialized execution", () => {
       speed: 1,
       signal: controller.signal,
     });
+    const rejected = expect(second).rejects.toBeInstanceOf(VoxShotError);
     await deliver();
     controller.abort();
-    await expect(second).rejects.toBeInstanceOf(VoxShotError);
+    await rejected;
     // The caller stops waiting immediately, but the worker only learns of the
     // cancellation when the control message lands.
     await deliver();
