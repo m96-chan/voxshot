@@ -629,6 +629,32 @@ describe("VoxShot.play", () => {
     expect(playback.stopped).toBe(true);
   });
 
+  it("lets go of the signal once playback has finished", async () => {
+    const tts = await createWithVoice();
+    const controller = new AbortController();
+    // A controller can outlive the utterance — one per page is the obvious way
+    // to wire a stop button — so a listener left behind keeps a finished
+    // playback alive for as long as the page runs. Nothing observable happens
+    // when a stale listener fires (stopping a closed playback is a no-op), so
+    // the registration itself is the only honest place to look.
+    const live = new Set<unknown>();
+    const signal = controller.signal as AbortSignal & Record<string, unknown>;
+    const add = signal.addEventListener.bind(signal);
+    const remove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = ((type: string, fn: never, options?: never) => {
+      live.add(fn);
+      add(type, fn, options);
+    }) as unknown as typeof signal.addEventListener;
+    signal.removeEventListener = ((type: string, fn: never, options?: never) => {
+      live.delete(fn);
+      remove(type, fn, options);
+    }) as unknown as typeof signal.removeEventListener;
+
+    await tts.play("One. Two.", { signal }).done;
+
+    expect(live.size).toBe(0);
+  });
+
   it("stop() prevents further synthesis", async () => {
     const tts = await createWithVoice();
 

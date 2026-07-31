@@ -336,11 +336,20 @@ export class VoxShot {
     // closes the output. Ignoring the option here would be the worse answer —
     // it is inherited from `SpeakOptions`, so a caller passing one has every
     // reason to expect it to work.
-    if (options.signal) {
-      if (options.signal.aborted) {
+    const signal = options.signal;
+    if (signal) {
+      if (signal.aborted) {
         void playback.stop();
       } else {
-        options.signal.addEventListener("abort", () => void playback.stop(), { once: true });
+        const cut = (): void => void playback.stop();
+        signal.addEventListener("abort", cut, { once: true });
+        // `once` only removes a listener that fires. One controller reused
+        // across many utterances — a page-lifetime one, say — would otherwise
+        // collect a listener per finished playback, each keeping it alive.
+        playback.done.then(
+          () => signal.removeEventListener("abort", cut),
+          () => signal.removeEventListener("abort", cut),
+        );
       }
     }
     return playback;
