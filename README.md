@@ -298,6 +298,27 @@ The name describes the effect rather than any one model's parameter —
 without such a control ignores it. Rendered audio is cached per value, so the
 same line at two settings really is rendered twice.
 
+#### Stopping an utterance
+
+A long text is many renders, not one. A paper-sized input is hundreds of chunks
+and can hold the engine for the better part of an hour, and dropping the promise
+does not stop any of it — the engine runs one call at a time, so abandoned work
+blocks whatever is queued behind it. Pass a `signal` to stop for real.
+
+```ts
+const controller = new AbortController();
+document.querySelector("#stop").onclick = () => controller.abort();
+
+await tts.speak(paper, { signal: controller.signal });
+```
+
+`speak` and `stream` stop at the next chunk boundary, and hand the signal to the
+engine as well, so an engine that can interrupt a render in flight does. `play`
+accepts one too and treats it as a call to `stop()` on the handle it returns.
+
+Aborting rejects with the signal's reason. Text that was never speakable is
+still reported as such, even when the signal has already aborted.
+
 There is deliberately no upper bound. The model accepts any non-negative
 number and the usable range is not documented upstream, so the library rejects
 only values that cannot be a setting at all rather than inventing a limit.
