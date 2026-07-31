@@ -896,3 +896,46 @@ describe("when the transport fails at an awkward moment", () => {
     await call;
   });
 });
+
+/**
+ * #88: expressiveness is threaded end to end, but the leg that carries it
+ * across the worker boundary had no test — deleting the forwarding on either
+ * side left the whole suite green. The worker is the configuration the README
+ * recommends, so this is the deployment that actually ships.
+ */
+describe("per utterance expressiveness across the boundary", () => {
+  it("carries an explicit value to the worker side engine", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+
+    await engine.synthesize({ text: "bright", voice, speed: 1, expressiveness: 0.9 });
+
+    expect(worker.requests[0]?.expressiveness).toBe(0.9);
+  });
+
+  it("carries zero rather than dropping it as absent", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+
+    await engine.synthesize({ text: "flat", voice, speed: 1, expressiveness: 0 });
+
+    // `0` is a setting, not "unset". Collapsing it would silently fall back to
+    // whatever the engine was constructed with.
+    expect(worker.requests[0]?.expressiveness).toBe(0);
+  });
+
+  it("keeps an unspecified value distinct from an explicit one", async () => {
+    const { engine, worker } = wire();
+    await engine.load("wasm");
+
+    await engine.synthesize({ text: "default", voice, speed: 1 });
+    await engine.synthesize({ text: "explicit", voice, speed: 1, expressiveness: 0.5 });
+
+    // Distinctness is the property that matters: the synthesis cache keys
+    // undefined separately from any explicit number, so collapsing the two
+    // here would change which renderings collide. Asserting only that the
+    // field is absent passes even when nothing is forwarded at all.
+    expect(worker.requests[0]?.expressiveness).toBeUndefined();
+    expect(worker.requests[1]?.expressiveness).toBe(0.5);
+  });
+});
