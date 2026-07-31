@@ -11,6 +11,7 @@ import type {
   ChatterboxProcessorLike,
   InterruptableStoppingCriteriaLike,
   LoadProgress,
+  StoppingCriteriaLike,
   PretrainedConfigLike,
   TensorLike,
   TransformersModule,
@@ -76,16 +77,17 @@ const TOKEN_BUDGET_SAFETY = 1.25;
 const MIN_TOKEN_BUDGET = 96;
 
 /**
- * Samples the vocoder emits per speech token, plus its trailing silence.
+ * Upper bound on a derived budget.
  *
- * A fixed rate of 25 tokens per second at 24 kHz, confirmed across generations
- * from 92 to 1024 tokens (957-965 samples/token, the spread being rounding in
- * the measurement). It is what lets the engine tell "stopped because it had
- * finished" from "stopped because it ran out of budget" — `generate` returns
- * only a waveform, so the token count has to be recovered from its length.
+ * `synthesize` is public and does not bound its text, and `maxChunkLength` is
+ * caller-configurable, so without a ceiling a long chunk asks for minutes of
+ * audio in a single call. Every call used to be bounded at 256; this keeps a
+ * bound while leaving room for the 120-character chunks the splitter produces.
  */
-const CHATTERBOX_SAMPLES_PER_TOKEN = 960;
-const CHATTERBOX_TRAILING_SAMPLES = 2400;
+const MAX_TOKEN_BUDGET = 1024;
+
+/** Largest delay `setTimeout` represents; beyond it a timer fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
 const DEFAULT_EXAGGERATION = 0.5;
 /**
  * How long loading may stay silent before it is declared stalled.
@@ -134,8 +136,27 @@ export interface ChatterboxLifecycleEvent {
   readonly reason?: string;
 }
 
+/**
+ * Generation stopped because it reached its token budget rather than because
+ * the utterance had finished, so the audio ends early.
+ *
+ * Emitted on the same channel as the load milestones because that is the only
+ * channel there is; it is a declared variant rather than something cast into
+ * place, so consumers can narrow to it.
+ */
+export interface ChatterboxTruncationEvent {
+  readonly status: "synthesize-truncated";
+  /** The chunk that did not fit. */
+  readonly text: string;
+  /** The budget it ran out of. */
+  readonly tokens: number;
+}
+
 /** Everything {@link ChatterboxEngineOptions.onProgress} may receive. */
-export type ChatterboxLoadEvent = LoadProgress | ChatterboxLifecycleEvent;
+export type ChatterboxLoadEvent =
+  | LoadProgress
+  | ChatterboxLifecycleEvent
+  | ChatterboxTruncationEvent;
 
 export interface ChatterboxEngineOptions {
   /**
@@ -222,24 +243,48 @@ export class ChatterboxEngine implements SynthesisEngine {
   readonly #stallTimeoutMs: number;
 
   #module: TransformersModule | undefined;
-  #model: ChatterboxModelLike | undefined;
-  #processor: ChatterboxProcessorLike | undefined;
-  #plan: LoadPlan | undefined;
+  /**
+   * Everything a loaded engine consists of, replaced as one value.
+   *
+   * Assigning the model, the processor and the plan separately made
+   * "model present, plan missing" representable — and reachable, because the
+   * stall guard abandons a load whose operation is still running and may still
+   * write. One field means an abandoned load either lands whole or not at all.
+   */
+  #loaded: Loaded | undefined;
 
   constructor(options: ChatterboxEngineOptions = {}) {
     this.modelId = options.modelId ?? DEFAULT_MODEL_ID;
     this.#dtypeOverrides = options.dtype;
-    this.#maxNewTokens = options.maxNewTokens;
+    const cap = options.maxNewTokens;
+    if (cap !== undefined && (!Number.isInteger(cap) || cap < 1)) {
+      // `0` reached generate as a cap of zero and made every render report
+      // itself truncated. Leave it unset to have one derived per chunk.
+      throw new InvalidInputError(
+        "maxNewTokens must be a positive integer. Omit it to size the budget to each chunk.",
+      );
+    }
+    this.#maxNewTokens = cap;
     this.#exaggeration = options.exaggeration ?? DEFAULT_EXAGGERATION;
     this.#onProgress = options.onProgress;
     this.#loadModule = options.loadModule ?? defaultModuleLoader;
     this.#supportsFp16 = options.supportsFp16 ?? webGpuSupportsFp16;
-    this.#stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+    const stall = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+    if (!Number.isFinite(stall) || stall < 0) {
+      // `Infinity` is the intuitive spelling of "wait forever", but
+      // setTimeout coerces it to 1 ms and the load fails instantly. `0` is
+      // the documented way to wait indefinitely.
+      throw new InvalidInputError(
+        "stallTimeoutMs must be a non negative finite number. Use 0 to wait indefinitely.",
+      );
+    }
+    // Beyond this a timer wraps around and fires immediately.
+    this.#stallTimeoutMs = Math.min(stall, MAX_TIMER_MS);
   }
 
   /** The device / dtype combination that actually loaded, once `load` ran. */
   get loadedPlan(): LoadPlan | undefined {
-    return this.#plan;
+    return this.#loaded?.plan;
   }
 
   /**
@@ -249,14 +294,28 @@ export class ChatterboxEngine implements SynthesisEngine {
    * fp16 support degrades instead of failing outright.
    */
   async load(device: ResolvedDevice): Promise<void> {
-    if (this.#model) {
+    if (this.#loaded) {
       return;
     }
 
     const transformers = (this.#module ??= await this.#importModule());
-    // Resolved once, outside the plan loop: the config does not vary by plan,
-    // and re-reading it per attempt would repeat work on every fallback.
-    const config = await this.#resolveConfig(transformers);
+    // Inside the guard and inside the error contract: this is the first
+    // network fetch of the load, so a hung config.json is exactly the failure
+    // the stall guard exists for, and a failure here must still surface as a
+    // VoxShotError rather than a raw library error.
+    let config: PretrainedConfigLike | undefined;
+    try {
+      config = await this.#withStallGuard(() => this.#resolveConfig(transformers));
+    } catch (cause) {
+      if (cause instanceof LoadStalledError) {
+        throw cause;
+      }
+      throw new VoxShotError(
+        `Failed to read the configuration for "${this.modelId}".`,
+        "UNKNOWN",
+        { cause },
+      );
+    }
     const fp16 = device === "webgpu" ? await this.#supportsFp16() : true;
     const plans = buildLoadPlans(device, this.#dtypeOverrides, fp16);
     const failures: string[] = [];
@@ -264,9 +323,9 @@ export class ChatterboxEngine implements SynthesisEngine {
     for (const plan of plans) {
       this.#announce("load-start", plan);
       try {
-        await this.#withStallGuard(async (notice) => {
-          this.#model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
-            config,
+        this.#loaded = await this.#withStallGuard(async (notice) => {
+          const model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
+            ...(config ? { config } : {}),
             device: plan.device,
             dtype: plan.dtype,
             // Always supplied, even without an `onProgress` consumer: the
@@ -276,9 +335,9 @@ export class ChatterboxEngine implements SynthesisEngine {
               this.#onProgress?.(progress);
             },
           });
-          this.#processor = await transformers.AutoProcessor.from_pretrained(this.modelId);
+          const processor = await transformers.AutoProcessor.from_pretrained(this.modelId);
+          return { model, processor, plan };
         });
-        this.#plan = plan;
         this.#announce("load-ready", plan);
         return;
       } catch (cause) {
@@ -352,6 +411,10 @@ export class ChatterboxEngine implements SynthesisEngine {
       );
     }
 
+    // Before any work: an already-aborted request would otherwise pay for the
+    // processor call, four tensors, a full forward pass and the vocoder.
+    request.signal?.throwIfAborted();
+
     const trimmed = text.trim();
     if (trimmed.length === 0) {
       return new Float32Array(0);
@@ -372,6 +435,8 @@ export class ChatterboxEngine implements SynthesisEngine {
     // at the next step. Without this an abandoned render keeps the worker's
     // single execution slot busy for its full length (#67).
     const stopper = request.signal ? this.#interrupter(transformers, request.signal) : undefined;
+    const counter = this.#counter(transformers);
+    const criteria = [stopper, counter?.criterion].filter((c) => c !== undefined);
 
     // A cap the caller set is honoured as written; otherwise it is sized to
     // this chunk, so a full-length one is not truncated and a short one does
@@ -384,7 +449,7 @@ export class ChatterboxEngine implements SynthesisEngine {
       // Chatterbox's own name for the knob the request calls expressiveness.
       exaggeration: expressiveness,
       max_new_tokens: budget,
-      ...(stopper ? { stopping_criteria: stopper } : {}),
+      ...(criteria.length > 0 ? { stopping_criteria: criteria } : {}),
     });
 
     // Interruption leaves a truncated waveform behind; nobody is waiting for
@@ -393,18 +458,11 @@ export class ChatterboxEngine implements SynthesisEngine {
 
     const samples = Float32Array.from(waveform.data as Float32Array);
 
-    // `generate` returns only a waveform, so whether it stopped early has to
-    // be recovered from its length. Silence here is how #65 went unnoticed:
-    // the audio simply ended, with no error to catch.
-    const tokensUsed = Math.round(
-      (samples.length - CHATTERBOX_TRAILING_SAMPLES) / CHATTERBOX_SAMPLES_PER_TOKEN,
-    );
-    if (tokensUsed >= budget) {
-      this.#onProgress?.({
-        status: "synthesize-truncated",
-        text: trimmed,
-        tokens: budget,
-      } as unknown as ChatterboxLoadEvent);
+    // Counted, not inferred. The waveform's length depends on the reference
+    // voice as well as the token count, so recovering one from it was never
+    // sound — see #81.
+    if (counter !== undefined && counter.steps >= budget) {
+      this.#onProgress?.({ status: "synthesize-truncated", text: trimmed, tokens: budget });
     }
 
     if (speed === 1) {
@@ -417,11 +475,9 @@ export class ChatterboxEngine implements SynthesisEngine {
 
   /** Free the ONNX sessions. A later `load()` re-creates them. */
   async dispose(): Promise<void> {
-    const model = this.#model;
-    this.#model = undefined;
-    this.#processor = undefined;
-    this.#plan = undefined;
-    await model?.dispose();
+    const loaded = this.#loaded;
+    this.#loaded = undefined;
+    await loaded?.model.dispose();
   }
 
   /**
@@ -431,8 +487,16 @@ export class ChatterboxEngine implements SynthesisEngine {
    * architecture the repo already declares is left alone: it knows its own
    * layout better than this default does.
    */
-  async #resolveConfig(transformers: TransformersModule): Promise<PretrainedConfigLike> {
-    const config = await transformers.AutoConfig.from_pretrained(this.modelId);
+  async #resolveConfig(
+    transformers: TransformersModule,
+  ): Promise<PretrainedConfigLike | undefined> {
+    const AutoConfig = transformers.AutoConfig;
+    if (!AutoConfig) {
+      // Nothing to repair without it; `from_pretrained` fetches its own config
+      // and the load proceeds exactly as it did before this was added.
+      return undefined;
+    }
+    const config = await AutoConfig.from_pretrained(this.modelId);
     if (config.architectures?.length) {
       return config;
     }
@@ -461,6 +525,38 @@ export class ChatterboxEngine implements SynthesisEngine {
       signal.addEventListener("abort", () => stopper.interrupt(), { once: true });
     }
     return stopper;
+  }
+
+  /**
+   * A stopping criterion that stops nothing and counts everything.
+   *
+   * `StoppingCriteriaList` invokes each criterion once per generated token, so
+   * the call count is exactly what generation produced. Returns undefined on
+   * builds without `StoppingCriteria`, in which case truncation goes
+   * unreported rather than being reported from a number that cannot support
+   * the claim.
+   */
+  #counter(
+    transformers: TransformersModule,
+  ): { criterion: StoppingCriteriaLike; steps: number } | undefined {
+    const Base = transformers.StoppingCriteria;
+    if (!Base) {
+      return undefined;
+    }
+    const state = { steps: 0 };
+    class Counter extends (Base as new () => StoppingCriteriaLike) {
+      override _call(inputIds: number[][]): boolean[] {
+        state.steps += 1;
+        return new Array(inputIds.length).fill(false);
+      }
+    }
+    const criterion = new Counter();
+    return {
+      criterion,
+      get steps() {
+        return state.steps;
+      },
+    };
   }
 
   /** Emit one engine-level milestone, if anyone is listening. */
@@ -492,7 +588,13 @@ export class ChatterboxEngine implements SynthesisEngine {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let declareStalled: ((reason: unknown) => void) | undefined;
 
+    let settled = false;
     const restart = (): void => {
+      // The abandoned operation keeps reporting progress; without this each
+      // event arms a fresh timer that nothing will ever clear.
+      if (settled) {
+        return;
+      }
       if (timer !== undefined) {
         clearTimeout(timer);
       }
@@ -512,6 +614,7 @@ export class ChatterboxEngine implements SynthesisEngine {
     try {
       return await Promise.race([running, stalled]);
     } finally {
+      settled = true;
       if (timer !== undefined) {
         clearTimeout(timer);
       }
@@ -535,10 +638,14 @@ export class ChatterboxEngine implements SynthesisEngine {
     processor: ChatterboxProcessorLike;
     transformers: TransformersModule;
   } {
-    if (!this.#model || !this.#processor || !this.#module) {
+    if (!this.#loaded || !this.#module) {
       throw new VoxShotError("ChatterboxEngine is not loaded. Call load() first.");
     }
-    return { model: this.#model, processor: this.#processor, transformers: this.#module };
+    return {
+      model: this.#loaded.model,
+      processor: this.#loaded.processor,
+      transformers: this.#module,
+    };
   }
 }
 
@@ -549,7 +656,15 @@ export class ChatterboxEngine implements SynthesisEngine {
  */
 export function tokenBudgetFor(text: string): number {
   const estimate = TOKENS_PER_CHARACTER * text.length + TOKEN_BUDGET_BASE;
-  return Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
+  const wanted = Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
+  return Math.min(MAX_TOKEN_BUDGET, wanted);
+}
+
+/** What a successful load produces, replaced as one value. */
+interface Loaded {
+  readonly model: ChatterboxModelLike;
+  readonly processor: ChatterboxProcessorLike;
+  readonly plan: LoadPlan;
 }
 
 /** Render a plan as `device/dtype`, the form used in events and error text. */

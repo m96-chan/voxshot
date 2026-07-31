@@ -259,9 +259,10 @@ tokens  92   185   257   331   403
 ```
 
 The generation budget is therefore sized to each chunk rather than fixed, so a
-full-length chunk is not cut off mid-sentence. If you set `maxNewTokens`
-yourself it is honoured as written — and if the text needs more than you
-allowed, the engine says so rather than letting the audio just end:
+full-length chunk is not cut off mid-sentence, and capped so that a very long
+one cannot ask for minutes of audio in a single call. If you set
+`maxNewTokens` yourself it is honoured as written — and if the text needs more
+than you allowed, the engine says so rather than letting the audio just end:
 
 ```ts
 new ChatterboxEngine({

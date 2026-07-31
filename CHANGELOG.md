@@ -23,6 +23,26 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 
 ### Fixed
 
+- Truncation is detected by counting what generation produced rather than by
+  inferring it from the waveform's length. The old arithmetic assumed a fixed
+  relationship that does not exist — the waveform also depends on the reference
+  voice — so it was calibrated to one voice and wrong for any other. ([#81])
+- An abandoned load can no longer write into the engine. The model, processor
+  and plan are replaced as one value, so a stalled load that later recovers
+  either lands whole or not at all rather than leaving the engine loaded with
+  no known plan. ([#81])
+- Reading the model config is inside the stall guard and inside the error
+  contract: a hung `config.json` is caught rather than waited on forever, and a
+  failure surfaces as a `VoxShotError`. ([#81])
+- `AutoConfig` is optional on `TransformersModule` again. Making it required
+  broke any consumer supplying their own `loadModule`, which was an oversight
+  rather than a decision. ([#81])
+- `stallTimeoutMs` and `maxNewTokens` are validated. `Infinity` reads as "wait
+  forever" but was coerced to 1 ms, failing the load instantly; `maxNewTokens:
+  0` reached generation as a cap of zero. ([#81])
+- An already-aborted request returns before doing any work, instead of paying
+  for a full render and discarding it. ([#81])
+
 - Long chunks are no longer truncated mid-sentence. The chunk budget is
   measured in characters and the generation cap in tokens, and nothing related
   the two: at roughly 2.4 tokens per character the old fixed cap of 256 ran out
@@ -123,3 +143,4 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#67]: https://github.com/m96-chan/voxshot/issues/67
 [#65]: https://github.com/m96-chan/voxshot/issues/65
 [#69]: https://github.com/m96-chan/voxshot/issues/69
+[#81]: https://github.com/m96-chan/voxshot/issues/81

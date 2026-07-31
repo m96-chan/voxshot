@@ -102,16 +102,23 @@ function createModule(): ModuleHarness {
           },
           async generate(params: Record<string, unknown>) {
             harness.generateCalls.push(params);
-            if (harness.tokensUsed !== undefined) {
-              // The vocoder emits a fixed 960 samples per token, plus the
-              // trailing silence — see CHATTERBOX_SAMPLES_PER_TOKEN.
-              const used =
-                harness.tokensUsed === "cap"
-                  ? (params.max_new_tokens as number)
-                  : harness.tokensUsed;
-              const length = 960 * used + 2400;
-              return new FakeTensor("float32", new Float32Array(length), [1, length]);
+            const steps =
+              harness.tokensUsed === "cap"
+                ? (params.max_new_tokens as number)
+                : (harness.tokensUsed ?? 0);
+            // Drive the stopping criteria once per generated token, the way
+            // StoppingCriteriaList is invoked during generation.
+            const criteria = params.stopping_criteria as
+              | { _call?: (ids: number[][], scores: unknown) => boolean[] }[]
+              | undefined;
+            for (let step = 0; step < steps; step += 1) {
+              for (const criterion of criteria ?? []) {
+                criterion._call?.([[0]], null);
+              }
             }
+            // Deliberately unrelated to any constant the engine uses: a fake
+            // that reproduced the engine's own arithmetic could only ever
+            // confirm the engine agrees with itself.
             return new FakeTensor("float32", harness.waveform, [1, harness.waveform.length]);
           },
           async dispose() {
@@ -119,6 +126,11 @@ function createModule(): ModuleHarness {
           },
         };
       },
+    },
+    StoppingCriteria: class {
+      _call(_inputIds: number[][], _scores: unknown): boolean[] {
+        return [false];
+      }
     },
     InterruptableStoppingCriteria: class {
       interrupted = false;
@@ -828,13 +840,13 @@ describe("ChatterboxEngine cancellation", () => {
       signal: controller.signal,
     });
 
-    expect(harness.generateCalls[0]?.stopping_criteria).toBe(harness.stoppers[0]);
+    expect(harness.generateCalls[0]?.stopping_criteria).toContain(harness.stoppers[0]);
   });
 
   it("leaves generate untouched when no signal is supplied", async () => {
     await engine.synthesize({ text: "hello", voice: voice(), speed: 1 });
 
-    expect(harness.generateCalls[0]).not.toHaveProperty("stopping_criteria");
+    // The counter is always present; only the interrupter depends on a signal.
     expect(harness.stoppers).toHaveLength(0);
   });
 
@@ -852,16 +864,18 @@ describe("ChatterboxEngine cancellation", () => {
     expect(harness.stoppers[0]?.interrupted).toBe(true);
   });
 
-  it("discards the truncated waveform an interrupted render leaves behind", async () => {
+  it("does no work at all for an already-aborted request", async () => {
     const controller = new AbortController();
     controller.abort();
 
-    // Aborting before the call means the criterion starts interrupted; the
-    // half-rendered result must not be mistaken for a short utterance.
     await expect(
       engine.synthesize({ text: "gone", voice: voice(), speed: 1, signal: controller.signal }),
     ).rejects.toThrow();
-    expect(harness.stoppers[0]?.interrupted).toBe(true);
+
+    // Not merely discarded afterwards: the processor call, the speaker
+    // tensors, the forward pass and the vocoder are never paid for.
+    expect(harness.generateCalls).toHaveLength(0);
+    expect(harness.processorCalls).toHaveLength(0);
   });
 
   it("still renders on a build without InterruptableStoppingCriteria", async () => {
@@ -880,7 +894,9 @@ describe("ChatterboxEngine cancellation", () => {
     });
 
     expect(samples.length).toBeGreaterThan(0);
-    expect(bare.generateCalls[0]).not.toHaveProperty("stopping_criteria");
+    // The counter still goes in; only the interrupter is missing, so a signal
+    // no longer stops the render but everything else keeps working.
+    expect(bare.stoppers).toHaveLength(0);
   });
 });
 
@@ -1033,5 +1049,60 @@ describe("ChatterboxEngine generation budget", () => {
     await engine.synthesize({ text: "a".repeat(120), voice: voice(), speed: 1 });
 
     expect(events.filter((e) => e.status === "synthesize-truncated")).toHaveLength(0);
+  });
+});
+
+/**
+ * #81: options that cannot mean what a caller would expect them to mean.
+ */
+describe("ChatterboxEngine option validation", () => {
+  it("rejects a stall timeout that would fire immediately", () => {
+    // `Infinity` reads as "wait forever" but setTimeout coerces it to 1 ms,
+    // so the load used to fail almost at once.
+    expect(() => new ChatterboxEngine({ stallTimeoutMs: Number.POSITIVE_INFINITY })).toThrow(
+      InvalidInputError,
+    );
+    expect(() => new ChatterboxEngine({ stallTimeoutMs: Number.NaN })).toThrow(InvalidInputError);
+    expect(() => new ChatterboxEngine({ stallTimeoutMs: -1 })).toThrow(InvalidInputError);
+  });
+
+  it("still accepts zero, the documented way to wait indefinitely", () => {
+    expect(() => new ChatterboxEngine({ stallTimeoutMs: 0 })).not.toThrow();
+  });
+
+  it("rejects a generation cap that cannot bound anything", () => {
+    // `0` is not nullish, so it used to reach generate as a cap of zero and
+    // make every render report itself truncated.
+    expect(() => new ChatterboxEngine({ maxNewTokens: 0 })).toThrow(InvalidInputError);
+    expect(() => new ChatterboxEngine({ maxNewTokens: -5 })).toThrow(InvalidInputError);
+    expect(() => new ChatterboxEngine({ maxNewTokens: 1.5 })).toThrow(InvalidInputError);
+  });
+
+  it("caps a derived budget however long the text is", async () => {
+    const harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+    await engine.load("wasm");
+    await engine.embed(audio());
+
+    await engine.synthesize({
+      text: "a".repeat(20_000),
+      voice: {
+        vector: Float32Array.from([0.1]),
+        sampleRate: CHATTERBOX_SAMPLE_RATE,
+        createdAt: 0,
+        engine: "chatterbox",
+        tensors: {
+          audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+          audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+          speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+          speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+        },
+      },
+      speed: 1,
+    });
+
+    // Without a ceiling this asks for tens of thousands of tokens — minutes of
+    // audio in one call, on an engine that used to be bounded at 256.
+    expect(harness.generateCalls[0]?.max_new_tokens as number).toBeLessThanOrEqual(1024);
   });
 });
