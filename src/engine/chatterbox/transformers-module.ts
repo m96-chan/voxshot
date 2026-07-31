@@ -70,6 +70,18 @@ export interface InterruptableStoppingCriteriaLike {
   interrupt(): void;
 }
 
+/**
+ * Base class for stopping criteria, invoked once per generated token.
+ *
+ * Subclassing it is how the engine counts what generation actually produced.
+ * `generate` returns only a waveform, and a waveform's length depends on the
+ * reference voice as well as the token count, so it cannot be used to recover
+ * one.
+ */
+export interface StoppingCriteriaLike {
+  _call(inputIds: number[][], scores: unknown): boolean[];
+}
+
 export interface TransformersModule {
   readonly Tensor: new (
     type: string,
@@ -88,6 +100,13 @@ export interface TransformersModule {
    * waiting, but the work runs to completion.
    */
   readonly InterruptableStoppingCriteria?: new () => InterruptableStoppingCriteriaLike;
+  /**
+   * Optional for the same reason as above: an older build or a test double
+   * without it still satisfies the type, and truncation simply goes
+   * unreported rather than being reported from a number that cannot support
+   * the claim.
+   */
+  readonly StoppingCriteria?: new () => StoppingCriteriaLike;
   readonly AutoConfig: {
     from_pretrained(
       modelId: string,

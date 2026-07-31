@@ -30,6 +30,10 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   including a processor that fails after the model is built, releases what it
   already holds. ([#86])
 
+- Truncation is detected by counting what generation produced rather than by
+  inferring it from the waveform's length. The old arithmetic assumed a fixed
+  relationship that does not exist — the waveform also depends on the reference
+  voice — so it was calibrated to one voice and wrong for any other. ([#90])
 - Long chunks are no longer truncated mid-sentence. The chunk budget is
   measured in characters and the generation cap in tokens, and nothing related
   the two: at roughly 2.4 tokens per character the old fixed cap of 256 ran out
