@@ -90,6 +90,8 @@ interface Wired {
   worker: RecordingEngine;
   /** The main-thread end of the channel, for posting raw protocol messages. */
   port: MessagePort;
+  /** The worker end, for observing what the main thread sends. */
+  workerPort: MessagePort;
   close: () => void;
 }
 
@@ -106,6 +108,7 @@ function wire(options: Record<string, unknown> = {}): Wired {
     engine,
     worker,
     port: channel.port1,
+    workerPort: channel.port2,
     close: () => {
       stop();
       engine.disconnect();
@@ -751,5 +754,145 @@ describe("when replying itself fails", () => {
     stop();
     channel.port1.close();
     channel.port2.close();
+  });
+});
+
+/**
+ * #80, second pass. Each of these is a route to the same outcome the first
+ * pass was written to close — a promise nothing can settle — reached through
+ * a path that pass did not consider.
+ */
+describe("when the transport fails at an awkward moment", () => {
+  const deliver = async (): Promise<void> => {
+    for (let tick = 0; tick < 4; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  /** An endpoint whose outgoing messages fail when `refuse` says so. */
+  function filteredPort(port: MessagePort, refuse: (message: unknown) => boolean): RpcEndpoint {
+    return {
+      postMessage(message: unknown, transfer?: Transferable[]) {
+        if (refuse(message)) {
+          throw new DOMException("could not be cloned", "DataCloneError");
+        }
+        port.postMessage(message, transfer ?? []);
+      },
+      addEventListener: (type: string, listener: EventListener) =>
+        port.addEventListener(type, listener),
+      removeEventListener: (type: string, listener: EventListener) =>
+        port.removeEventListener(type, listener),
+      start: () => port.start(),
+    } as unknown as RpcEndpoint;
+  }
+
+  it("still rejects a cancelled request when the cancel cannot be sent", async () => {
+    const channel = new MessageChannel();
+    const worker = new RecordingEngine();
+    const stop = exposeEngine(worker, channel.port2);
+    const engine = new WorkerSynthesisEngine(
+      filteredPort(channel.port1, (m) => (m as { method?: string })?.method === "cancel"),
+    );
+    await engine.load("wasm");
+    worker.gate = new Promise<void>(() => {});
+    const controller = new AbortController();
+
+    const call = engine.synthesize({
+      text: "cut me",
+      voice,
+      speed: 1,
+      signal: controller.signal,
+    });
+    const rejected = expect(call).rejects.toBeInstanceOf(VoxShotError);
+    await deliver();
+    controller.abort();
+
+    // Telling the worker is best effort; telling the caller is not.
+    await rejected;
+
+    stop();
+    channel.port1.close();
+    channel.port2.close();
+  });
+
+  it("rejects rather than hangs when the request itself cannot be sent", async () => {
+    const channel = new MessageChannel();
+    const worker = new RecordingEngine();
+    const stop = exposeEngine(worker, channel.port2);
+    const engine = new WorkerSynthesisEngine(
+      filteredPort(channel.port1, (m) => (m as { method?: string })?.method === "embed"),
+      { timeoutMs: 200 },
+    );
+
+    await expect(
+      engine.embed({ samples: new Float32Array(4), sampleRate: 16_000 }),
+    ).rejects.toThrow();
+
+    // A request that never left must not leave a timer behind that later
+    // cancels something the worker never received.
+    await deliver();
+    expect(worker.embedded).toHaveLength(0);
+
+    stop();
+    channel.port1.close();
+    channel.port2.close();
+  });
+
+  it("answers dispose even when its reply cannot be sent", async () => {
+    const channel = new MessageChannel();
+    const worker = new RecordingEngine();
+    let refuseDispose = false;
+    // Only the success reply is refused; the failure notice sent in its place
+    // must still get through, or the fix has nothing to demonstrate.
+    const stop = exposeEngine(
+      worker,
+      filteredPort(channel.port2, (m) => refuseDispose && (m as { ok?: boolean })?.ok === true),
+    );
+    const engine = new WorkerSynthesisEngine(channel.port1, { timeoutMs: 500 });
+    await engine.load("wasm");
+    worker.stubborn = true;
+    worker.gate = new Promise<void>(() => {});
+
+    const wedged = engine.synthesize({ text: "wedged", voice, speed: 1 }).catch(() => undefined);
+    await deliver();
+
+    // The deferred-teardown reply is sent outside `handle`, so nothing there
+    // turns a failed send into an answer.
+    refuseDispose = true;
+    // Without the guard this rejects too — but only once the client's timeout
+    // expires, and with an unhandled rejection on the worker side. The
+    // distinguishing observable is that the failure is reported, not waited out.
+    await expect(engine.dispose()).rejects.not.toThrow(/did not answer/);
+
+    engine.disconnect();
+    await wedged;
+    stop();
+    channel.port1.close();
+    channel.port2.close();
+  });
+
+  it("cancels what it abandons when disconnecting", async () => {
+    const { engine, worker, workerPort } = wire();
+    await engine.load("wasm");
+    const cancelled: number[] = [];
+    // Observe on the worker end: a cancel sent from the main thread arrives
+    // there, not back on the port it was sent from.
+    workerPort.addEventListener("message", (event: MessageEvent) => {
+      const data = event.data as { method?: string; target?: number };
+      if (data?.method === "cancel" && typeof data.target === "number") {
+        cancelled.push(data.target);
+      }
+    });
+    worker.gate = new Promise<void>(() => {});
+
+    const call = engine.synthesize({ text: "running", voice, speed: 1 }).catch(() => undefined);
+    await deliver();
+    engine.disconnect();
+    await deliver();
+
+    // The worker keeps the only slot busy otherwise, and the port may outlive
+    // this engine.
+    expect(cancelled).toHaveLength(1);
+    await call;
   });
 });

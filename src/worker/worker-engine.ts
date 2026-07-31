@@ -126,6 +126,11 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
     if (!this.#connected) {
       return;
     }
+    // Cancel before disconnecting: `#abandon` is a no-op once disconnected,
+    // and a render nobody is waiting for still holds the worker's only slot.
+    for (const id of this.#pending.keys()) {
+      this.#abandon(id);
+    }
     this.#connected = false;
     this.#endpoint.removeEventListener("message", this.#listener);
 
@@ -148,12 +153,18 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
     if (!this.#connected) {
       return;
     }
-    this.#endpoint.postMessage({
-      voxshot: PROTOCOL_VERSION,
-      id: this.#nextId++,
-      method: "cancel",
-      target: id,
-    });
+    try {
+      this.#endpoint.postMessage({
+        voxshot: PROTOCOL_VERSION,
+        id: this.#nextId++,
+        method: "cancel",
+        target: id,
+      });
+    } catch {
+      // Best effort. Delivery can fail, and the caller has already stopped
+      // waiting — but letting this throw would skip the rejection below it
+      // and leave a promise that nothing can ever settle.
+    }
   }
 
   async #send(
@@ -207,8 +218,17 @@ export class WorkerSynthesisEngine implements SynthesisEngine {
         }
         signal?.removeEventListener("abort", onAbort);
       };
+      try {
+        this.#endpoint.postMessage({ voxshot: PROTOCOL_VERSION, id, ...request }, transfer);
+      } catch (cause) {
+        // Registering first would leave an entry nothing settles: its timer
+        // would keep running and later fire a cancel for a request the worker
+        // never received.
+        settle();
+        reject(cause);
+        return;
+      }
       this.#pending.set(id, { resolve, reject, settle });
-      this.#endpoint.postMessage({ voxshot: PROTOCOL_VERSION, id, ...request }, transfer);
     });
   }
 

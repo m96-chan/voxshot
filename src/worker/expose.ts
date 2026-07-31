@@ -68,17 +68,24 @@ export function exposeEngine(
         }
         running = job;
         try {
+          // `handle` answers its own failures and `fail` cannot throw, so this
+          // is not expected to reject. Kept so that a future change there
+          // cannot strand the rest of the queue, but deliberately silent: a
+          // job that reached here has already been answered or is
+          // unanswerable.
           await handle(engine, job.request, endpoint, emitProgress, job.controller.signal);
-        } catch (cause) {
-          // `handle` answers its own failures; reaching here means replying
-          // itself threw. Answering is impossible, so drop this job rather
-          // than let one bad reply strand everything queued behind it.
-          fail(endpoint, job.request.id, cause);
+        } catch {
+          // Nothing left to try; see above.
         } finally {
           running = undefined;
           if (disposeWhenIdle) {
             disposeWhenIdle = false;
-            await engine.dispose().catch(() => undefined);
+            try {
+              await engine.dispose();
+            } catch {
+              // Nobody is waiting for this: the caller was answered when the
+              // teardown was deferred.
+            }
           }
           // Compare by identity: a second engine sharing this endpoint starts
           // its ids at 1 too, so deleting by id alone can remove its entry.
@@ -118,6 +125,12 @@ export function exposeEngine(
    * terminates the worker, which is the documented recovery.
    */
   const teardown = async (request: RequestMessage): Promise<void> => {
+    if (disposed) {
+      // Already torn down. Repeating the work would start a second
+      // engine.dispose(), which is the overlap this queue exists to prevent.
+      reply(endpoint, request.id, null);
+      return;
+    }
     disposed = true;
     for (const job of queue.splice(0)) {
       abandon(job, "The engine was disposed.");
@@ -126,7 +139,13 @@ export function exposeEngine(
     if (running) {
       running.controller.abort();
       disposeWhenIdle = true;
-      reply(endpoint, request.id, null);
+      // Not inside `handle`, so a throw here would go unanswered and surface
+      // as an unhandled rejection rather than becoming a failure notice.
+      try {
+        reply(endpoint, request.id, null);
+      } catch (cause) {
+        fail(endpoint, request.id, cause);
+      }
       return;
     }
     await handle(engine, request, endpoint, emitProgress, undefined);
