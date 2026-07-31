@@ -247,7 +247,15 @@ async function handle(
   }
 }
 
-/** Answer a request with an error. */
+/**
+ * Answer a request with an error.
+ *
+ * Delivery itself can fail — `postMessage` throws on a closed port and on a
+ * payload that cannot be cloned — and this is the last chance to answer, so
+ * there is nothing useful to do with that failure. Swallowing it keeps one
+ * unanswerable request from taking the rest of the queue with it; the caller
+ * is left waiting either way.
+ */
 function fail(endpoint: RpcEndpoint, id: number, cause: unknown): void {
   const message: ResponseMessage = {
     voxshot: PROTOCOL_VERSION,
@@ -255,7 +263,16 @@ function fail(endpoint: RpcEndpoint, id: number, cause: unknown): void {
     ok: false,
     error: serializeError(cause),
   };
-  endpoint.postMessage(message);
+  post(endpoint, message);
+}
+
+/** `postMessage` that cannot throw. See {@link fail}. */
+function post(endpoint: RpcEndpoint, message: unknown, transfer?: Transferable[]): void {
+  try {
+    endpoint.postMessage(message, transfer);
+  } catch {
+    // Nothing left to try: reporting a delivery failure needs delivery.
+  }
 }
 
 function reply(
@@ -265,6 +282,8 @@ function reply(
   transfer?: Transferable[],
 ): void {
   const message: ResponseMessage = { voxshot: PROTOCOL_VERSION, id, ok: true, result };
+  // Deliberately allowed to throw: `handle` turns a failed reply into a
+  // failure notice, which is more useful to the caller than silence.
   endpoint.postMessage(message, transfer);
 }
 

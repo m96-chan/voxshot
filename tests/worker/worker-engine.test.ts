@@ -10,6 +10,7 @@ import {
 import type { PcmAudio } from "../../src/platform.js";
 import type { VoiceEmbedding } from "../../src/voice/types.js";
 import { exposeEngine } from "../../src/worker/expose.js";
+import type { RpcEndpoint } from "../../src/worker/protocol.js";
 import { PROTOCOL_VERSION } from "../../src/worker/protocol.js";
 import { WorkerSynthesisEngine } from "../../src/worker/worker-engine.js";
 import { toArray } from "../helpers/tensor.js";
@@ -687,5 +688,68 @@ describe("lifecycle after teardown and failure", () => {
 
     // "queued" must never reach the engine after the server was told to stop.
     expect(worker.requests.map((r) => r.text)).not.toContain("queued");
+  });
+});
+
+/**
+ * Replying is the one thing that cannot be assumed to work: `postMessage`
+ * throws on a closed port, and on a payload that cannot be cloned. A failure
+ * there must not take the rest of the queue with it.
+ */
+describe("when replying itself fails", () => {
+  const deliver = async (): Promise<void> => {
+    for (let tick = 0; tick < 4; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  /** A port on which every reply to one particular request fails to send. */
+  function brittlePort(port: MessagePort, doomedId: number): RpcEndpoint {
+    return {
+      postMessage(message: unknown, transfer?: Transferable[]) {
+        if ((message as { id?: number })?.id === doomedId) {
+          throw new DOMException("could not be cloned", "DataCloneError");
+        }
+        port.postMessage(message, transfer ?? []);
+      },
+      addEventListener: (type: string, listener: EventListener) =>
+        port.addEventListener(type, listener),
+      removeEventListener: (type: string, listener: EventListener) =>
+        port.removeEventListener(type, listener),
+      start: () => port.start(),
+    } as unknown as RpcEndpoint;
+  }
+
+  it("keeps serving the queue when a job cannot be answered at all", async () => {
+    const channel = new MessageChannel();
+    const worker = new RecordingEngine();
+    // load is id 1, so the first synthesize is id 2. Every attempt to answer
+    // that one fails: its reply, the failure notice sent in its place, and the
+    // drain loop's fallback.
+    const stop = exposeEngine(worker, brittlePort(channel.port2, 2));
+    const engine = new WorkerSynthesisEngine(channel.port1, { timeoutMs: 800 });
+    await engine.load("wasm");
+
+    // The first render is held open so the second is genuinely queued behind
+    // it — otherwise the first finishes before the second even arrives, and
+    // the second starts a fresh drain that hides the problem.
+    let release!: () => void;
+    worker.stubborn = true;
+    worker.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const first = engine.synthesize({ text: "doomed", voice, speed: 1 }).catch(() => undefined);
+    const second = engine.synthesize({ text: "behind it", voice, speed: 1 });
+    await deliver();
+    worker.gate = undefined;
+    release();
+
+    await expect(second).resolves.toBeDefined();
+    await first;
+
+    stop();
+    channel.port1.close();
+    channel.port2.close();
   });
 });
