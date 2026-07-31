@@ -32,6 +32,35 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   away from, instead of leaving it running. ([#67])
 
 ### Fixed
+- `ChatterboxEngine` rejects `stallTimeoutMs` and `maxNewTokens` values that
+  used to do the opposite of what they read like. `stallTimeoutMs: Infinity`
+  spelled "wait forever" and failed the load in about a millisecond, because
+  `setTimeout` coerces the delay to 1; it now means the same as the documented
+  `0`. A value between 0 and 1 is rejected rather than rounded up into a guard
+  that fires before anything can happen. `maxNewTokens: 0` reached the model as
+  a cap of nothing, producing no audio and reporting every call as truncated.
+  ([#81])
+- A budget the engine derives for itself is now capped. `synthesize` is public
+  and bounds nothing, so a long chunk could ask for minutes of audio in one
+  call — and the upstream KV-cache growth scales with the budget. A cap the
+  caller names is still honoured as written. ([#81])
+- `AutoConfig` is optional on `TransformersModule`, like the two criteria
+  classes beside it. `loadModule` is public API, so a custom module written
+  before that member existed no longer dies with an unwrapped `TypeError`. A
+  config that is absent, unreadable or hung now degrades to the load layout
+  used before it existed rather than failing the load. ([#81])
+- The config fetch runs inside the stall guard. It is the load's first network
+  request and used to run before the guard armed, so a hung `config.json` left
+  `load()` pending with no timer to end it. ([#81])
+- A load declared stalled stops emitting. The abandoned transfer kept arming
+  timers nothing would clear, and kept forwarding download progress to a
+  consumer that had already been handed its `LoadStalledError`. ([#81])
+- `synthesize` releases its abort listener after every render, not only a
+  cancelled one. One signal covers a whole utterance, so a 100-chunk render
+  left 100 listeners on it, each holding a stopping criterion. ([#81])
+- An already-aborted `synthesize` renders nothing. The check ran only after
+  generation, so an abandoned request still paid for preprocessing, a forward
+  pass and the full vocoder pass. Empty text is still answered first. ([#81])
 
 - A load that is abandoned, duplicated or disposed underneath no longer leaves
   the engine half-loaded or leaves ONNX sessions with nothing to release them.
@@ -144,5 +173,6 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#67]: https://github.com/m96-chan/voxshot/issues/67
 [#65]: https://github.com/m96-chan/voxshot/issues/65
 [#69]: https://github.com/m96-chan/voxshot/issues/69
+[#81]: https://github.com/m96-chan/voxshot/issues/81
 [#90]: https://github.com/m96-chan/voxshot/issues/90
 [#92]: https://github.com/m96-chan/voxshot/issues/92

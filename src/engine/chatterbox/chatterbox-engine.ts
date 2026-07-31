@@ -75,6 +75,27 @@ const TOKEN_BUDGET_BASE = 20;
 const TOKEN_BUDGET_SAFETY = 1.25;
 /** Enough for a very short prompt to finish naturally. */
 const MIN_TOKEN_BUDGET = 96;
+/**
+ * Ceiling on a budget this engine derives for itself.
+ *
+ * `synthesize` is public and bounds nothing, and `maxChunkLength` belongs to
+ * the caller, so without a ceiling a long chunk asks for minutes of audio in a
+ * single call — and the upstream KV-cache growth (#76) scales with the budget,
+ * so the cost is not only time. 1024 is what the probe in #65 generated with,
+ * about 40 seconds of speech, and far above what a full default chunk needs
+ * (120 characters measured at 331 tokens).
+ *
+ * A cap the caller names is honoured as written and is not clamped by this:
+ * naming a number is a deliberate act, and the documentation promises it.
+ */
+const MAX_TOKEN_BUDGET = 1024;
+
+/**
+ * Above this, `setTimeout` overflows its 32-bit delay and fires at once — the
+ * opposite of the "wait a very long time" the number asks for. Treated as no
+ * guard at all, which is what such a value means.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 
 const DEFAULT_EXAGGERATION = 0.5;
@@ -165,6 +186,9 @@ export interface ChatterboxEngineOptions {
    * for the text ends the audio mid-sentence; see {@link TOKENS_PER_CHARACTER}
    * for the measured relationship, and the `synthesize-truncated` event for
    * when it happens anyway.
+   *
+   * Must be a positive integer. It is honoured as written, including above the
+   * ceiling that applies to a derived budget: naming a number is deliberate.
    */
   maxNewTokens?: number;
   /**
@@ -176,6 +200,12 @@ export interface ChatterboxEngineOptions {
   /**
    * Called with model download progress forwarded from Transformers.js, and
    * with the engine's own {@link ChatterboxLifecycleEvent} milestones.
+   *
+   * Leaving it unset does not make the load cheaper. Transformers.js is always
+   * given a `progress_callback`, because that is the only heartbeat
+   * {@link stallTimeoutMs} has, and upstream gates a metadata probe per
+   * expected file on its presence. Every load pays for that round of requests
+   * whether or not anything is listening.
    */
   onProgress?: (progress: ChatterboxLoadEvent) => void;
   /**
@@ -185,8 +215,13 @@ export interface ChatterboxEngineOptions {
    * because a 1.5 GB download legitimately takes minutes.
    *
    * A hung transfer never rejects on its own, so without this `load()` stays
-   * pending forever and the caller has no error to catch. Set `0` to wait
-   * indefinitely.
+   * pending forever and the caller has no error to catch. Set `0` — or
+   * `Infinity`, which means the same thing — to wait indefinitely.
+   *
+   * Anything else must be at least 1 millisecond. A smaller value is rejected
+   * rather than rounded: `setTimeout` would round it up and fire before the
+   * transfer could produce anything, and it is far more likely to be seconds
+   * written where milliseconds were meant.
    *
    * @defaultValue 300000
    */
@@ -246,12 +281,12 @@ export class ChatterboxEngine implements SynthesisEngine {
   constructor(options: ChatterboxEngineOptions = {}) {
     this.modelId = options.modelId ?? DEFAULT_MODEL_ID;
     this.#dtypeOverrides = options.dtype;
-    this.#maxNewTokens = options.maxNewTokens;
+    this.#maxNewTokens = validateMaxNewTokens(options.maxNewTokens);
     this.#exaggeration = options.exaggeration ?? DEFAULT_EXAGGERATION;
     this.#onProgress = options.onProgress;
     this.#loadModule = options.loadModule ?? defaultModuleLoader;
     this.#supportsFp16 = options.supportsFp16 ?? webGpuSupportsFp16;
-    this.#stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+    this.#stallTimeoutMs = validateStallTimeout(options.stallTimeoutMs);
   }
 
   /** The device / dtype combination that actually loaded, once `load` ran. */
@@ -316,13 +351,18 @@ export class ChatterboxEngine implements SynthesisEngine {
       try {
         const loaded = await this.#withStallGuard(async (notice) => {
           const model = await transformers.ChatterboxModel.from_pretrained(this.modelId, {
-            config,
+            ...(config === undefined ? {} : { config }),
             device: plan.device,
             dtype: plan.dtype,
             // Always supplied, even without an `onProgress` consumer: the
             // stall guard needs these events to know the transfer is alive.
             progress_callback: (progress: LoadProgress) => {
-              notice();
+              // False once the guard has given up on this transfer. Forwarding
+              // then would restart a download commentary for a load the caller
+              // was already told had failed.
+              if (!notice()) {
+                return;
+              }
               this.#onProgress?.(progress);
             },
           });
@@ -421,6 +461,13 @@ export class ChatterboxEngine implements SynthesisEngine {
       return new Float32Array(0);
     }
 
+    // Below the emptiness check on purpose: nothing was going to be rendered
+    // for empty text, so an aborted caller gets the same empty answer as
+    // anyone else. Above everything that costs something — this used to run
+    // only after `generate`, so an abandoned request still paid for the
+    // processor call, the tensors, a forward pass and the whole vocoder pass.
+    request.signal?.throwIfAborted();
+
     const inputs = await processor(trimmed);
     const speaker: Record<string, TensorLike> = {};
     for (const name of SPEAKER_TENSOR_NAMES) {
@@ -437,21 +484,26 @@ export class ChatterboxEngine implements SynthesisEngine {
     // single execution slot busy for its full length (#67).
     const stopper = request.signal ? this.#interrupter(transformers, request.signal) : undefined;
     const counter = this.#counter(transformers);
-    const criteria = [stopper, counter?.criterion].filter((c) => c !== undefined);
+    const criteria = [stopper?.criterion, counter?.criterion].filter((c) => c !== undefined);
 
     // A cap the caller set is honoured as written; otherwise it is sized to
     // this chunk, so a full-length one is not truncated and a short one does
     // not pay for tokens it will never use.
     const budget = this.#maxNewTokens ?? tokenBudgetFor(trimmed);
 
-    const waveform = await model.generate({
-      ...inputs,
-      ...speaker,
-      // Chatterbox's own name for the knob the request calls expressiveness.
-      exaggeration: expressiveness,
-      max_new_tokens: budget,
-      ...(criteria.length > 0 ? { stopping_criteria: criteria } : {}),
-    });
+    let waveform;
+    try {
+      waveform = await model.generate({
+        ...inputs,
+        ...speaker,
+        // Chatterbox's own name for the knob the request calls expressiveness.
+        exaggeration: expressiveness,
+        max_new_tokens: budget,
+        ...(criteria.length > 0 ? { stopping_criteria: criteria } : {}),
+      });
+    } finally {
+      stopper?.release();
+    }
 
     // Interruption leaves a truncated waveform behind; nobody is waiting for
     // it, and returning it would be indistinguishable from a short utterance.
@@ -509,8 +561,29 @@ export class ChatterboxEngine implements SynthesisEngine {
    * architecture the repo already declares is left alone: it knows its own
    * layout better than this default does.
    */
-  async #resolveConfig(transformers: TransformersModule): Promise<PretrainedConfigLike> {
-    const config = await transformers.AutoConfig.from_pretrained(this.modelId);
+  async #resolveConfig(
+    transformers: TransformersModule,
+  ): Promise<PretrainedConfigLike | undefined> {
+    const AutoConfig = transformers.AutoConfig;
+    if (!AutoConfig) {
+      return undefined;
+    }
+    let config: PretrainedConfigLike;
+    try {
+      // Inside the guard: this is the load's first network fetch, and a hung
+      // `config.json` is exactly the failure the guard exists for. It used to
+      // run before the guard armed, so that hang had no timer to end it.
+      //
+      // There is no heartbeat to give it — one small file either arrives or it
+      // does not — so the timeout is a plain deadline here rather than a
+      // silence detector.
+      config = await this.#withStallGuard(() => AutoConfig.from_pretrained(this.modelId));
+    } catch {
+      // Best effort by design. Failing the load would make a member that is
+      // allowed to be absent fatal when it is merely unreachable, which is the
+      // asymmetry this used to have.
+      return undefined;
+    }
     if (config.architectures?.length) {
       return config;
     }
@@ -527,7 +600,7 @@ export class ChatterboxEngine implements SynthesisEngine {
   #interrupter(
     transformers: TransformersModule,
     signal: AbortSignal,
-  ): InterruptableStoppingCriteriaLike | undefined {
+  ): { criterion: InterruptableStoppingCriteriaLike; release: () => void } | undefined {
     const Criteria = transformers.InterruptableStoppingCriteria;
     if (!Criteria) {
       return undefined;
@@ -535,10 +608,18 @@ export class ChatterboxEngine implements SynthesisEngine {
     const stopper = new Criteria();
     if (signal.aborted) {
       stopper.interrupt();
-    } else {
-      signal.addEventListener("abort", () => stopper.interrupt(), { once: true });
+      return { criterion: stopper, release: () => {} };
     }
-    return stopper;
+    const cut = (): void => stopper.interrupt();
+    signal.addEventListener("abort", cut, { once: true });
+    // `once` only removes a listener that fires, and most renders finish
+    // without ever being cancelled. One signal covers a whole utterance, so a
+    // 100-chunk render left 100 listeners on it, each holding a criterion that
+    // will never be asked to stop anything.
+    return {
+      criterion: stopper,
+      release: () => signal.removeEventListener("abort", cut),
+    };
   }
 
   /**
@@ -595,32 +676,61 @@ export class ChatterboxEngine implements SynthesisEngine {
    * unhandled rejection.
    */
   async #withStallGuard<T>(
-    operation: (notice: () => void) => Promise<T>,
+    operation: (notice: () => boolean) => Promise<T>,
     discard?: (value: T) => Promise<void> | void,
   ): Promise<T> {
     if (this.#stallTimeoutMs <= 0) {
-      return operation(() => {});
+      return operation(() => true);
     }
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let declareStalled: ((reason: unknown) => void) | undefined;
+    let settled = false;
 
-    const restart = (): void => {
+    const clear = (): void => {
       if (timer !== undefined) {
         clearTimeout(timer);
+        timer = undefined;
       }
+    };
+
+    /**
+     * Report that the operation is alive, and say whether anyone is listening.
+     *
+     * A transfer the guard gave up on keeps running and keeps calling this.
+     * Re-arming then is worse than useless: nothing clears those timers, and
+     * the caller has already been handed its `LoadStalledError`. The return
+     * value lets the operation stay quiet too, rather than resuming a progress
+     * commentary the consumer stopped expecting.
+     */
+    const notice = (): boolean => {
+      if (settled) {
+        return false;
+      }
+      clear();
       timer = setTimeout(() => {
         declareStalled?.(new LoadStalledError(this.#stallTimeoutMs));
       }, this.#stallTimeoutMs);
+      return true;
     };
 
     const stalled = new Promise<never>((_, reject) => {
       declareStalled = reject;
     });
 
-    restart();
+    notice();
     let abandoned = false;
-    const running = operation(restart);
+    let running: Promise<T>;
+    try {
+      running = operation(notice);
+    } catch (cause) {
+      // A synchronous throw skips the try/finally below entirely, so the timer
+      // armed a moment ago would outlive the call. Not every operation is an
+      // async function: `#resolveConfig` hands over a plain arrow.
+      settled = true;
+      clear();
+      throw cause;
+    }
     running.then(
       (value) => {
         // A stalled transfer can recover after the guard has given up. What it
@@ -639,9 +749,8 @@ export class ChatterboxEngine implements SynthesisEngine {
       abandoned = true;
       throw cause;
     } finally {
-      if (timer !== undefined) {
-        clearTimeout(timer);
-      }
+      settled = true;
+      clear();
     }
   }
 
@@ -680,7 +789,57 @@ export class ChatterboxEngine implements SynthesisEngine {
  */
 function tokenBudgetFor(text: string): number {
   const estimate = TOKENS_PER_CHARACTER * text.length + TOKEN_BUDGET_BASE;
-  return Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
+  const wanted = Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));
+  return Math.min(MAX_TOKEN_BUDGET, wanted);
+}
+
+/**
+ * A cap has to be a whole number of tokens, and at least one.
+ *
+ * `0` is the one that matters: it is not nullish, so it used to reach
+ * `generate` as a cap of nothing, producing no audio and reporting every call
+ * as truncated.
+ */
+function validateMaxNewTokens(value: number | undefined): number | undefined {
+  // `== null` on purpose: this used to be a plain assignment behind `??`, and
+  // a config deserialised from JSON says null for "unset". Rejecting it would
+  // be a change nobody asked for.
+  if (value == null) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || value < 1) {
+    throw new InvalidInputError("maxNewTokens must be a positive integer.");
+  }
+  return value;
+}
+
+/**
+ * Resolve `stallTimeoutMs`, returning 0 for "no guard".
+ *
+ * `0` is the documented escape hatch, but `Infinity` is the intuitive spelling
+ * of the same intent and used to do the opposite: the guard armed, `setTimeout`
+ * coerced the delay to 1 ms, and the load failed almost immediately. Anything
+ * beyond what a timer can express is read as the same request.
+ *
+ * A value between 0 and 1 is rejected rather than rounded. `setTimeout` rounds
+ * it up to 1 ms, so it would arm a guard that fires before anything can
+ * happen — and it is far more likely to be seconds written where milliseconds
+ * were meant than a real sub-millisecond deadline.
+ */
+function validateStallTimeout(value: number | undefined): number {
+  // See validateMaxNewTokens: null means unset here too, as `??` had it.
+  if (value == null) {
+    return DEFAULT_STALL_TIMEOUT_MS;
+  }
+  // The type check is load-bearing, not belt and braces: every comparison
+  // against a non-number is false, so a range check alone lets one through to
+  // setTimeout, which reads it as NaN and fires in 1 ms.
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0 || (value > 0 && value < 1)) {
+    throw new InvalidInputError(
+      "stallTimeoutMs must be 0 to disable the guard, or at least 1 millisecond.",
+    );
+  }
+  return value > MAX_TIMER_DELAY_MS ? 0 : value;
 }
 
 /**

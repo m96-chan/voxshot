@@ -28,9 +28,15 @@ interface ModuleHarness {
   /** What the repo's `config.json` contains before the engine touches it. */
   repoConfig: Record<string, unknown>;
   configLoads: number;
+  /** When true, `AutoConfig.from_pretrained` rejects. */
+  configFails: boolean;
+  /** When true, `AutoConfig.from_pretrained` never settles. */
+  configHangs: boolean;
   encodeCalls: TensorLike[];
   generateCalls: Record<string, unknown>[];
   processorCalls: string[];
+  /** Runs inside the processor call, so a test can abort mid-preprocessing. */
+  onProcess: (() => Promise<void> | void) | undefined;
   disposeCalls: number;
   failOn: (device: string, modelDtype: string) => boolean;
   /** When true for a plan, `from_pretrained` returns a promise that never settles. */
@@ -58,9 +64,12 @@ function createModule(): ModuleHarness {
     // exactly why resolve_model_type falls back (#45).
     repoConfig: { model_type: "chatterbox", text_config: { hidden: 1 } },
     configLoads: 0,
+    configFails: false,
+    configHangs: false,
     encodeCalls: [],
     generateCalls: [],
     processorCalls: [],
+    onProcess: undefined,
     disposeCalls: 0,
     failOn: () => false,
     hangOn: () => false,
@@ -175,6 +184,12 @@ function createModule(): ModuleHarness {
     AutoConfig: {
       async from_pretrained() {
         harness.configLoads += 1;
+        if (harness.configHangs) {
+          return new Promise<never>(() => {});
+        }
+        if (harness.configFails) {
+          throw new Error("config.json is unreachable");
+        }
         return { ...harness.repoConfig };
       },
     },
@@ -187,6 +202,7 @@ function createModule(): ModuleHarness {
         }
         return async (text: string) => {
           harness.processorCalls.push(text);
+          await harness.onProcess?.();
           return {
             input_ids: new FakeTensor("int64", BigInt64Array.from([1n, 2n]), [1, 2]),
             attention_mask: new FakeTensor("int64", BigInt64Array.from([1n, 1n]), [1, 2]),
@@ -902,12 +918,14 @@ describe("ChatterboxEngine cancellation", () => {
     expect(harness.stoppers[0]?.interrupted).toBe(true);
   });
 
-  it("discards the truncated waveform an interrupted render leaves behind", async () => {
+  it("starts the criterion interrupted when the abort lands during preprocessing", async () => {
+    // The gap between the up-front abort check and the criterion being built:
+    // `processor(text)` is awaited in between, so a signal can go from live to
+    // aborted while the render is still committing to happen. The criterion
+    // has to notice, or nothing will stop the token loop.
     const controller = new AbortController();
-    controller.abort();
+    harness.onProcess = () => controller.abort();
 
-    // Aborting before the call means the criterion starts interrupted; the
-    // half-rendered result must not be mistaken for a short utterance.
     await expect(
       engine.synthesize({ text: "gone", voice: voice(), speed: 1, signal: controller.signal }),
     ).rejects.toThrow();
@@ -1294,5 +1312,287 @@ describe("ChatterboxEngine truncation detection", () => {
     // Degrades to silence rather than to a number it cannot justify.
     expect(samples.length).toBeGreaterThan(0);
     expect(truncations(events)).toHaveLength(0);
+  });
+});
+
+describe("ChatterboxEngine option validation", () => {
+  const build = (options: Record<string, unknown>) => () =>
+    new ChatterboxEngine({ loadModule: async () => createModule().module, ...options });
+
+  it.each([
+    ["under a millisecond, which setTimeout rounds up and fires at once", 0.4],
+    ["negative", -1],
+    ["not a number at all", Number.NaN],
+    // Every comparison against a non-number is false, so one slips past a
+    // check written as a range and reaches setTimeout, which reads it as NaN
+    // and fires in 1 ms. The same shape of failure as Infinity, from JavaScript
+    // rather than from the timer.
+    ["not a number even in type", {} as unknown as number],
+    ["a string that looks like one", "500" as unknown as number],
+  ])("refuses a stall timeout that is %s", (_why, stallTimeoutMs) => {
+    expect(build({ stallTimeoutMs })).toThrow(InvalidInputError);
+  });
+
+  it("waits forever when the stall timeout is Infinity", async () => {
+    // The intuitive spelling of "never give up". It used to arm the guard and
+    // reject in about a millisecond, because setTimeout coerces Infinity to 1.
+    const harness = createModule();
+    harness.hangOn = () => true;
+    const engine = new ChatterboxEngine({
+      loadModule: async () => harness.module,
+      stallTimeoutMs: Number.POSITIVE_INFINITY,
+    });
+
+    const settled = vi.fn();
+    void engine.load("wasm").then(settled, settled);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(settled).not.toHaveBeenCalled();
+  });
+
+  it("reads null as unset, the way ?? did before these checks existed", () => {
+    // Not reachable from TypeScript, but `?? DEFAULT` treated null and
+    // undefined alike and a config deserialised from JSON says null for
+    // "unset". Rejecting it would be a change nobody asked for.
+    expect(
+      build({ stallTimeoutMs: null as unknown as number, maxNewTokens: null as unknown as number }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    ["zero, which reaches generate as a cap of nothing", 0],
+    ["fractional", 12.5],
+    ["negative", -8],
+  ])("refuses a token cap that is %s", (_why, maxNewTokens) => {
+    expect(build({ maxNewTokens })).toThrow(InvalidInputError);
+  });
+});
+
+describe("ChatterboxEngine budget ceiling", () => {
+  let harness: ModuleHarness;
+
+  const voice = (): VoiceEmbedding => ({
+    vector: Float32Array.from([0.1]),
+    sampleRate: CHATTERBOX_SAMPLE_RATE,
+    createdAt: 0,
+    engine: "chatterbox",
+    tensors: {
+      audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+      speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+    },
+  });
+
+  const ready = async (overrides: Record<string, unknown> = {}) => {
+    harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module, ...overrides });
+    await engine.load("wasm");
+    await engine.embed(audio());
+    return engine;
+  };
+
+  it("caps the budget it derives, however long the chunk", async () => {
+    // `synthesize` is public and takes any length, and maxChunkLength is the
+    // caller's to set, so the derived budget has to stop somewhere: minutes of
+    // audio in one call is not a request anyone meant to make.
+    const engine = await ready();
+
+    await engine.synthesize({ text: "a".repeat(20_000), voice: voice(), speed: 1 });
+
+    const budget = harness.generateCalls[0]?.max_new_tokens as number;
+    expect(budget).toBeLessThan(2_000);
+  });
+
+  it("still honours a cap the caller named, above the ceiling or not", async () => {
+    // Documented as honoured as written. Someone who names a number means it.
+    const engine = await ready({ maxNewTokens: 8_000 });
+
+    await engine.synthesize({ text: "hi", voice: voice(), speed: 1 });
+
+    expect(harness.generateCalls[0]?.max_new_tokens).toBe(8_000);
+  });
+});
+
+describe("ChatterboxEngine config resolution", () => {
+  // Naming the architecture is what silences the two 404s and repairs the
+  // download denominator (#45). None of that is worth failing a load over: an
+  // engine that cannot read config.json still loads, exactly as it did before
+  // #45 existed. So absent, failing and hung are all the same answer.
+
+  it("loads on a build that does not export AutoConfig", async () => {
+    const bare = createModule();
+    delete (bare.module as { AutoConfig?: unknown }).AutoConfig;
+    const engine = new ChatterboxEngine({ loadModule: async () => bare.module });
+
+    await engine.load("wasm");
+
+    expect(engine.loadedPlan).toBeDefined();
+    expect(bare.attempts[0]?.config).toBeUndefined();
+  });
+
+  it("loads when the config cannot be read", async () => {
+    const harness = createModule();
+    harness.configFails = true;
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+    await engine.load("wasm");
+
+    expect(engine.loadedPlan).toBeDefined();
+    expect(harness.attempts[0]?.config).toBeUndefined();
+  });
+
+  it("gives up on a config that never arrives instead of waiting forever", async () => {
+    // The first network fetch of the load, and it used to sit outside the
+    // stall guard entirely: a hung config.json left load() pending with no
+    // timer to end it.
+    const harness = createModule();
+    harness.configHangs = true;
+    const engine = new ChatterboxEngine({
+      loadModule: async () => harness.module,
+      stallTimeoutMs: 20,
+    });
+
+    await engine.load("wasm");
+
+    expect(engine.loadedPlan).toBeDefined();
+    expect(harness.attempts[0]?.config).toBeUndefined();
+  });
+
+  it("still names the architecture when the config is readable", async () => {
+    const harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+    await engine.load("wasm");
+
+    expect((harness.attempts[0]?.config as { architectures?: string[] })?.architectures).toEqual([
+      "ChatterboxModel",
+    ]);
+  });
+});
+
+describe("ChatterboxEngine stall guard aftermath", () => {
+  it("goes quiet once it has declared the load stalled", async () => {
+    // The abandoned transfer keeps running and keeps emitting. A consumer that
+    // has already handled LoadStalledError and moved on should not start
+    // receiving download progress again.
+    const harness = createModule();
+    harness.hangOn = () => true;
+    const events: ChatterboxLoadEvent[] = [];
+    const engine = new ChatterboxEngine({
+      loadModule: async () => harness.module,
+      stallTimeoutMs: 20,
+      onProgress: (event) => events.push(event),
+    });
+
+    await expect(engine.load("wasm")).rejects.toBeInstanceOf(LoadStalledError);
+    const before = events.length;
+    harness.lastProgressCallback?.({ status: "progress", file: "model.onnx", progress: 40 });
+
+    expect(events).toHaveLength(before);
+  });
+
+  it("leaves no timer behind when the operation throws on the spot", async () => {
+    // `#resolveConfig` hands the guard a plain arrow, so a module whose
+    // from_pretrained throws synchronously never reaches the guard's own
+    // try/finally. The timer it armed would outlive the call.
+    vi.useFakeTimers();
+    try {
+      const harness = createModule();
+      (harness.module as unknown as { AutoConfig: unknown }).AutoConfig = {
+        from_pretrained: () => {
+          throw new Error("thrown before any promise exists");
+        },
+      };
+      const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+
+      await engine.load("wasm");
+
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("ChatterboxEngine per-render cleanup", () => {
+  const voice = (): VoiceEmbedding => ({
+    vector: Float32Array.from([0.1]),
+    sampleRate: CHATTERBOX_SAMPLE_RATE,
+    createdAt: 0,
+    engine: "chatterbox",
+    tensors: {
+      audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+      speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+    },
+  });
+
+  const ready = async () => {
+    const harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+    await engine.load("wasm");
+    await engine.embed(audio());
+    return { engine, harness };
+  };
+
+  it("lets go of the signal after every render, not just the aborted one", async () => {
+    // SpeechPlayback uses one controller for a whole utterance, so a 100-chunk
+    // render put 100 listeners on one signal, each holding a stopping
+    // criterion that will never be asked to stop anything.
+    const { engine } = await ready();
+    const controller = new AbortController();
+    const live = new Set<unknown>();
+    const signal = controller.signal;
+    const add = signal.addEventListener.bind(signal);
+    const remove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = ((type: string, fn: never, options?: never) => {
+      live.add(fn);
+      add(type, fn, options);
+    }) as unknown as typeof signal.addEventListener;
+    signal.removeEventListener = ((type: string, fn: never, options?: never) => {
+      live.delete(fn);
+      remove(type, fn, options);
+    }) as unknown as typeof signal.removeEventListener;
+
+    for (let chunk = 0; chunk < 5; chunk += 1) {
+      await engine.synthesize({ text: `chunk ${chunk}`, voice: voice(), speed: 1, signal });
+    }
+
+    expect(live.size).toBe(0);
+  });
+
+  it("does no work at all for a request that is already aborted", async () => {
+    // The check used to run only after `generate`, so an abandoned request
+    // still paid for the processor call, the tensors, a forward pass and the
+    // whole vocoder pass before anyone looked at the signal.
+    const { engine, harness } = await ready();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      engine.synthesize({ text: "never mind", voice: voice(), speed: 1, signal: controller.signal }),
+    ).rejects.toThrow();
+
+    expect(harness.processorCalls).toHaveLength(0);
+    expect(harness.generateCalls).toHaveLength(0);
+  });
+
+  it("still answers empty text before it looks at the signal", async () => {
+    // Ordering: nothing was going to be rendered anyway, so an aborted caller
+    // gets the same empty answer as anyone else rather than an abort.
+    const { engine } = await ready();
+    const controller = new AbortController();
+    controller.abort();
+
+    const samples = await engine.synthesize({
+      text: "   ",
+      voice: voice(),
+      speed: 1,
+      signal: controller.signal,
+    });
+
+    expect(samples).toHaveLength(0);
   });
 });
