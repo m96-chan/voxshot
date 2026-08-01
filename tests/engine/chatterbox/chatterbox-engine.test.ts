@@ -15,11 +15,37 @@ import { toArray } from "../../helpers/tensor.js";
 
 /** Stand-in for `@huggingface/transformers`' Tensor. */
 class FakeTensor implements TensorLike {
+  disposed = false;
+
   constructor(
     readonly type: string,
-    readonly data: Float32Array | BigInt64Array,
+    data: Float32Array | BigInt64Array,
     readonly dims: number[],
-  ) {}
+    /** Every tensor the fake hands out, so a test can inspect all of them. */
+    registry?: FakeTensor[],
+  ) {
+    this.#data = data;
+    registry?.push(this);
+  }
+
+  readonly #data: Float32Array | BigInt64Array;
+
+  /**
+   * Reading after disposal throws, the way a released GPU buffer would.
+   *
+   * This is what makes the ordering testable: a kernel that frees before it
+   * copies passes a "was it disposed" assertion and fails here.
+   */
+  get data(): Float32Array | BigInt64Array {
+    if (this.disposed) {
+      throw new Error("read from a disposed tensor");
+    }
+    return this.#data;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+  }
 }
 
 interface ModuleHarness {
@@ -32,7 +58,13 @@ interface ModuleHarness {
   configFails: boolean;
   /** When true, `AutoConfig.from_pretrained` never settles. */
   configHangs: boolean;
-  encodeCalls: TensorLike[];
+  /**
+   * What `encode_speech` was handed, snapshotted at the call.
+   *
+   * A snapshot rather than the tensor, because the engine releases it before
+   * returning and a released tensor cannot be read — which is the point.
+   */
+  encodeCalls: { type: string; dims: readonly number[]; length: number }[];
   generateCalls: Record<string, unknown>[];
   processorCalls: string[];
   /** Runs inside the processor call, so a test can abort mid-preprocessing. */
@@ -49,6 +81,8 @@ interface ModuleHarness {
   modelsCreated: number;
   /** Last `progress_callback` handed to `from_pretrained`, so tests can drive it. */
   lastProgressCallback: ((progress: Record<string, unknown>) => void) | undefined;
+  /** Every tensor the engine or the fake model created. */
+  tensors: FakeTensor[];
   /** Every stopping criterion the engine constructed. */
   stoppers: { interrupted: boolean }[];
   /** Tokens the fake should claim to have produced; "cap" means it ran out. */
@@ -77,6 +111,7 @@ function createModule(): ModuleHarness {
     failProcessor: false,
     modelsCreated: 0,
     lastProgressCallback: undefined,
+    tensors: [],
     stoppers: [],
     tokensUsed: undefined,
     waveform: Float32Array.from([0, 0.5, -0.5, 0.25]),
@@ -84,15 +119,21 @@ function createModule(): ModuleHarness {
     module: undefined as unknown as TransformersModule,
   };
 
+  // Registered too: what `encode_speech` returns is as much the engine's to
+  // release as what it constructed itself.
   const speakerOutputs = () => ({
-    audio_features: new FakeTensor("float32", Float32Array.from([1, 2]), [1, 1, 2]),
-    audio_tokens: new FakeTensor("int64", BigInt64Array.from([3n, 4n]), [1, 2]),
-    speaker_embeddings: new FakeTensor("float32", Float32Array.from([0.1, 0.2, 0.3]), [1, 3]),
-    speaker_features: new FakeTensor("float32", Float32Array.from([5, 6]), [1, 1, 2]),
+    audio_features: new FakeTensor("float32", Float32Array.from([1, 2]), [1, 1, 2], harness.tensors),
+    audio_tokens: new FakeTensor("int64", BigInt64Array.from([3n, 4n]), [1, 2], harness.tensors),
+    speaker_embeddings: new FakeTensor("float32", Float32Array.from([0.1, 0.2, 0.3]), [1, 3], harness.tensors),
+    speaker_features: new FakeTensor("float32", Float32Array.from([5, 6]), [1, 1, 2], harness.tensors),
   });
 
   harness.module = {
-    Tensor: FakeTensor as unknown as TransformersModule["Tensor"],
+    Tensor: class extends FakeTensor {
+      constructor(type: string, data: Float32Array | BigInt64Array, dims: number[]) {
+        super(type, data, dims, harness.tensors);
+      }
+    } as unknown as TransformersModule["Tensor"],
     ChatterboxModel: {
       async from_pretrained(modelId, options) {
         const dtype = options.dtype as Record<string, string>;
@@ -121,11 +162,26 @@ function createModule(): ModuleHarness {
           harness.modelsCreated += 1;
           return {
           async encode_speech(audioValues: TensorLike) {
-            harness.encodeCalls.push(audioValues);
+            harness.encodeCalls.push({
+              type: audioValues.type,
+              dims: [...audioValues.dims],
+              length: audioValues.data.length,
+            });
             return speakerOutputs();
           },
           async generate(params: Record<string, unknown>) {
-            harness.generateCalls.push(params);
+            // Snapshotted, not held: the engine releases the speaker tensors
+            // when the call ends, and a released tensor cannot be read.
+            harness.generateCalls.push(
+              Object.fromEntries(
+                Object.entries(params).map(([key, value]) => {
+                  const tensor = value as { type?: string; dims?: number[]; data?: ArrayLike<unknown> };
+                  return tensor?.dims && tensor?.data
+                    ? [key, { type: tensor.type, dims: [...tensor.dims], data: [...(tensor.data as ArrayLike<unknown>[])] }]
+                    : [key, value];
+                }),
+              ),
+            );
 
             // Drive the stopping criteria the way StoppingCriteriaList does:
             // once per generated token, after the token would have been
@@ -147,7 +203,7 @@ function createModule(): ModuleHarness {
             // Deliberately unrelated to any constant the engine uses. A fake
             // that reproduced the engine's own arithmetic could only ever
             // confirm the engine agrees with itself.
-            return new FakeTensor("float32", harness.waveform, [1, harness.waveform.length]);
+            return new FakeTensor("float32", harness.waveform, [1, harness.waveform.length], harness.tensors);
           },
           async dispose() {
             harness.disposeCalls += 1;
@@ -677,10 +733,10 @@ describe("ChatterboxEngine", () => {
 
       await engine.embed(reference);
 
-      const tensor = harness.encodeCalls[0] as FakeTensor;
-      expect(tensor.type).toBe("float32");
-      expect(tensor.dims).toEqual([1, 1_000]);
-      expect(tensor.data).toHaveLength(1_000);
+      const tensor = harness.encodeCalls[0];
+      expect(tensor?.type).toBe("float32");
+      expect(tensor?.dims).toEqual([1, 1_000]);
+      expect(tensor?.length).toBe(1_000);
     });
 
     it("returns the speaker embeddings as the primary vector", async () => {
@@ -771,7 +827,7 @@ describe("ChatterboxEngine", () => {
       expect(params.attention_mask).toBeDefined();
       expect(params.speaker_embeddings?.dims).toEqual([1, 3]);
       expect(params.audio_tokens?.type).toBe("int64");
-      expect(toArray(params.audio_tokens?.data)).toEqual([3n, 4n]);
+      expect(params.audio_tokens?.data).toEqual([3n, 4n]);
     });
 
     it("applies the configured generation parameters", async () => {
@@ -1743,5 +1799,94 @@ describe("ChatterboxEngine compile milestone", () => {
     });
 
     expect(mid).toBe(0);
+  });
+});
+
+describe("ChatterboxEngine tensor disposal", () => {
+  const voice = (): VoiceEmbedding => ({
+    vector: Float32Array.from([0.1]),
+    sampleRate: CHATTERBOX_SAMPLE_RATE,
+    createdAt: 0,
+    engine: "chatterbox",
+    tensors: {
+      audio_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      audio_tokens: { type: "int64", dims: [1], data: BigInt64Array.from([1n]) },
+      speaker_embeddings: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+      speaker_features: { type: "float32", dims: [1], data: Float32Array.from([1]) },
+    },
+  });
+
+  const ready = async () => {
+    const harness = createModule();
+    const engine = new ChatterboxEngine({ loadModule: async () => harness.module });
+    await engine.load("wasm");
+    return { harness, engine };
+  };
+
+  const leaked = (harness: ModuleHarness) => harness.tensors.filter((t) => !t.disposed);
+
+  it("releases every tensor embed touched", async () => {
+    // GPU buffers are not something the garbage collector can feel pressure
+    // from, so dropping the reference is not the same as freeing it.
+    const { harness, engine } = await ready();
+
+    await engine.embed(audio());
+
+    expect(harness.tensors.length).toBeGreaterThan(0);
+    expect(leaked(harness)).toHaveLength(0);
+  });
+
+  it("releases every tensor synthesize touched", async () => {
+    const { harness, engine } = await ready();
+    await engine.embed(audio());
+    harness.tensors.length = 0;
+
+    await engine.synthesize({ text: "hello", voice: voice(), speed: 1 });
+
+    // Four speaker tensors plus the waveform, at least.
+    expect(harness.tensors.length).toBeGreaterThanOrEqual(5);
+    expect(leaked(harness)).toHaveLength(0);
+  });
+
+  it("does not leak across repeated calls", async () => {
+    // The reported symptom is growth over hours of use, so one call proving
+    // clean says less than many calls staying clean.
+    const { harness, engine } = await ready();
+    await engine.embed(audio());
+
+    for (let call = 0; call < 12; call += 1) {
+      await engine.synthesize({ text: `chunk ${call}`, voice: voice(), speed: 1 });
+    }
+
+    expect(leaked(harness)).toHaveLength(0);
+  });
+
+  it("copies the samples out before releasing the waveform", async () => {
+    // Ordering, and the reason the fake throws on a disposed read: freeing
+    // first would pass a "was it disposed" assertion and return nothing.
+    const { harness, engine } = await ready();
+    await engine.embed(audio());
+    harness.waveform = Float32Array.from([0.25, -0.5, 0.75, -1]);
+
+    const samples = await engine.synthesize({ text: "hi", voice: voice(), speed: 1 });
+
+    expect([...samples]).toEqual([0.25, -0.5, 0.75, -1]);
+    expect(leaked(harness)).toHaveLength(0);
+  });
+
+  it("still renders on a build whose tensors cannot be disposed", async () => {
+    // Optional on the type, like InterruptableStoppingCriteria: an older build
+    // or a test double without it has to keep working.
+    const bare = createModule();
+    for (const proto of [bare.module.Tensor.prototype]) {
+      delete (proto as { dispose?: unknown }).dispose;
+    }
+    const engine = new ChatterboxEngine({ loadModule: async () => bare.module });
+    await engine.load("wasm");
+    await engine.embed(audio());
+
+    const samples = await engine.synthesize({ text: "hi", voice: voice(), speed: 1 });
+
+    expect(samples.length).toBeGreaterThan(0);
   });
 });
