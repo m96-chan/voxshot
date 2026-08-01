@@ -476,20 +476,26 @@ export class ChatterboxEngine implements SynthesisEngine {
       1,
       audio.samples.length,
     ]);
-    const outputs = (await model.encode_speech(audioValues)) as unknown as Record<string, TensorLike>;
+    let outputs: Record<string, TensorLike> | undefined;
+    try {
+      outputs = (await model.encode_speech(audioValues)) as unknown as Record<string, TensorLike>;
 
-    const tensors: Record<string, VoiceTensor> = {};
-    for (const name of SPEAKER_TENSOR_NAMES) {
-      const tensor = outputs[name];
-      if (!tensor) {
-        throw new VoxShotError(`The speech encoder did not return "${name}".`);
+      const tensors: Record<string, VoiceTensor> = {};
+      for (const name of SPEAKER_TENSOR_NAMES) {
+        const tensor = outputs[name];
+        if (!tensor) {
+          throw new VoxShotError(`The speech encoder did not return "${name}".`);
+        }
+        // Copies into plain typed arrays, so the tensors are free to go.
+        tensors[name] = toVoiceTensor(tensor);
       }
-      tensors[name] = toVoiceTensor(tensor);
+      return {
+        vector: Float32Array.from(tensors.speaker_embeddings?.data as Float32Array),
+        tensors,
+      };
+    } finally {
+      releaseTensors(audioValues, ...(outputs ? SPEAKER_TENSOR_NAMES.map((name) => outputs?.[name]) : []));
     }
-    return {
-      vector: Float32Array.from(tensors.speaker_embeddings?.data as Float32Array),
-      tensors,
-    };
   }
 
   /** Render one chunk of speech with the given voice. */
@@ -531,13 +537,21 @@ export class ChatterboxEngine implements SynthesisEngine {
     request.signal?.throwIfAborted();
 
     const inputs = await processor(trimmed);
+    // Built inside the guard, not before it: the loop throws on a voice that
+    // is missing a tensor, and whatever it managed to build first is still
+    // this call's to release.
     const speaker: Record<string, TensorLike> = {};
-    for (const name of SPEAKER_TENSOR_NAMES) {
-      const tensor = voice.tensors[name];
-      if (!tensor) {
-        throw new InvalidInputError(`This voice is missing the "${name}" tensor.`);
+    try {
+      for (const name of SPEAKER_TENSOR_NAMES) {
+        const tensor = voice.tensors[name];
+        if (!tensor) {
+          throw new InvalidInputError(`This voice is missing the "${name}" tensor.`);
+        }
+        speaker[name] = new transformers.Tensor(tensor.type, tensor.data, [...tensor.dims]);
       }
-      speaker[name] = new transformers.Tensor(tensor.type, tensor.data, [...tensor.dims]);
+    } catch (cause) {
+      releaseTensors(...Object.values(speaker));
+      throw cause;
     }
 
     // `ChatterboxModel.generate` spreads its params straight into the base
@@ -565,13 +579,28 @@ export class ChatterboxEngine implements SynthesisEngine {
       });
     } finally {
       stopper?.release();
+      // The speaker tensors are built per call from the voice's plain arrays,
+      // so they are this call's to free regardless of how it ended.
+      releaseTensors(...Object.values(speaker));
     }
 
-    // Interruption leaves a truncated waveform behind; nobody is waiting for
-    // it, and returning it would be indistinguishable from a short utterance.
-    request.signal?.throwIfAborted();
-
+    // Copied first, released second — never the other way round. Reading a
+    // disposed tensor throws in ONNX Runtime, so this is an ordering
+    // requirement rather than a tidiness preference.
+    //
+    // The waveform is on the CPU today: Transformers.js pins only `present.*`
+    // to `gpu-buffer` (`session.js`, guarded by `prefix: 'present'`), so the
+    // KV cache is the sole GPU-resident output. That is why reading `.data`
+    // works here, and it is also why the cache is what #76 is about — the one
+    // thing living on the GPU is the one thing nobody disposes.
     const samples = Float32Array.from(waveform.data as Float32Array);
+    releaseTensors(waveform);
+
+    // After the release, deliberately. Cancellation is the likeliest way out
+    // of a render, and throwing while the waveform was still held leaked the
+    // very tensor this is about. The samples are discarded either way — a
+    // truncated render must not be mistaken for a short utterance.
+    request.signal?.throwIfAborted();
 
     // Counted, not inferred. The waveform's length depends on the reference
     // voice as well as the token count, so recovering one from it was never
@@ -849,6 +878,25 @@ export class ChatterboxEngine implements SynthesisEngine {
  *
  * See {@link TOKENS_PER_CHARACTER} for the measurement this comes from.
  */
+/**
+ * Release tensors once their contents have been copied out.
+ *
+ * Never before: reading a disposed tensor throws in ONNX Runtime, so the order
+ * is not a preference. Failures are swallowed because there is nothing useful
+ * to do with them — the call that produced the data has already succeeded, and
+ * turning a cleanup problem into a synthesis error would trade a leak for a
+ * broken render.
+ */
+function releaseTensors(...tensors: (TensorLike | undefined)[]): void {
+  for (const tensor of tensors) {
+    try {
+      tensor?.dispose?.();
+    } catch {
+      // Already gone, or a build that cannot. Either way the data is copied.
+    }
+  }
+}
+
 function tokenBudgetFor(text: string): number {
   const estimate = TOKENS_PER_CHARACTER * text.length + TOKEN_BUDGET_BASE;
   const wanted = Math.max(MIN_TOKEN_BUDGET, Math.ceil(estimate * TOKEN_BUDGET_SAFETY));

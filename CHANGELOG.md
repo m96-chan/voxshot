@@ -68,6 +68,12 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   away from, instead of leaving it running. ([#67])
 
 ### Fixed
+- `ChatterboxEngine` releases the tensors it allocates. Every `synthesize` built
+  four speaker tensors and abandoned them along with the waveform, and `embed`
+  did the same with its input and the encoder's four outputs — roughly a
+  megabyte per call left for a garbage collector that cannot feel pressure from
+  a GPU buffer at all. Disposal happens strictly after the data is copied out,
+  since reading a released tensor throws. ([#75])
 - Loads no longer probe a language model that is never fetched. Transformers.js
   reads `dtype` by **session key** when it builds the list of files a load will
   touch, and Chatterbox maps `model` to the file `language_model` — so a record
@@ -229,6 +235,7 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#62]: https://github.com/m96-chan/voxshot/issues/62
 [#65]: https://github.com/m96-chan/voxshot/issues/65
 [#69]: https://github.com/m96-chan/voxshot/issues/69
+[#75]: https://github.com/m96-chan/voxshot/issues/75
 [#81]: https://github.com/m96-chan/voxshot/issues/81
 [#86]: https://github.com/m96-chan/voxshot/issues/86
 [#90]: https://github.com/m96-chan/voxshot/issues/90

@@ -14,6 +14,18 @@ export interface TensorLike {
   readonly type: string;
   readonly data: Float32Array | BigInt64Array;
   readonly dims: readonly number[];
+  /**
+   * Release the backing buffer.
+   *
+   * Optional for the same reason as the criteria classes: an older build or a
+   * test double without it still satisfies the type, and disposal degrades to
+   * whatever the garbage collector manages.
+   *
+   * It matters most on WebGPU, where the buffer is not something the collector
+   * can reason about or feel pressure from — dropping the last reference to a
+   * GPU-backed tensor is not the same as freeing it.
+   */
+  dispose?(): void;
 }
 
 /** Speaker data returned by `ChatterboxModel.encode_speech`. */
