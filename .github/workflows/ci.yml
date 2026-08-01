@@ -19,6 +19,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # check:changelog blames each line and compares against tags. The
+          # default shallow, tagless checkout leaves it nothing to inspect, and
+          # it would pass without having checked anything.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -39,6 +44,11 @@ jobs:
       # with no license text and 125 kB of unresolvable source maps while the
       # suite was fully green (#98).
       - run: npm run check:package
+
+      # Blames each released entry and checks it predates its tag. Two fixes
+      # were credited to 0.3.0 that landed after it was cut (#113), and every
+      # step of writing them looked correct.
+      - run: npm run check:changelog
 
       # examples/browser has its own unit tests for the demo's model-cache
       # logic. It depends on the library via file:../.., so build dist first

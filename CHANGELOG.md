@@ -42,6 +42,24 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   behaviour changed — the promise was never kept. ([#107])
 
 
+### Fixed
+
+- `ChatterboxEngine` releases the tensors it allocates. Every `synthesize` built
+  four speaker tensors and abandoned them along with the waveform, and `embed`
+  did the same with its input and the encoder's four outputs — roughly a
+  megabyte per call left for a garbage collector that cannot feel pressure from
+  a GPU buffer at all. Disposal happens strictly after the data is copied out,
+  since reading a released tensor throws. ([#75])
+- Loads no longer probe a language model that is never fetched. Transformers.js
+  reads `dtype` by **session key** when it builds the list of files a load will
+  touch, and Chatterbox maps `model` to the file `language_model` — so a record
+  keyed only by file name missed, and the expected-file list fell through to the
+  device default: `onnx/language_model.onnx` (fp32, 2.08 GB) on WebGPU and
+  `onnx/language_model_quantized.onnx` (a 404) on WASM. Both keys are carried
+  now. The fp32 file was never downloaded but was seeded into `progress_total`,
+  which is what made the download denominator roughly twice the real transfer.
+  ([#62])
+
 ## [0.3.0] - 2026-08-01
 
 ### Added
@@ -68,21 +86,6 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   away from, instead of leaving it running. ([#67])
 
 ### Fixed
-- `ChatterboxEngine` releases the tensors it allocates. Every `synthesize` built
-  four speaker tensors and abandoned them along with the waveform, and `embed`
-  did the same with its input and the encoder's four outputs — roughly a
-  megabyte per call left for a garbage collector that cannot feel pressure from
-  a GPU buffer at all. Disposal happens strictly after the data is copied out,
-  since reading a released tensor throws. ([#75])
-- Loads no longer probe a language model that is never fetched. Transformers.js
-  reads `dtype` by **session key** when it builds the list of files a load will
-  touch, and Chatterbox maps `model` to the file `language_model` — so a record
-  keyed only by file name missed, and the expected-file list fell through to the
-  device default: `onnx/language_model.onnx` (fp32, 2.08 GB) on WebGPU and
-  `onnx/language_model_quantized.onnx` (a 404) on WASM. Both keys are carried
-  now. The fp32 file was never downloaded but was seeded into `progress_total`,
-  which is what made the download denominator roughly twice the real transfer.
-  ([#62])
 - The published package now contains its license. `package.json` declared MIT
   while no license text was shipped or even present in the repository, so what
   reached npm granted nothing on its own terms. ([#98])
