@@ -537,13 +537,21 @@ export class ChatterboxEngine implements SynthesisEngine {
     request.signal?.throwIfAborted();
 
     const inputs = await processor(trimmed);
+    // Built inside the guard, not before it: the loop throws on a voice that
+    // is missing a tensor, and whatever it managed to build first is still
+    // this call's to release.
     const speaker: Record<string, TensorLike> = {};
-    for (const name of SPEAKER_TENSOR_NAMES) {
-      const tensor = voice.tensors[name];
-      if (!tensor) {
-        throw new InvalidInputError(`This voice is missing the "${name}" tensor.`);
+    try {
+      for (const name of SPEAKER_TENSOR_NAMES) {
+        const tensor = voice.tensors[name];
+        if (!tensor) {
+          throw new InvalidInputError(`This voice is missing the "${name}" tensor.`);
+        }
+        speaker[name] = new transformers.Tensor(tensor.type, tensor.data, [...tensor.dims]);
       }
-      speaker[name] = new transformers.Tensor(tensor.type, tensor.data, [...tensor.dims]);
+    } catch (cause) {
+      releaseTensors(...Object.values(speaker));
+      throw cause;
     }
 
     // `ChatterboxModel.generate` spreads its params straight into the base
@@ -576,10 +584,6 @@ export class ChatterboxEngine implements SynthesisEngine {
       releaseTensors(...Object.values(speaker));
     }
 
-    // Interruption leaves a truncated waveform behind; nobody is waiting for
-    // it, and returning it would be indistinguishable from a short utterance.
-    request.signal?.throwIfAborted();
-
     // Copied first, released second — never the other way round. Reading a
     // disposed tensor throws in ONNX Runtime, so this is an ordering
     // requirement rather than a tidiness preference.
@@ -591,6 +595,12 @@ export class ChatterboxEngine implements SynthesisEngine {
     // thing living on the GPU is the one thing nobody disposes.
     const samples = Float32Array.from(waveform.data as Float32Array);
     releaseTensors(waveform);
+
+    // After the release, deliberately. Cancellation is the likeliest way out
+    // of a render, and throwing while the waveform was still held leaked the
+    // very tensor this is about. The samples are discarded either way — a
+    // truncated render must not be mistaken for a short utterance.
+    request.signal?.throwIfAborted();
 
     // Counted, not inferred. The waveform's length depends on the reference
     // voice as well as the token count, so recovering one from it was never

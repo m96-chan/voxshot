@@ -81,6 +81,8 @@ interface ModuleHarness {
   modelsCreated: number;
   /** Last `progress_callback` handed to `from_pretrained`, so tests can drive it. */
   lastProgressCallback: ((progress: Record<string, unknown>) => void) | undefined;
+  /** Runs inside generate, so a test can abort mid-render. */
+  onGenerate: (() => void) | undefined;
   /** Every tensor the engine or the fake model created. */
   tensors: FakeTensor[];
   /** Every stopping criterion the engine constructed. */
@@ -111,6 +113,7 @@ function createModule(): ModuleHarness {
     failProcessor: false,
     modelsCreated: 0,
     lastProgressCallback: undefined,
+    onGenerate: undefined,
     tensors: [],
     stoppers: [],
     tokensUsed: undefined,
@@ -172,6 +175,7 @@ function createModule(): ModuleHarness {
           async generate(params: Record<string, unknown>) {
             // Snapshotted, not held: the engine releases the speaker tensors
             // when the call ends, and a released tensor cannot be read.
+            harness.onGenerate?.();
             harness.generateCalls.push(
               Object.fromEntries(
                 Object.entries(params).map(([key, value]) => {
@@ -1871,6 +1875,40 @@ describe("ChatterboxEngine tensor disposal", () => {
     const samples = await engine.synthesize({ text: "hi", voice: voice(), speed: 1 });
 
     expect([...samples]).toEqual([0.25, -0.5, 0.75, -1]);
+    expect(leaked(harness)).toHaveLength(0);
+  });
+
+  it("releases what it built when a later speaker tensor is missing", async () => {
+    // The tensors are constructed in a loop, and the loop can throw partway.
+    // Whatever was built before the throw is still this call's to free.
+    const { harness, engine } = await ready();
+    await engine.embed(audio());
+    harness.tensors.length = 0;
+    const incomplete = voice();
+    delete (incomplete.tensors as Record<string, unknown>).speaker_features;
+
+    await expect(
+      engine.synthesize({ text: "hi", voice: incomplete, speed: 1 }),
+    ).rejects.toBeInstanceOf(InvalidInputError);
+
+    expect(harness.tensors.length).toBeGreaterThan(0);
+    expect(leaked(harness)).toHaveLength(0);
+  });
+
+  it("releases the waveform even when the render was cancelled", async () => {
+    // Abort is the likeliest way out of a render, not the rarest — and the
+    // waveform exists by then, so throwing past it leaks exactly the tensor
+    // this issue is about.
+    const { harness, engine } = await ready();
+    await engine.embed(audio());
+    harness.tensors.length = 0;
+    const controller = new AbortController();
+    harness.onGenerate = () => controller.abort();
+
+    await expect(
+      engine.synthesize({ text: "cut", voice: voice(), speed: 1, signal: controller.signal }),
+    ).rejects.toThrow();
+
     expect(leaked(harness)).toHaveLength(0);
   });
 
