@@ -5,13 +5,18 @@
   "description": "Spike for voxshot#106: MioCodec's decoder on web-xpu-ops, checked against a golden from the reference implementation.",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench": "node --experimental-strip-types --experimental-transform-types bench.ts",
+    "build": "esbuild browser.ts --bundle --format=esm --target=es2022 --outfile=../../examples/mio-tts.js",
+    "check:demo": "node check-demo.mjs"
   },
   "dependencies": {
     "web-xpu-ops": "file:../../../web-xpu-ops"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "esbuild": "^0.28.1",
+    "playwright": "^1.62.1",
     "typescript": "^5.7.2",
     "vitest": "^4.1.10"
   }

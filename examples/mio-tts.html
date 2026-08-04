@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MioCodec decoder in the browser — voxshot</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #16181d;
+        --muted: #5b6472;
+        --bg: #fbfbfd;
+        --panel: #ffffff;
+        --line: #e2e5ea;
+        --accent: #2f6df6;
+        --warn-bg: #fff6e5;
+        --warn-line: #e8c88a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e8eaee;
+          --muted: #9aa4b2;
+          --bg: #101318;
+          --panel: #171b22;
+          --line: #272d37;
+          --accent: #6f9bff;
+          --warn-bg: #2a2314;
+          --warn-line: #5c4a20;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 2rem 1.25rem 4rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.65 ui-sans-serif, system-ui, -apple-system, "Hiragino Kaku Gothic ProN",
+          "Noto Sans JP", sans-serif;
+      }
+      main { max-width: 46rem; margin: 0 auto; }
+      h1 { font-size: 1.5rem; margin: 0 0 0.25rem; letter-spacing: -0.01em; }
+      .sub { color: var(--muted); margin: 0 0 1.75rem; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 1.25rem;
+        margin-bottom: 1.25rem;
+      }
+      .notice {
+        background: var(--warn-bg);
+        border-color: var(--warn-line);
+      }
+      button {
+        font: inherit;
+        font-weight: 600;
+        color: #fff;
+        background: var(--accent);
+        border: 0;
+        border-radius: 8px;
+        padding: 0.6rem 1.1rem;
+        cursor: pointer;
+      }
+      button[disabled] { opacity: 0.5; cursor: default; }
+      progress { width: 100%; height: 0.5rem; margin-top: 0.85rem; }
+      #status { margin-top: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+      audio { width: 100%; margin-top: 1rem; }
+      dl.metrics {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.3rem 1.25rem;
+        margin: 1rem 0 0;
+        font-variant-numeric: tabular-nums;
+      }
+      dl.metrics dt { color: var(--muted); }
+      dl.metrics dd { margin: 0; }
+      code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+      pre {
+        overflow-x: auto;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.85rem;
+        margin: 0.85rem 0 0;
+        font-size: 0.86em;
+        line-height: 1.5;
+      }
+      h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+      a { color: var(--accent); }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>MioCodec decoder in the browser</h1>
+      <p class="sub">
+        <a href="https://huggingface.co/Aratako/MioCodec-25Hz-24kHz">MioCodec-25Hz-24kHz</a> の
+        デコーダを <a href="https://github.com/m96-chan/web-xpu-ops">web-xpu-ops</a> の op だけで
+        組み、ブラウザで動かします。サーバも Python もありません。
+      </p>
+
+      <section class="panel notice">
+        <h2>これは text-to-speech ではありません</h2>
+        <p style="margin: 0">
+          テキストからトークンを作る MioTTS の言語モデルには ONNX export がまだ無いため
+          （<a href="https://github.com/m96-chan/voxshot/issues/106">#106</a> の次段）、
+          ここで再生されるトークンは実際の音声クリップを本家の実装でエンコードしたものです。
+          動いているのはパイプラインの後半、<strong>コーデックのデコーダ</strong>です。
+        </p>
+      </section>
+
+      <section class="panel">
+        <button id="run">デコードする</button>
+        <progress id="bar" class="hidden" max="1" value="0"></progress>
+        <p id="status">
+          初回はチェックポイントを Hugging Face から 523 MB ダウンロードします。
+          デコードは参照実装で走るため、6 秒の音声に対して 35 秒前後かかります
+          （headless Chromium 実測 RTF 5.90。下の注記を参照）。
+        </p>
+        <audio id="player" controls class="hidden"></audio>
+        <dl class="metrics hidden" id="metrics">
+          <dt>出力</dt><dd id="m-audio"></dd>
+          <dt>デコード時間</dt><dd id="m-elapsed"></dd>
+          <dt>RTF</dt><dd id="m-rtf"></dd>
+          <dt>トークン</dt><dd id="m-tokens"></dd>
+        </dl>
+      </section>
+
+      <section class="panel">
+        <h2>この数字の読み方</h2>
+        <p style="margin: 0 0 0.5rem">
+          web-xpu-ops には各 op の <strong>reference</strong>（正しさの定義であり、意図的に最も遅い実装）と
+          WGSL カーネルの両方があります。このページが使っているのは前者です。
+          つまり出る RTF は <strong>下限であって WebGPU の評価ではありません</strong>。
+          ライブラリ自身も全 op について “Speed is unmeasured” と明記しています。
+        </p>
+        <p style="margin: 0">
+          正しさは別途担保しています。デコーダは本家実装の各段の中間テンソルと突合してあり、
+          段ごとの一致は相対 2.1e-6〜2.2e-5、実音声 6 秒の波形全体では相対 1.2e-4 です。
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>グラフ</h2>
+        <pre>tokens ─▶ FSQ decode          levels [8,8,8,5,5]
+       ─▶ wave_prenet         Transformer 768, 6L × 12H, window 65 → 512
+       ─▶ wave_conv_upsample  ConvTranspose1d k=2 s=2   (25 Hz → 50 Hz)
+       ─▶ interpolate         linear resample to the STFT length
+       ─▶ wave_prior_net      ResNet ×2: GroupNorm(32) → SiLU → Conv1d
+       ─▶ wave_decoder        Transformer 512, 8L × 8H, window 65, AdaLN-Zero
+       ─▶ wave_post_net       ResNet ×2
+       ─▶ istft_head          Linear [512 → 1922] ─▶ iSTFT "same" (1920/480)
+       ─▶ waveform, 24 kHz</pre>
+      </section>
+    </main>
+
+    <script type="module">
+      import { run, toWav } from "./mio-tts.js";
+
+      const button = document.getElementById("run");
+      const bar = document.getElementById("bar");
+      const status = document.getElementById("status");
+      const player = document.getElementById("player");
+      const metrics = document.getElementById("metrics");
+
+      const format = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        bar.classList.remove("hidden");
+        try {
+          const fixture = await (await fetch("./mio-tts-fixture.json")).json();
+
+          const report = (stage, detail) => {
+            if (detail?.loaded !== undefined && detail.total) {
+              bar.value = detail.loaded / detail.total;
+              status.textContent = `${stage} — ${format(detail.loaded)} / ${format(detail.total)}`;
+            } else if (detail?.loaded !== undefined) {
+              bar.removeAttribute("value");
+              status.textContent = `${stage} — ${format(detail.loaded)}`;
+            } else {
+              bar.removeAttribute("value");
+              status.textContent = stage;
+            }
+          };
+
+          const result = await run(fixture, report);
+
+          bar.classList.add("hidden");
+          status.textContent = "完了";
+          player.src = URL.createObjectURL(toWav(result.pcm, result.sampleRate));
+          player.classList.remove("hidden");
+          metrics.classList.remove("hidden");
+          document.getElementById("m-audio").textContent =
+            `${result.seconds.toFixed(2)} s @ ${result.sampleRate} Hz`;
+          document.getElementById("m-elapsed").textContent =
+            `${(result.elapsedMs / 1000).toFixed(1)} s`;
+          document.getElementById("m-rtf").textContent = result.realTimeFactor.toFixed(2);
+          document.getElementById("m-tokens").textContent =
+            `${fixture.tokens.length} @ 25 Hz → ${fixture.stft_length} frames`;
+        } catch (error) {
+          bar.classList.add("hidden");
+          status.textContent = `失敗: ${error instanceof Error ? error.message : String(error)}`;
+          button.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

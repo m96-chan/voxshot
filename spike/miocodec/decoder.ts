@@ -94,12 +94,26 @@ export const MIOCODEC_24K: DecoderConfig = {
  * every call, is the slow and obvious thing; the GPU path hoists it to load
  * time. Correctness first (rule 8).
  */
+const transposed = new WeakMap<Float32Array, Float32Array>();
+
 function linear(x: Tensor, weight: Tensor, bias: Tensor | null): Tensor {
   const [outFeatures, inFeatures] = weight.shape as [number, number];
   const rows = x.data.length / inFeatures;
-  const b = new Float32Array(inFeatures * outFeatures);
-  for (let o = 0; o < outFeatures; o += 1) {
-    for (let i = 0; i < inFeatures; i += 1) b[i * outFeatures + o] = weight.data[o * inFeatures + i]!;
+  // Turned once per weight, not once per call. `matmul` is `torch.mm` and a
+  // Linear's weight is `[out, in]`, so one of the two has to be transposed —
+  // but the weight does not change between calls, and the decoder makes
+  // hundreds of them. Keyed on the array's identity, which `Weights` now keeps
+  // stable; a `WeakMap` so nothing is held alive once the checkpoint is
+  // dropped.
+  let b = transposed.get(weight.data);
+  if (!b) {
+    b = new Float32Array(inFeatures * outFeatures);
+    for (let o = 0; o < outFeatures; o += 1) {
+      for (let i = 0; i < inFeatures; i += 1) {
+        b[i * outFeatures + o] = weight.data[o * inFeatures + i]!;
+      }
+    }
+    transposed.set(weight.data, b);
   }
   const out = matmul({ a: x.data, b, M: rows, N: outFeatures, K: inFeatures });
   if (bias) {
@@ -187,11 +201,24 @@ function windowMask(length: number, windowSize: number): Float32Array {
  * -------------------------------------------------------------------------- */
 
 export class Weights {
+  // `Safetensors.tensor` copies out of the checkpoint on every call, by design
+  // — a view would pin the whole file. That makes it the wrong thing to call
+  // per layer per forward, which is what an uncached `get` does: the decoder
+  // asks for the same two hundred tensors on every decode. Memoised by name, so
+  // each is copied once and every later reader gets the same array — which is
+  // also what makes the transpose cache below able to key on identity.
+  private readonly cache = new Map<string, Tensor>();
+
   constructor(private readonly file: Safetensors) {}
 
   get(name: string): Tensor {
-    const view = this.file.tensor(name);
-    return { data: view.data, shape: [...view.shape] };
+    let tensor = this.cache.get(name);
+    if (!tensor) {
+      const view = this.file.tensor(name);
+      tensor = { data: view.data, shape: [...view.shape] };
+      this.cache.set(name, tensor);
+    }
+    return tensor;
   }
 
   maybe(name: string): Tensor | null {

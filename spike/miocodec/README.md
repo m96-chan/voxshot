@@ -37,12 +37,48 @@ because a `file:` symlink is still `node_modules` as far as Vitest's
 skipped itself when its fixtures were absent would report success for having
 checked nothing.
 
+### The demo
+
+`examples/mio-tts.html` decodes a committed token fixture in the browser and
+plays the result. Build and check it with:
+
+```bash
+npm run build        # esbuild browser.ts -> examples/mio-tts.js
+npm run check:demo   # drives the page in headless Chromium and reads the numbers back
+```
+
+Measured on this machine, headless Chromium, reference op implementations:
+
+| | |
+| --- | --- |
+| output | 6.00 s @ 24 kHz |
+| decode | 35.4 s |
+| **RTF** | **5.90** |
+| tokens | 150 @ 25 Hz → 300 STFT frames |
+
+`npm run bench` runs the same decode in Node — RTF 4.90 there, so a fifth of the
+gap is the browser and the rest is the same naive arithmetic in both.
+
+**That number is a floor, not a verdict on WebGPU.** These are the library's
+*reference* implementations, which its own README calls the slowest expression
+of each op and marks "Speed unmeasured". The kernels are the next step.
+
+`check:demo` routes the checkpoint request to the local Hugging Face cache
+rather than pulling 523 MB per run. The network path is checked separately and
+more cheaply — the CDN answers 200 with `access-control-allow-origin: *` and a
+content-length of 523,087,956, matching the golden's manifest.
+
 ### What is checked so far
 
-`istft.test.ts` — the decoder's **last** stage, taken first because it is the one
-that had no expression in the op library until [web-xpu-ops#92](https://github.com/m96-chan/web-xpu-ops/issues/92),
-and because it needs no weights: the golden already carries the spectrogram that
-enters it.
+`decoder.test.ts` — the **whole** decoder, stage by stage in graph order, so the
+first failure names the culprit. Agreement is 2.1e-6 to 2.2e-5 relative to each
+stage's peak. On the demo's real speech clip the whole 6-second waveform matches
+the reference decode to **1.2e-4** relative.
+
+`istft.test.ts` — the decoder's last stage on its own, taken first because it is
+the one that had no expression in the op library until
+[web-xpu-ops#92](https://github.com/m96-chan/web-xpu-ops/issues/92), and because
+it needs no weights.
 
 All three cases reproduce the reference waveform to **2.4–2.9e-7 relative**
 against the peak, which is f32 round-off between a float64 JavaScript reference

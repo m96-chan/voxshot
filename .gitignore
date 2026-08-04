@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 # in a diff, and the checkpoints they come from are hundreds of megabytes.
 spike/**/golden/
 spike/**/.venv/
+
+# Python bytecode from the spike generators
+__pycache__/
