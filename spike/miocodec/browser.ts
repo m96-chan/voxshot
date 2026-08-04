@@ -1,4 +1,5 @@
-import { decode, MIOCODEC_24K, Weights } from "./decoder.js";
+import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "./decoder.js";
+import { Gpu, gpuBackend } from "./gpu.js";
 import { Safetensors } from "./safetensors.js";
 
 /**
@@ -72,41 +73,73 @@ export interface DecodeReport {
   seconds: number;
   elapsedMs: number;
   realTimeFactor: number;
+  /** Which backend actually ran. Never inferred by the caller — see below. */
+  backend: string;
 }
 
-export async function run(fixture: Fixture, report: Progress): Promise<DecodeReport> {
+export type BackendChoice = "auto" | "gpu" | "cpu";
+
+/**
+ * Pick a backend, and **say which one was picked**.
+ *
+ * `"auto"` prefers WebGPU and falls back to the reference implementations,
+ * because a page that works slowly beats a page that does not work. What it
+ * must not do is fall back silently: an RTF is meaningless without knowing what
+ * produced it, so the choice is returned rather than logged.
+ *
+ * `"gpu"` throws instead of falling back — the check script asks for it
+ * explicitly, and a silent downgrade there would report the CPU path's numbers
+ * as the GPU path's.
+ */
+async function chooseBackend(choice: BackendChoice): Promise<{ backend: Backend; gpu: Gpu | null }> {
+  if (choice === "cpu") return { backend: cpuBackend, gpu: null };
+  const gpu = await Gpu.create();
+  if (gpu) return { backend: gpuBackend(gpu), gpu };
+  if (choice === "gpu") throw new Error("WebGPU is unavailable, and the GPU backend was required");
+  return { backend: cpuBackend, gpu: null };
+}
+
+export async function run(
+  fixture: Fixture,
+  report: Progress,
+  choice: BackendChoice = "auto",
+): Promise<DecodeReport> {
   const buffer = await fetchCheckpoint(report);
 
   report("parsing the checkpoint");
   const weights = new Weights(Safetensors.parse(buffer));
 
-  report("decoding");
-  // Yield first: `decode` is synchronous and holds the thread for as long as it
-  // takes, so without this the "decoding" line never paints and the page looks
+  const { backend, gpu } = await chooseBackend(choice);
+  report(`decoding on ${backend.name}`);
+  // Yield first: the stages between dispatches run on the main thread and hold
+  // it, so without this the "decoding" line never paints and the page looks
   // stuck on "parsing".
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  const started = performance.now();
-  const { waveform } = decode(
-    Float32Array.from(fixture.tokens),
-    Float32Array.from(fixture.global_embedding),
-    fixture.stft_length,
-    MIOCODEC_24K,
-    weights,
-  );
-  const elapsedMs = performance.now() - started;
-  const seconds = waveform.length / fixture.sample_rate;
+  try {
+    const started = performance.now();
+    const { waveform } = await decode(
+      Float32Array.from(fixture.tokens),
+      Float32Array.from(fixture.global_embedding),
+      fixture.stft_length,
+      MIOCODEC_24K,
+      weights,
+      backend,
+    );
+    const elapsedMs = performance.now() - started;
+    const seconds = waveform.length / fixture.sample_rate;
 
-  return {
-    pcm: waveform,
-    sampleRate: fixture.sample_rate,
-    seconds,
-    elapsedMs,
-    // The number #106 exists to produce. Reported rather than hidden: these are
-    // the library's *reference* implementations, whose own README says speed is
-    // unmeasured for every op, so this is a floor and not a verdict on WebGPU.
-    realTimeFactor: elapsedMs / 1000 / seconds,
-  };
+    return {
+      pcm: waveform,
+      sampleRate: fixture.sample_rate,
+      seconds,
+      elapsedMs,
+      realTimeFactor: elapsedMs / 1000 / seconds,
+      backend: backend.name,
+    };
+  } finally {
+    gpu?.destroy();
+  }
 }
 
 /** PCM to a WAV blob, so the result can be played and saved without a library. */

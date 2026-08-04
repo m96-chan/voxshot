@@ -7,8 +7,13 @@
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node"],
+    "types": [
+      "node",
+      "@webgpu/types"
+    ],
     "noEmit": true
   },
-  "include": ["*.ts"]
+  "include": [
+    "*.ts"
+  ]
 }

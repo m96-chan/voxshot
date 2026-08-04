@@ -114,11 +114,12 @@
         <progress id="bar" class="hidden" max="1" value="0"></progress>
         <p id="status">
           初回はチェックポイントを Hugging Face から 523 MB ダウンロードします。
-          デコードは参照実装で走るため、6 秒の音声に対して 35 秒前後かかります
-          （headless Chromium 実測 RTF 5.90。下の注記を参照）。
+          デコードは WebGPU が使えればカーネル、無ければ参照実装で走ります。
+          どちらで走ったかは結果欄に表示されます（<code>?backend=cpu</code> で強制可）。
         </p>
         <audio id="player" controls class="hidden"></audio>
         <dl class="metrics hidden" id="metrics">
+          <dt>バックエンド</dt><dd id="m-backend"></dd>
           <dt>出力</dt><dd id="m-audio"></dd>
           <dt>デコード時間</dt><dd id="m-elapsed"></dd>
           <dt>RTF</dt><dd id="m-rtf"></dd>
@@ -130,8 +131,12 @@
         <h2>この数字の読み方</h2>
         <p style="margin: 0 0 0.5rem">
           web-xpu-ops には各 op の <strong>reference</strong>（正しさの定義であり、意図的に最も遅い実装）と
-          WGSL カーネルの両方があります。このページが使っているのは前者です。
-          つまり出る RTF は <strong>下限であって WebGPU の評価ではありません</strong>。
+          WGSL カーネルの両方があります。WebGPU 経路が載せているのは
+          <strong>matmul / conv1d / iSTFT の 3 つだけ</strong>で、
+          残りの段（layernorm・rope・attention・group_norm など）は reference のままです。
+          データ量に対して線形なそれらより、この 3 つに演算量が集中しているためです。
+          つまり出る RTF は<strong>ハイブリッドの値</strong>であり、
+          全段カーネル化した場合の数字ではありません。
           ライブラリ自身も全 op について “Speed is unmeasured” と明記しています。
         </p>
         <p style="margin: 0">
@@ -184,13 +189,19 @@
             }
           };
 
-          const result = await run(fixture, report);
+          // `?backend=cpu` forces the reference implementations, which is how
+          // the two paths are compared. Default is auto: WebGPU when the
+          // browser has it, the reference otherwise — and the answer is
+          // displayed rather than assumed.
+          const choice = new URLSearchParams(location.search).get("backend") ?? "auto";
+          const result = await run(fixture, report, choice);
 
           bar.classList.add("hidden");
           status.textContent = "完了";
           player.src = URL.createObjectURL(toWav(result.pcm, result.sampleRate));
           player.classList.remove("hidden");
           metrics.classList.remove("hidden");
+          document.getElementById("m-backend").textContent = result.backend;
           document.getElementById("m-audio").textContent =
             `${result.seconds.toFixed(2)} s @ ${result.sampleRate} Hz`;
           document.getElementById("m-elapsed").textContent =

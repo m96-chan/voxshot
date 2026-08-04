@@ -36,6 +36,56 @@ export interface Tensor {
   shape: number[];
 }
 
+/**
+ * The three ops that carry the arithmetic, behind a seam.
+ *
+ * Everything else in this graph is linear in its data and costs nothing beside
+ * these: `matmul`, `conv1d` and the inverse transform are where the work is. So
+ * they are the ones a backend replaces, and the rest of the file is the same
+ * code whichever backend is in use — which is also what lets both be compared
+ * against the same golden rather than against each other.
+ *
+ * Async because a GPU readback is, and the alternative — two copies of the
+ * graph, one sync and one not — is two places for a port to be subtly wrong.
+ */
+export interface Backend {
+  readonly name: string;
+  matmul(a: Float32Array, b: Float32Array, M: number, N: number, K: number): Promise<Float32Array>;
+  conv1d(
+    input: Float32Array,
+    weight: Float32Array,
+    bias: Float32Array | null,
+    Cin: number,
+    Cout: number,
+    L: number,
+    K: number,
+    padding: number,
+  ): Promise<Float32Array>;
+  /** Always `"same"` here; the backend resolves what that means for its own API. */
+  istft(
+    real: Float32Array,
+    imag: Float32Array,
+    window: Float32Array,
+    frames: number,
+    nFft: number,
+    hop: number,
+  ): Promise<Float32Array>;
+}
+
+/** The reference implementations — the definition of correct, and the slowest. */
+export const cpuBackend: Backend = {
+  name: "reference (CPU)",
+  async matmul(a, b, M, N, K) {
+    return matmul({ a, b, M, N, K });
+  },
+  async conv1d(input, weight, bias, Cin, Cout, L, K, padding) {
+    return conv1d({ input, weight, bias: bias ?? undefined, N: 1, Cin, Cout, L, K, padding });
+  },
+  async istft(real, imag, window, frames, nFft, hop) {
+    return istft({ real, imag, frames, nFft, hop, window, padding: "same" });
+  },
+};
+
 const NORM_EPS = 1e-5;
 /** `ResNetBlock` passes this explicitly; it is **not** torch's 1e-5 default. */
 const GROUP_NORM_EPS = 1e-6;
@@ -96,7 +146,12 @@ export const MIOCODEC_24K: DecoderConfig = {
  */
 const transposed = new WeakMap<Float32Array, Float32Array>();
 
-function linear(x: Tensor, weight: Tensor, bias: Tensor | null): Tensor {
+async function linear(
+  x: Tensor,
+  weight: Tensor,
+  bias: Tensor | null,
+  backend: Backend,
+): Promise<Tensor> {
   const [outFeatures, inFeatures] = weight.shape as [number, number];
   const rows = x.data.length / inFeatures;
   // Turned once per weight, not once per call. `matmul` is `torch.mm` and a
@@ -115,7 +170,7 @@ function linear(x: Tensor, weight: Tensor, bias: Tensor | null): Tensor {
     }
     transposed.set(weight.data, b);
   }
-  const out = matmul({ a: x.data, b, M: rows, N: outFeatures, K: inFeatures });
+  const out = await backend.matmul(x.data, b, rows, outFeatures, inFeatures);
   if (bias) {
     for (let r = 0; r < rows; r += 1) {
       for (let o = 0; o < outFeatures; o += 1) {
@@ -237,7 +292,12 @@ export class Weights {
  * `(code - half_width) / half_width`, then the `proj_out` Linear. The basis is
  * `cumprod([1] + levels[:-1])`, so the first dimension varies fastest.
  */
-export function fsqDecode(tokens: Float32Array, levels: number[], weights: Weights): Tensor {
+export async function fsqDecode(
+  tokens: Float32Array,
+  levels: number[],
+  weights: Weights,
+  backend: Backend,
+): Promise<Tensor> {
   const basis: number[] = [];
   let running = 1;
   for (let i = 0; i < levels.length; i += 1) {
@@ -252,10 +312,11 @@ export function fsqDecode(tokens: Float32Array, levels: number[], weights: Weigh
       codes[t * levels.length + d] = (code - halfWidth) / halfWidth;
     }
   }
-  return linear(
+  return await linear(
     { data: codes, shape: [tokens.length, levels.length] },
     weights.get("local_quantizer.proj_out.weight"),
     weights.maybe("local_quantizer.proj_out.bias"),
+    backend,
   );
 }
 
@@ -283,14 +344,15 @@ function layerNorm(x: Tensor, weight: Tensor, bias: Tensor, dim: number): Tensor
  * The `1 +` matters: the projection is zero-initialised so an untrained model
  * is the identity, and dropping it would scale everything to zero instead.
  */
-function adaLnZero(
+async function adaLnZero(
   x: Tensor,
   condition: Float32Array,
   dim: number,
   prefix: string,
   weights: Weights,
   withGate: boolean,
-): { modulated: Tensor; gate: Float32Array | null } {
+  backend: Backend,
+): Promise<{ modulated: Tensor; gate: Float32Array | null }> {
   const rows = x.data.length / dim;
   const normed = layernorm({
     input: x.data,
@@ -303,10 +365,11 @@ function adaLnZero(
     eps: NORM_EPS,
   });
 
-  const projected = linear(
+  const projected = await linear(
     { data: silu(condition), shape: [1, condition.length] },
     weights.get(`${prefix}.condition_proj.1.weight`),
     weights.maybe(`${prefix}.condition_proj.1.bias`),
+    backend,
   );
 
   const parts = withGate ? 3 : 2;
@@ -328,20 +391,21 @@ function adaLnZero(
 }
 
 /** One attention block: qkv, RoPE on both q and k, windowed SDPA, output projection. */
-function selfAttention(
+async function selfAttention(
   x: Tensor,
   config: TransformerConfig,
   prefix: string,
   weights: Weights,
   mask: Float32Array,
   length: number,
-): Tensor {
+  backend: Backend,
+): Promise<Tensor> {
   const { dim, heads, ropeTheta } = config;
   const headDim = dim / heads;
 
-  const q = linear(x, weights.get(`${prefix}.wq.weight`), weights.maybe(`${prefix}.wq.bias`));
-  const k = linear(x, weights.get(`${prefix}.wk.weight`), weights.maybe(`${prefix}.wk.bias`));
-  const v = linear(x, weights.get(`${prefix}.wv.weight`), weights.maybe(`${prefix}.wv.bias`));
+  const q = await linear(x, weights.get(`${prefix}.wq.weight`), weights.maybe(`${prefix}.wq.bias`), backend);
+  const k = await linear(x, weights.get(`${prefix}.wk.weight`), weights.maybe(`${prefix}.wk.bias`), backend);
+  const v = await linear(x, weights.get(`${prefix}.wv.weight`), weights.maybe(`${prefix}.wv.bias`), backend);
 
   // `[L, heads, headDim]` is what `rope` wants and what the qkv projections
   // already produce — `x.view(bsz, seqlen, n_heads, head_dim)` upstream is a
@@ -398,29 +462,41 @@ function selfAttention(
     }
   }
 
-  return linear(
+  return await linear(
     { data: merged, shape: [length, dim] },
     weights.get(`${prefix}.wo.weight`),
     weights.maybe(`${prefix}.wo.bias`),
+    backend,
   );
 }
 
 /** SwiGLU: `w2(silu(w1(x)) * w3(x))`. */
-function feedForward(x: Tensor, prefix: string, weights: Weights): Tensor {
-  const gate = linear(x, weights.get(`${prefix}.w1.weight`), null);
-  const up = linear(x, weights.get(`${prefix}.w3.weight`), null);
+async function feedForward(
+  x: Tensor,
+  prefix: string,
+  weights: Weights,
+  backend: Backend,
+): Promise<Tensor> {
+  const gate = await linear(x, weights.get(`${prefix}.w1.weight`), null, backend);
+  const up = await linear(x, weights.get(`${prefix}.w3.weight`), null, backend);
   const activated = silu(gate.data);
   for (let i = 0; i < activated.length; i += 1) activated[i] = activated[i]! * up.data[i]!;
-  return linear({ data: activated, shape: gate.shape }, weights.get(`${prefix}.w2.weight`), null);
+  return await linear(
+    { data: activated, shape: gate.shape },
+    weights.get(`${prefix}.w2.weight`),
+    null,
+    backend,
+  );
 }
 
-export function transformer(
+export async function transformer(
   input: Tensor,
   config: TransformerConfig,
   prefix: string,
   weights: Weights,
   condition: Float32Array | null,
-): Tensor {
+  backend: Backend,
+): Promise<Tensor> {
   const { dim, layers, windowSize } = config;
   const length = input.data.length / dim;
   const mask = windowMask(length, windowSize);
@@ -435,7 +511,15 @@ export function transformer(
     let normed: Tensor;
     let attnGate: Float32Array | null = null;
     if (useAdaLn) {
-      const result = adaLnZero(x, condition!, dim, `${layerPrefix}.attention_norm`, weights, true);
+      const result = await adaLnZero(
+        x,
+        condition!,
+        dim,
+        `${layerPrefix}.attention_norm`,
+        weights,
+        true,
+        backend,
+      );
       normed = result.modulated;
       attnGate = result.gate;
     } else {
@@ -447,13 +531,29 @@ export function transformer(
       );
     }
 
-    const attended = selfAttention(normed, config, `${layerPrefix}.attention`, weights, mask, length);
+    const attended = await selfAttention(
+      normed,
+      config,
+      `${layerPrefix}.attention`,
+      weights,
+      mask,
+      length,
+      backend,
+    );
     applyGated(x.data, attended.data, attnGate, dim);
 
     let ffnNormed: Tensor;
     let ffnGate: Float32Array | null = null;
     if (useAdaLn) {
-      const result = adaLnZero(x, condition!, dim, `${layerPrefix}.ffn_norm`, weights, true);
+      const result = await adaLnZero(
+        x,
+        condition!,
+        dim,
+        `${layerPrefix}.ffn_norm`,
+        weights,
+        true,
+        backend,
+      );
       ffnNormed = result.modulated;
       ffnGate = result.gate;
     } else {
@@ -465,21 +565,21 @@ export function transformer(
       );
     }
 
-    const forwarded = feedForward(ffnNormed, `${layerPrefix}.feed_forward`, weights);
+    const forwarded = await feedForward(ffnNormed, `${layerPrefix}.feed_forward`, weights, backend);
     applyGated(x.data, forwarded.data, ffnGate, dim);
   }
 
   // Final norm, then the optional output projection.
   let out: Tensor;
   if (useAdaLn) {
-    out = adaLnZero(x, condition!, dim, `${prefix}.norm`, weights, false).modulated;
+    out = (await adaLnZero(x, condition!, dim, `${prefix}.norm`, weights, false, backend)).modulated;
   } else {
     out = layerNorm(x, weights.get(`${prefix}.norm.weight`), weights.get(`${prefix}.norm.bias`), dim);
   }
 
   const projWeight = weights.maybe(`${prefix}.output_proj.weight`);
   if (projWeight) {
-    out = linear(out, projWeight, weights.maybe(`${prefix}.output_proj.bias`));
+    out = await linear(out, projWeight, weights.maybe(`${prefix}.output_proj.bias`), backend);
   }
   return out;
 }
@@ -504,14 +604,15 @@ function applyGated(x: Float32Array, y: Float32Array, gate: Float32Array | null,
  * Channel-major `[C, L]` throughout, which is what both `groupNorm` and `conv1d`
  * assume and what the reference carries between these stages.
  */
-export function resnetStack(
+export async function resnetStack(
   input: Tensor,
   channels: number,
   length: number,
   config: DecoderConfig,
   prefix: string,
   weights: Weights,
-): Tensor {
+  backend: Backend,
+): Promise<Tensor> {
   const kernel = config.waveResnetKernelSize;
   const padding = (kernel - 1) >> 1;
   // Annotated: `Float32Array.from` infers the buffer-typed form, which TS 5.7
@@ -537,17 +638,16 @@ export function resnetStack(
         eps: GROUP_NORM_EPS,
       });
       const weight = weights.get(`${blockPrefix}.${convName}.weight`);
-      x = conv1d({
-        input: silu(normed),
-        weight: weight.data,
-        bias: weights.maybe(`${blockPrefix}.${convName}.bias`)?.data,
-        N: 1,
-        Cin: channels,
-        Cout: channels,
-        L: length,
-        K: kernel,
+      x = await backend.conv1d(
+        silu(normed),
+        weight.data,
+        weights.maybe(`${blockPrefix}.${convName}.bias`)?.data ?? null,
+        channels,
+        channels,
+        length,
+        kernel,
         padding,
-      });
+      );
     }
     addInPlace(x, residual);
   }
@@ -563,19 +663,27 @@ export interface DecodeResult {
   stages: Record<string, Tensor>;
 }
 
-export function decode(
+export async function decode(
   tokens: Float32Array,
   globalEmbedding: Float32Array,
   stftLength: number,
   config: DecoderConfig,
   weights: Weights,
-): DecodeResult {
+  backend: Backend = cpuBackend,
+): Promise<DecodeResult> {
   const stages: Record<string, Tensor> = {};
 
-  const contentEmbedding = fsqDecode(tokens, config.fsqLevels, weights);
+  const contentEmbedding = await fsqDecode(tokens, config.fsqLevels, weights, backend);
   stages.content_embedding = contentEmbedding;
 
-  const prenetOut = transformer(contentEmbedding, config.prenet, "wave_prenet", weights, null);
+  const prenetOut = await transformer(
+    contentEmbedding,
+    config.prenet,
+    "wave_prenet",
+    weights,
+    null,
+    backend,
+  );
   stages.after_prenet = prenetOut;
 
   // `[L, C]` to `[C, L]`: the conv stages are channel-major, the attention
@@ -600,39 +708,49 @@ export function decode(
   stages.after_interpolate = interpolated;
 
   const dim = config.decoder.dim;
-  stages.after_prior_net = resnetStack(
+  stages.after_prior_net = await resnetStack(
     interpolated,
     dim,
     stftLength,
     config,
     "wave_prior_net",
     weights,
+    backend,
   );
 
   const decoderInput: Tensor = {
     data: transpose2d(stages.after_prior_net.data, dim, stftLength),
     shape: [stftLength, dim],
   };
-  const decoded = transformer(decoderInput, config.decoder, "wave_decoder", weights, globalEmbedding);
+  const decoded = await transformer(
+    decoderInput,
+    config.decoder,
+    "wave_decoder",
+    weights,
+    globalEmbedding,
+    backend,
+  );
   stages.after_decoder = decoded;
 
-  stages.after_post_net = resnetStack(
+  stages.after_post_net = await resnetStack(
     { data: transpose2d(decoded.data, stftLength, dim), shape: [dim, stftLength] },
     dim,
     stftLength,
     config,
     "wave_post_net",
     weights,
+    backend,
   );
 
   const headInput: Tensor = {
     data: transpose2d(stages.after_post_net.data, dim, stftLength),
     shape: [stftLength, dim],
   };
-  const projected = linear(
+  const projected = await linear(
     headInput,
     weights.get("istft_head.out.weight"),
     weights.maybe("istft_head.out.bias"),
+    backend,
   );
   stages.istft_linear = projected;
 
@@ -654,15 +772,14 @@ export function decode(
   stages.spec_real = { data: real, shape: [stftLength, bins] };
   stages.spec_imag = { data: imag, shape: [stftLength, bins] };
 
-  const waveform = istft({
+  const waveform = await backend.istft(
     real,
     imag,
-    frames: stftLength,
-    nFft: config.nFft,
-    hop: config.hopLength,
-    window: hannWindow(config.nFft),
-    padding: "same",
-  });
+    hannWindow(config.nFft),
+    stftLength,
+    config.nFft,
+    config.hopLength,
+  );
   stages.waveform = { data: waveform, shape: [waveform.length] };
 
   return { waveform, stages };

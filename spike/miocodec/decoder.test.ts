@@ -1,10 +1,7 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { decode, MIOCODEC_24K, Weights, type Tensor } from "./decoder.js";
+import { decode, MIOCODEC_24K, type Tensor } from "./decoder.js";
 import { GoldenCase, loadCase, loadIndex, worstDifference } from "./golden.js";
-import { Safetensors } from "./safetensors.js";
+import { loadWeights } from "./weights-cache.js";
 
 /**
  * The decoder, stage by stage, against the reference implementation's own
@@ -18,34 +15,7 @@ import { Safetensors } from "./safetensors.js";
 
 const index = loadIndex();
 
-/** The checkpoint, from wherever `huggingface_hub` put it. */
-function loadWeights(): Weights {
-  const hub = join(homedir(), ".cache", "huggingface", "hub");
-  const repo = `models--${index.repo_id.replace("/", "--")}`;
-  const snapshots = join(hub, repo, "snapshots");
-  let file: string;
-  try {
-    const revisions = readFileSync(join(hub, repo, "refs", "main"), "utf8").trim();
-    file = join(snapshots, revisions, "model.safetensors");
-  } catch {
-    throw new Error(
-      `${index.repo_id}'s checkpoint is not in the HF cache. It arrives with the golden:\n` +
-        `  cd spike/miocodec && .venv/bin/python dump_golden.py`,
-    );
-  }
-  const bytes = readFileSync(file);
-  const parsed = Safetensors.parse(
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
-  );
-  // The golden records the sha256 of the file it was taken from. Not checked
-  // here — hashing half a gigabyte per run is not worth it — but the tensor
-  // count is a cheap proxy for "the same rung", and a mismatch here beats a
-  // numerical mystery in the middle of the decoder.
-  expect(parsed.names().length).toBe(320);
-  return new Weights(parsed);
-}
-
-const weights = loadWeights();
+const weights = loadWeights(index.repo_id);
 
 /**
  * The stages, in graph order, with the layout each one has in the golden.
@@ -125,9 +95,9 @@ describe("MioCodec decoder against the golden", () => {
       // first `it` instead just moves the problem, since one decode on the
       // reference implementations takes several seconds and trips the default
       // per-test timeout.
-      let result: ReturnType<typeof decode>;
-      beforeAll(() => {
-        result = decode(
+      let result: Awaited<ReturnType<typeof decode>>;
+      beforeAll(async () => {
+        result = await decode(
           golden.tensor("tokens").data,
           golden.tensor("global_embedding").data,
           manifest.stft_length,

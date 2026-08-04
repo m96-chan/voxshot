@@ -11,7 +11,7 @@ const bytes = readFileSync(join(hub, "snapshots", rev, "model.safetensors"));
 const weights = new Weights(Safetensors.parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer));
 
 const t0 = performance.now();
-const { waveform } = decode(Float32Array.from(fixture.tokens), Float32Array.from(fixture.global_embedding), fixture.stft_length, MIOCODEC_24K, weights);
+const { waveform } = await decode(Float32Array.from(fixture.tokens), Float32Array.from(fixture.global_embedding), fixture.stft_length, MIOCODEC_24K, weights);
 const ms = performance.now() - t0;
 const seconds = waveform.length / fixture.sample_rate;
 console.log(`${fixture.tokens.length} tokens -> ${fixture.stft_length} frames -> ${waveform.length} samples (${seconds.toFixed(2)} s)`);

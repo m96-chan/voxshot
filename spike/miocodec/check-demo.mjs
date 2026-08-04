@@ -65,7 +65,36 @@ const server = createServer((request, response) => {
 
 await new Promise((resolve) => server.listen(8081, resolve));
 
-const browser = await chromium.launch();
+// Headless Chromium ships WebGPU behind flags and with no GPU process by
+// default; without these the page's `navigator.gpu` is absent and `auto` would
+// quietly pick the CPU path — which is exactly the silent downgrade this check
+// exists to catch.
+// Headed, when there is a display to be headed on.
+//
+// Measured on this machine: headless Chromium reports its WebGPU adapter as
+// "google swiftshader" whatever combination of --enable-gpu,
+// --ignore-gpu-blocklist and Vulkan feature flags it is given. SwiftShader
+// answers every call correctly and says nothing whatsoever about speed, so a
+// run against it verifies the kernels and must not be quoted as a GPU number.
+// With a display, Dawn reaches the real adapter.
+const headless = !process.env.DISPLAY;
+const browser = await chromium.launch({
+  headless,
+  args: [
+    "--enable-unsafe-webgpu",
+    // Dawn talks to Vulkan directly; ANGLE is for GL and gets in the way here.
+    "--enable-features=Vulkan,VulkanFromANGLE",
+    "--ignore-gpu-blocklist",
+    "--enable-gpu",
+    // Headless Chromium disables the GPU process outright unless told not to,
+    // and then reports a WebGPU adapter backed by SwiftShader — a software
+    // rasteriser that answers every call correctly and says nothing useful
+    // about speed. Measured: without these the adapter came back as
+    // "google swiftshader".
+    "--disable-gpu-sandbox",
+    "--no-sandbox",
+  ],
+});
 const page = await browser.newPage();
 
 const problems = [];
@@ -81,47 +110,119 @@ await page.route(CHECKPOINT_HOST, async (route) => {
   await route.fulfill({ status: 302, headers: { location: "http://localhost:8081/model.safetensors" } });
 });
 
-await page.goto("http://localhost:8081/mio-tts.html");
-await page.click("#run");
-// The reference implementations decode six seconds of audio in about thirty;
-// five minutes is slack for a slower machine, not an expectation.
-await page.waitForSelector("#metrics:not(.hidden)", { timeout: 300_000 });
+/**
+ * The reference decode of the same tokens, from `dump_demo_fixture.py`.
+ *
+ * This is what makes the run a check rather than a demonstration: both browser
+ * backends are compared against torch's own output for the fixture, not against
+ * each other. Two implementations agreeing says nothing if they agree on the
+ * wrong answer.
+ */
+function referenceWaveform() {
+  const path = new URL("./golden/demo_reference.f32", import.meta.url).pathname;
+  try {
+    const bytes = readFileSync(path);
+    return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  } catch {
+    throw new Error(
+      `${path} is missing. It is written alongside the fixture:\n` +
+        `  cd spike/miocodec && .venv/bin/python dump_demo_fixture.py`,
+    );
+  }
+}
 
-const result = await page.evaluate(() => ({
-  status: document.getElementById("status").textContent,
-  audio: document.getElementById("m-audio").textContent,
-  elapsed: document.getElementById("m-elapsed").textContent,
-  rtf: document.getElementById("m-rtf").textContent,
-  tokens: document.getElementById("m-tokens").textContent,
-  src: document.getElementById("player").src.slice(0, 5),
-}));
+/** Worst disagreement, relative to the reference's own peak. */
+function worstRelative(actual, expected) {
+  let peak = 0;
+  for (let i = 0; i < expected.length; i += 1) peak = Math.max(peak, Math.abs(expected[i]));
+  let worst = 0;
+  for (let i = 0; i < Math.min(actual.length, expected.length); i += 1) {
+    worst = Math.max(worst, Math.abs(actual[i] - expected[i]));
+  }
+  return { abs: worst, rel: worst / peak, lengths: [actual.length, expected.length] };
+}
 
-// The player having a blob: URL is the difference between "the numbers rendered"
-// and "audio actually came out".
-const played = await page.evaluate(async () => {
-  const response = await fetch(document.getElementById("player").src);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  const riff = String.fromCharCode(...bytes.slice(0, 4));
-  const wave = String.fromCharCode(...bytes.slice(8, 12));
-  return { bytes: bytes.length, riff, wave };
-});
+async function decodeWith(backend) {
+  await page.goto(`http://localhost:8081/mio-tts.html?backend=${backend}`);
+  await page.click("#run");
+  // The reference implementations take about half a minute for six seconds of
+  // audio; five is slack for a slower machine, not an expectation.
+  await page.waitForSelector("#metrics:not(.hidden)", { timeout: 300_000 });
+
+  const metrics = await page.evaluate(() => ({
+    status: document.getElementById("status").textContent,
+    backend: document.getElementById("m-backend").textContent,
+    audio: document.getElementById("m-audio").textContent,
+    elapsed: document.getElementById("m-elapsed").textContent,
+    rtf: document.getElementById("m-rtf").textContent,
+    tokens: document.getElementById("m-tokens").textContent,
+    src: document.getElementById("player").src.slice(0, 5),
+  }));
+
+  // The 16-bit WAV the page hands a listener, read back and unpacked. Checking
+  // the blob rather than an internal buffer is deliberate: it is the difference
+  // between "the numbers rendered" and "audio actually came out".
+  const wav = await page.evaluate(async () => {
+    const response = await fetch(document.getElementById("player").src);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return {
+      bytes: bytes.length,
+      riff: String.fromCharCode(...bytes.slice(0, 4)),
+      wave: String.fromCharCode(...bytes.slice(8, 12)),
+      pcm: Array.from(new Int16Array(bytes.buffer.slice(44))),
+    };
+  });
+
+  return { metrics, wav };
+}
+
+const reference = referenceWaveform();
+const runs = {};
+for (const backend of ["cpu", "auto"]) {
+  runs[backend] = await decodeWith(backend);
+}
 
 await browser.close();
 server.close();
 
 console.log(`checkpoint    ${local} (${size.toLocaleString()} B, routed from disk)`);
-console.log(`status        ${result.status}`);
-console.log(`audio         ${result.audio}`);
-console.log(`decode        ${result.elapsed}   RTF ${result.rtf}`);
-console.log(`tokens        ${result.tokens}`);
-console.log(`player src    ${result.src}:  WAV ${played.riff}/${played.wave}, ${played.bytes.toLocaleString()} B`);
+console.log(`reference     ${reference.length.toLocaleString()} samples from the torch decode\n`);
 
-const failures = [
-  ...problems,
-  result.src === "blob:" ? null : `player src is ${result.src}, expected a blob`,
-  played.riff === "RIFF" && played.wave === "WAVE" ? null : `not a WAV: ${played.riff}/${played.wave}`,
-  played.bytes > 100_000 ? null : `WAV is ${played.bytes} bytes, too short to be six seconds`,
-].filter(Boolean);
+const failures = [...problems];
+for (const [requested, { metrics, wav }] of Object.entries(runs)) {
+  // The WAV is 16-bit, so the comparison is against what a listener gets rather
+  // than against the f32 the decoder produced. That costs about 3e-5 of
+  // quantisation on its own, which is why the bound below is not tighter.
+  const pcm = Float32Array.from(wav.pcm, (v) => v / 0x8000);
+  const worst = worstRelative(pcm, reference);
+  console.log(`[?backend=${requested}] -> ${metrics.backend}`);
+  console.log(`  audio       ${metrics.audio}`);
+  console.log(`  decode      ${metrics.elapsed}   RTF ${metrics.rtf}`);
+  console.log(`  wav         ${wav.riff}/${wav.wave}, ${wav.bytes.toLocaleString()} B`);
+  console.log(`  vs torch    abs ${worst.abs.toExponential(2)}  rel ${worst.rel.toExponential(2)}`);
+
+  if (metrics.src !== "blob:") failures.push(`${requested}: player src is ${metrics.src}`);
+  if (wav.riff !== "RIFF" || wav.wave !== "WAVE") failures.push(`${requested}: not a WAV`);
+  if (pcm.length !== reference.length) {
+    failures.push(`${requested}: ${pcm.length} samples against the reference's ${reference.length}`);
+  }
+  if (!(worst.rel < 5e-3)) failures.push(`${requested}: worst ${worst.rel.toExponential(2)} vs torch`);
+}
+
+if (runs.auto.metrics.backend === runs.cpu.metrics.backend) {
+  failures.push(`auto chose ${runs.auto.metrics.backend}; WebGPU did not run, so nothing was checked`);
+}
+
+// A software adapter runs the same WGSL and gets the same answers, so it checks
+// the kernels — and says nothing at all about speed. Called out loudly because
+// the RTF printed above looks exactly like a hardware number and is not one.
+const SOFTWARE = /swiftshader|llvmpipe|software|lavapipe/i;
+if (SOFTWARE.test(runs.auto.metrics.backend)) {
+  console.log(
+    `\nNOTE: the WebGPU adapter is a software rasteriser (${runs.auto.metrics.backend}).\n` +
+      "      Correctness is checked; the RTF above is not a hardware measurement.",
+  );
+}
 
 if (failures.length) {
   console.error("\nFAILED:");

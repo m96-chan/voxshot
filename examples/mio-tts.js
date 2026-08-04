@@ -516,6 +516,18 @@ function istft({
 var NOLA_FLOOR = 1e-11;
 
 // decoder.ts
+var cpuBackend = {
+  name: "reference (CPU)",
+  async matmul(a, b, M, N, K) {
+    return matmul({ a, b, M, N, K });
+  },
+  async conv1d(input, weight, bias, Cin, Cout, L, K, padding2) {
+    return conv1d({ input, weight, bias: bias ?? void 0, N: 1, Cin, Cout, L, K, padding: padding2 });
+  },
+  async istft(real, imag, window, frames, nFft, hop) {
+    return istft({ real, imag, frames, nFft, hop, window, padding: "same" });
+  }
+};
 var NORM_EPS = 1e-5;
 var GROUP_NORM_EPS = 1e-6;
 var MIOCODEC_24K = {
@@ -537,7 +549,7 @@ var MIOCODEC_24K = {
   }
 };
 var transposed = /* @__PURE__ */ new WeakMap();
-function linear(x, weight, bias) {
+async function linear(x, weight, bias, backend) {
   const [outFeatures, inFeatures] = weight.shape;
   const rows = x.data.length / inFeatures;
   let b = transposed.get(weight.data);
@@ -550,7 +562,7 @@ function linear(x, weight, bias) {
     }
     transposed.set(weight.data, b);
   }
-  const out = matmul({ a: x.data, b, M: rows, N: outFeatures, K: inFeatures });
+  const out = await backend.matmul(x.data, b, rows, outFeatures, inFeatures);
   if (bias) {
     for (let r = 0; r < rows; r += 1) {
       for (let o = 0; o < outFeatures; o += 1) {
@@ -627,7 +639,7 @@ var Weights = class {
     return this.file.has(name) ? this.get(name) : null;
   }
 };
-function fsqDecode(tokens, levels, weights) {
+async function fsqDecode(tokens, levels, weights, backend) {
   const basis = [];
   let running = 1;
   for (let i = 0; i < levels.length; i += 1) {
@@ -642,10 +654,11 @@ function fsqDecode(tokens, levels, weights) {
       codes[t * levels.length + d] = (code - halfWidth) / halfWidth;
     }
   }
-  return linear(
+  return await linear(
     { data: codes, shape: [tokens.length, levels.length] },
     weights.get("local_quantizer.proj_out.weight"),
-    weights.maybe("local_quantizer.proj_out.bias")
+    weights.maybe("local_quantizer.proj_out.bias"),
+    backend
   );
 }
 function layerNorm(x, weight, bias, dim) {
@@ -661,7 +674,7 @@ function layerNorm(x, weight, bias, dim) {
     shape: [...x.shape]
   };
 }
-function adaLnZero(x, condition, dim, prefix, weights, withGate) {
+async function adaLnZero(x, condition, dim, prefix, weights, withGate, backend) {
   const rows = x.data.length / dim;
   const normed = layernorm({
     input: x.data,
@@ -673,10 +686,11 @@ function adaLnZero(x, condition, dim, prefix, weights, withGate) {
     D: dim,
     eps: NORM_EPS
   });
-  const projected = linear(
+  const projected = await linear(
     { data: silu(condition), shape: [1, condition.length] },
     weights.get(`${prefix}.condition_proj.1.weight`),
-    weights.maybe(`${prefix}.condition_proj.1.bias`)
+    weights.maybe(`${prefix}.condition_proj.1.bias`),
+    backend
   );
   const parts = withGate ? 3 : 2;
   const shift = projected.data.subarray(0, dim);
@@ -694,12 +708,12 @@ function adaLnZero(x, condition, dim, prefix, weights, withGate) {
   }
   return { modulated: { data: out, shape: [...x.shape] }, gate };
 }
-function selfAttention(x, config, prefix, weights, mask, length) {
+async function selfAttention(x, config, prefix, weights, mask, length, backend) {
   const { dim, heads, ropeTheta } = config;
   const headDim = dim / heads;
-  const q = linear(x, weights.get(`${prefix}.wq.weight`), weights.maybe(`${prefix}.wq.bias`));
-  const k = linear(x, weights.get(`${prefix}.wk.weight`), weights.maybe(`${prefix}.wk.bias`));
-  const v = linear(x, weights.get(`${prefix}.wv.weight`), weights.maybe(`${prefix}.wv.bias`));
+  const q = await linear(x, weights.get(`${prefix}.wq.weight`), weights.maybe(`${prefix}.wq.bias`), backend);
+  const k = await linear(x, weights.get(`${prefix}.wk.weight`), weights.maybe(`${prefix}.wk.bias`), backend);
+  const v = await linear(x, weights.get(`${prefix}.wv.weight`), weights.maybe(`${prefix}.wv.bias`), backend);
   const roped = (t) => ({
     data: rope({
       input: t.data,
@@ -746,20 +760,26 @@ function selfAttention(x, config, prefix, weights, mask, length) {
       }
     }
   }
-  return linear(
+  return await linear(
     { data: merged, shape: [length, dim] },
     weights.get(`${prefix}.wo.weight`),
-    weights.maybe(`${prefix}.wo.bias`)
+    weights.maybe(`${prefix}.wo.bias`),
+    backend
   );
 }
-function feedForward(x, prefix, weights) {
-  const gate = linear(x, weights.get(`${prefix}.w1.weight`), null);
-  const up = linear(x, weights.get(`${prefix}.w3.weight`), null);
+async function feedForward(x, prefix, weights, backend) {
+  const gate = await linear(x, weights.get(`${prefix}.w1.weight`), null, backend);
+  const up = await linear(x, weights.get(`${prefix}.w3.weight`), null, backend);
   const activated = silu(gate.data);
   for (let i = 0; i < activated.length; i += 1) activated[i] = activated[i] * up.data[i];
-  return linear({ data: activated, shape: gate.shape }, weights.get(`${prefix}.w2.weight`), null);
+  return await linear(
+    { data: activated, shape: gate.shape },
+    weights.get(`${prefix}.w2.weight`),
+    null,
+    backend
+  );
 }
-function transformer(input, config, prefix, weights, condition) {
+async function transformer(input, config, prefix, weights, condition, backend) {
   const { dim, layers, windowSize } = config;
   const length = input.data.length / dim;
   const mask = windowMask(length, windowSize);
@@ -771,7 +791,15 @@ function transformer(input, config, prefix, weights, condition) {
     let normed;
     let attnGate = null;
     if (useAdaLn) {
-      const result = adaLnZero(x, condition, dim, `${layerPrefix}.attention_norm`, weights, true);
+      const result = await adaLnZero(
+        x,
+        condition,
+        dim,
+        `${layerPrefix}.attention_norm`,
+        weights,
+        true,
+        backend
+      );
       normed = result.modulated;
       attnGate = result.gate;
     } else {
@@ -782,12 +810,28 @@ function transformer(input, config, prefix, weights, condition) {
         dim
       );
     }
-    const attended = selfAttention(normed, config, `${layerPrefix}.attention`, weights, mask, length);
+    const attended = await selfAttention(
+      normed,
+      config,
+      `${layerPrefix}.attention`,
+      weights,
+      mask,
+      length,
+      backend
+    );
     applyGated(x.data, attended.data, attnGate, dim);
     let ffnNormed;
     let ffnGate = null;
     if (useAdaLn) {
-      const result = adaLnZero(x, condition, dim, `${layerPrefix}.ffn_norm`, weights, true);
+      const result = await adaLnZero(
+        x,
+        condition,
+        dim,
+        `${layerPrefix}.ffn_norm`,
+        weights,
+        true,
+        backend
+      );
       ffnNormed = result.modulated;
       ffnGate = result.gate;
     } else {
@@ -798,18 +842,18 @@ function transformer(input, config, prefix, weights, condition) {
         dim
       );
     }
-    const forwarded = feedForward(ffnNormed, `${layerPrefix}.feed_forward`, weights);
+    const forwarded = await feedForward(ffnNormed, `${layerPrefix}.feed_forward`, weights, backend);
     applyGated(x.data, forwarded.data, ffnGate, dim);
   }
   let out;
   if (useAdaLn) {
-    out = adaLnZero(x, condition, dim, `${prefix}.norm`, weights, false).modulated;
+    out = (await adaLnZero(x, condition, dim, `${prefix}.norm`, weights, false, backend)).modulated;
   } else {
     out = layerNorm(x, weights.get(`${prefix}.norm.weight`), weights.get(`${prefix}.norm.bias`), dim);
   }
   const projWeight = weights.maybe(`${prefix}.output_proj.weight`);
   if (projWeight) {
-    out = linear(out, projWeight, weights.maybe(`${prefix}.output_proj.bias`));
+    out = await linear(out, projWeight, weights.maybe(`${prefix}.output_proj.bias`), backend);
   }
   return out;
 }
@@ -825,7 +869,7 @@ function applyGated(x, y, gate, dim) {
     }
   }
 }
-function resnetStack(input, channels, length, config, prefix, weights) {
+async function resnetStack(input, channels, length, config, prefix, weights, backend) {
   const kernel = config.waveResnetKernelSize;
   const padding2 = kernel - 1 >> 1;
   let x = Float32Array.from(input.data);
@@ -847,27 +891,33 @@ function resnetStack(input, channels, length, config, prefix, weights) {
         eps: GROUP_NORM_EPS
       });
       const weight = weights.get(`${blockPrefix}.${convName}.weight`);
-      x = conv1d({
-        input: silu(normed),
-        weight: weight.data,
-        bias: weights.maybe(`${blockPrefix}.${convName}.bias`)?.data,
-        N: 1,
-        Cin: channels,
-        Cout: channels,
-        L: length,
-        K: kernel,
-        padding: padding2
-      });
+      x = await backend.conv1d(
+        silu(normed),
+        weight.data,
+        weights.maybe(`${blockPrefix}.${convName}.bias`)?.data ?? null,
+        channels,
+        channels,
+        length,
+        kernel,
+        padding2
+      );
     }
     addInPlace(x, residual);
   }
   return { data: x, shape: [channels, length] };
 }
-function decode(tokens, globalEmbedding, stftLength, config, weights) {
+async function decode(tokens, globalEmbedding, stftLength, config, weights, backend = cpuBackend) {
   const stages = {};
-  const contentEmbedding = fsqDecode(tokens, config.fsqLevels, weights);
+  const contentEmbedding = await fsqDecode(tokens, config.fsqLevels, weights, backend);
   stages.content_embedding = contentEmbedding;
-  const prenetOut = transformer(contentEmbedding, config.prenet, "wave_prenet", weights, null);
+  const prenetOut = await transformer(
+    contentEmbedding,
+    config.prenet,
+    "wave_prenet",
+    weights,
+    null,
+    backend
+  );
   stages.after_prenet = prenetOut;
   const prenetDim = config.prenet.outputDim ?? config.prenet.dim;
   const upsampleWeight = weights.get("wave_conv_upsample.weight");
@@ -887,36 +937,46 @@ function decode(tokens, globalEmbedding, stftLength, config, weights) {
   const interpolated = interpolateLinear(stages.after_conv_upsample, prenetDim, stftLength);
   stages.after_interpolate = interpolated;
   const dim = config.decoder.dim;
-  stages.after_prior_net = resnetStack(
+  stages.after_prior_net = await resnetStack(
     interpolated,
     dim,
     stftLength,
     config,
     "wave_prior_net",
-    weights
+    weights,
+    backend
   );
   const decoderInput = {
     data: transpose2d(stages.after_prior_net.data, dim, stftLength),
     shape: [stftLength, dim]
   };
-  const decoded = transformer(decoderInput, config.decoder, "wave_decoder", weights, globalEmbedding);
+  const decoded = await transformer(
+    decoderInput,
+    config.decoder,
+    "wave_decoder",
+    weights,
+    globalEmbedding,
+    backend
+  );
   stages.after_decoder = decoded;
-  stages.after_post_net = resnetStack(
+  stages.after_post_net = await resnetStack(
     { data: transpose2d(decoded.data, stftLength, dim), shape: [dim, stftLength] },
     dim,
     stftLength,
     config,
     "wave_post_net",
-    weights
+    weights,
+    backend
   );
   const headInput = {
     data: transpose2d(stages.after_post_net.data, dim, stftLength),
     shape: [stftLength, dim]
   };
-  const projected = linear(
+  const projected = await linear(
     headInput,
     weights.get("istft_head.out.weight"),
-    weights.maybe("istft_head.out.bias")
+    weights.maybe("istft_head.out.bias"),
+    backend
   );
   stages.istft_linear = projected;
   const bins = config.nFft / 2 + 1;
@@ -932,17 +992,226 @@ function decode(tokens, globalEmbedding, stftLength, config, weights) {
   }
   stages.spec_real = { data: real, shape: [stftLength, bins] };
   stages.spec_imag = { data: imag, shape: [stftLength, bins] };
-  const waveform = istft({
+  const waveform = await backend.istft(
     real,
     imag,
-    frames: stftLength,
-    nFft: config.nFft,
-    hop: config.hopLength,
-    window: hannWindow(config.nFft),
-    padding: "same"
-  });
+    hannWindow(config.nFft),
+    stftLength,
+    config.nFft,
+    config.hopLength
+  );
   stages.waveform = { data: waveform, shape: [waveform.length] };
   return { waveform, stages };
+}
+
+// kernels.ts
+var MATMUL = "// Matmul (GEMM): C = A @ B, shared-memory tiled.\n//\n// Layout:\n//   a:      [M, K] f32, row-major\n//   b:      [K, N] f32, row-major\n//   output: [M, N] f32, row-major\n//\n// One workgroup owns one TILE x TILE block of C. It walks K a tile at a time,\n// staging A's block and B's block in workgroup memory, so each loaded value is\n// used TILE times instead of once. That reuse is the whole reason this op is\n// separate from GEMV, which has none to find.\n//\n// TILE = 16 is not a measured optimum \u2014 nothing here is tuned yet (see #3/#4\n// for the roofline harness). It is the plain choice that fits the limits with\n// room to grow:\n//   * 16 x 16 = 256 invocations per workgroup, the same width the other ops in\n//     this repo use, and well under maxComputeInvocationsPerWorkgroup (1024).\n//   * two f32 tiles = 2 * 16 * 16 * 4 = 2048 bytes of workgroup storage, against\n//     maxComputeWorkgroupStorageSize (49152), so a later register-blocked or\n//     double-buffered variant has somewhere to go.\n//   * one output per invocation, which keeps the indexing readable. Correctness\n//     first (rule 8); the register blocking that makes this fast comes after\n//     there is a number to improve on.\n// Changing TILE here means changing it in wgsl.test.ts too \u2014 the ragged shapes\n// are chosen around it.\n\nstruct Params {\n  M: u32,\n  N: u32,\n  K: u32,\n}\n\n@group(0) @binding(0) var<storage, read> a: array<f32>;\n@group(0) @binding(1) var<storage, read> b: array<f32>;\n@group(0) @binding(2) var<storage, read_write> output: array<f32>;\n@group(0) @binding(3) var<uniform> params: Params;\n\nconst TILE: u32 = 16u;\n\nvar<workgroup> tile_a: array<array<f32, TILE>, TILE>;\nvar<workgroup> tile_b: array<array<f32, TILE>, TILE>;\n\n@compute @workgroup_size(TILE, TILE)\nfn main(\n  @builtin(workgroup_id) wg_id: vec3<u32>,\n  @builtin(local_invocation_id) local_id: vec3<u32>,\n) {\n  let lx = local_id.x;\n  let ly = local_id.y;\n  let row = wg_id.y * TILE + ly;\n  let col = wg_id.x * TILE + lx;\n\n  // No early return for invocations off the edge of C. They have no output to\n  // write, but they still have to load their share of the tiles and reach every\n  // barrier \u2014 leaving early would hang the ones that stayed and would leave the\n  // tile half filled.\n  var acc: f32 = 0.0;\n  let k_tiles = (params.K + TILE - 1u) / TILE;\n  for (var t: u32 = 0u; t < k_tiles; t += 1u) {\n    let k_base = t * TILE;\n\n    // The ragged K tail lives here and nowhere else: `k_len` is how much of this\n    // tile is real, and lanes past it are neither written nor read. The obvious\n    // alternative \u2014 pad the tiles with zeros and always run the full TILE \u2014 is\n    // not used, because then the padding and the loop bound each mask the other:\n    // zeroing either factor makes the product vanish, so removing one of them\n    // leaves the tests green and the guard untested. One mechanism, one thing to\n    // break. (This is uniform across the workgroup, so the barriers below stay\n    // in uniform control flow.)\n    let k_len = min(TILE, params.K - k_base);\n\n    // A lane whose row is past M, or whose column is past N, leaves its slot\n    // holding whatever the previous tile left there. That is safe and deliberate:\n    // tile_a[ly][*] is only ever read by lanes with this same `ly` \u2014 the same\n    // row \u2014 and tile_b[*][lx] only by lanes with this same `lx`, so a stale slot\n    // can only reach an accumulator that is thrown away at the store below.\n    if (row < params.M && lx < k_len) {\n      tile_a[ly][lx] = a[row * params.K + k_base + lx];\n    }\n    if (col < params.N && ly < k_len) {\n      tile_b[ly][lx] = b[(k_base + ly) * params.N + col];\n    }\n    workgroupBarrier();\n\n    for (var k: u32 = 0u; k < k_len; k += 1u) {\n      acc += tile_a[ly][k] * tile_b[k][lx];\n    }\n    // Before overwriting the tiles on the next pass, everyone must be done\n    // reading them.\n    workgroupBarrier();\n  }\n\n  // The two halves are not equally load-bearing, and the difference is worth\n  // knowing rather than assuming. `col < N` is the one that matters: past the\n  // last column, row * N + col is C[row + 1][col - N] \u2014 a live element of the\n  // next row, silently overwritten with this invocation's accumulator. Dropping\n  // it turns the N-tail tests red immediately.\n  //\n  // `row < M` is hygiene. Past the last row the index is off the end of the\n  // buffer, and this implementation discards the write, so dropping it leaves\n  // every test green (checked, by mutation). It stays because WGSL does not\n  // promise that an out-of-bounds write is a no-op \u2014 only that it will not\n  // reach another resource.\n  if (row < params.M && col < params.N) {\n    output[row * params.N + col] = acc;\n  }\n}\n";
+var CONV1D = "// conv1d, matching torch.nn.functional.conv1d.\n//\n// A cross-correlation, not a true convolution: tap k reads forward from the\n// window start and the kernel is never flipped. See reference.ts for the\n// measurement that settles it.\n//\n// One thread per output element. That is all the parallelism this shape has\n// before tiling, and rule 8 says the plain version has to agree with the\n// reference before anything clever gets written.\n//\n// Layout:\n//   input:  [N, Cin, L]              f32\n//   weight: [Cout, Cin/groups, K]    f32\n//   bias:   [Cout]                   f32 \u2014 required here; PyTorch's bias=None\n//                                    is passed as zeros, which costs one add\n//                                    and saves a branch nothing can observe\n//   output: [N, Cout, Lout]          f32\n//\n// Dispatch: x over Lout in 256-wide workgroups, y = Cout, z = N.\n\nstruct Params {\n  Cin: u32,\n  Cout: u32,\n  L: u32,\n  K: u32,\n  Lout: u32,\n  stride: u32,\n  padding: u32,\n  dilation: u32,\n  // Cin / groups and Cout / groups. The kernel never needs `groups` itself,\n  // only the two sizes it divides into, and dividing on the host keeps an\n  // integer division out of every thread.\n  in_per_group: u32,\n  out_per_group: u32,\n  // A uniform struct rounds up to a multiple of 16 bytes. Named rather than\n  // implied, so the host packing twelve words is obviously deliberate.\n  reserved_0: u32,\n  reserved_1: u32,\n}\n\n@group(0) @binding(0) var<storage, read> input: array<f32>;\n@group(0) @binding(1) var<storage, read> weight: array<f32>;\n@group(0) @binding(2) var<storage, read> bias: array<f32>;\n@group(0) @binding(3) var<storage, read_write> output: array<f32>;\n@group(0) @binding(4) var<uniform> params: Params;\n\n@compute @workgroup_size(256)\nfn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n  let ol = gid.x;\n  let oc = gid.y;\n  let n = gid.z;\n\n  // Lout is rarely a multiple of 256, so the last workgroup of each row runs\n  // surplus threads. Unguarded they walk into the next channel's output.\n  if (ol >= params.Lout) {\n    return;\n  }\n\n  let group = oc / params.out_per_group;\n  let ic_base = group * params.in_per_group;\n  // Where this output's window starts in the input, before the pad is trimmed.\n  // Signed: with padding it is negative for the first few outputs.\n  let window = i32(ol * params.stride) - i32(params.padding);\n\n  var acc = bias[oc];\n  for (var ic_local = 0u; ic_local < params.in_per_group; ic_local += 1u) {\n    let in_row = (n * params.Cin + ic_base + ic_local) * params.L;\n    let w_row = (oc * params.in_per_group + ic_local) * params.K;\n    for (var k = 0u; k < params.K; k += 1u) {\n      let il = window + i32(k * params.dilation);\n      // The zero pad, in two halves. Neither can be left to the hardware: this\n      // device reads past the end of a buffer as zero, which is the right\n      // answer by accident, but one row's out-of-range index is the next row's\n      // valid data, and that is what actually comes back.\n      if (il < 0) {\n        continue;\n      }\n      if (il >= i32(params.L)) {\n        continue;\n      }\n      acc += input[in_row + u32(il)] * weight[w_row + k];\n    }\n  }\n\n  output[(n * params.Cout + oc) * params.Lout + ol] = acc;\n}\n";
+var ISTFT = "// ISTFT: inverse one-sided DFT per frame, windowed, overlap-added, and divided\n// by the overlap-added w\xB2 envelope. The thing ONNX cannot express.\n//\n// Layout:\n//   real, imag: [frames, bins] f32, frame-major\n//   window:     [nFft] f32\n//   out:        [outLength] f32\n//\n// One thread per **output sample**, gathering rather than scattering. Written\n// this way for a reason: the natural overlap-add scatters frames into a shared\n// buffer, where two frames land on the same sample and the sum needs atomics or\n// a second pass. Reading instead of writing, each output sample is computed by\n// exactly one thread and there is nothing to order. It costs re-deriving the\n// inverse transform once per overlapping frame \u2014 two of them, at 2x overlap.\n//\n// The envelope division is not optional and not an ordinary normalisation: see\n// reference.ts. A periodic Hann at 50% overlap is COLA in w but not in w\xB2, so\n// skipping it is wrong by up to 2x in a way that still sounds like audio.\n\nstruct Params {\n  nFft: u32,\n  hop: u32,\n  bins: u32,\n  frames: u32,\n  outLength: u32,\n  /// floor(nFft/2) when centred, 0 when not. The caller resolves the convention.\n  pad: u32,\n}\n\n@group(0) @binding(0) var<storage, read> real: array<f32>;\n@group(0) @binding(1) var<storage, read> imag: array<f32>;\n@group(0) @binding(2) var<storage, read> win: array<f32>;\n@group(0) @binding(3) var<storage, read_write> out: array<f32>;\n@group(0) @binding(4) var<uniform> params: Params;\n\nconst TWO_PI: f32 = 6.28318530717958647692;\n\n@compute @workgroup_size(256)\nfn main(@builtin(global_invocation_id) global_id: vec3<u32>) {\n  let t = global_id.x;\n  if (t >= params.outLength) {\n    return;\n  }\n  let position = i32(t + params.pad);\n  // Even nFft has a Nyquist bin, which stands for itself rather than for a\n  // conjugate pair and so is counted once. Odd nFft has none, and every bin\n  // above DC doubles. torch.fft.irfft splits the same way.\n  let hasNyquist = (params.nFft % 2u) == 0u;\n\n  var numerator: f32 = 0.0;\n  var envelope: f32 = 0.0;\n  for (var frame = 0u; frame < params.frames; frame += 1u) {\n    let n = position - i32(frame * params.hop);\n    // The `n < 0` half of this cannot be caught by a test on this device, and\n    // is written down rather than left to be discovered. Dropping it makes\n    // `u32(n)` wrap to about 4e9; this GPU reads that far past a buffer as\n    // zero, the window value comes back 0, and the frame contributes nothing \u2014\n    // which is accidentally the right answer. WGSL allows an implementation to\n    // clamp the index instead, and a device that clamps would read a real\n    // window value and add a whole frame that does not belong to this sample.\n    if (n < 0 || n >= i32(params.nFft)) {\n      continue;\n    }\n    let base = frame * params.bins;\n    // DC counts once, and its imaginary part is dropped along with Nyquist's.\n    var acc: f32 = real[base];\n    for (var k = 1u; k < params.bins; k += 1u) {\n      let weight = select(2.0, 1.0, hasNyquist && k == params.bins - 1u);\n      // Folded into one turn as an integer, as in the forward kernel.\n      let angle = TWO_PI * (f32((k * u32(n)) % params.nFft) / f32(params.nFft));\n      acc += weight * (real[base + k] * cos(angle) - imag[base + k] * sin(angle));\n    }\n    let w = win[u32(n)];\n    numerator += w * (acc / f32(params.nFft));\n    envelope += w * w;\n  }\n  // No NOLA guard here. A shader cannot raise, and a guard that silently\n  // substituted a value would hand back a waveform for a window that cannot\n  // reconstruct one. The reference refuses those inputs before they get here.\n  out[t] = numerator / envelope;\n}\n";
+
+// gpu.ts
+var TILE = 16;
+var WORKGROUP = 256;
+var Gpu = class _Gpu {
+  constructor(device, adapterInfo) {
+    this.device = device;
+    this.adapterInfo = adapterInfo;
+  }
+  device;
+  adapterInfo;
+  pipelines = /* @__PURE__ */ new Map();
+  /**
+   * Keyed on the weight's own array, so a caller that hands over the same
+   * tensor twice uploads once. `WeakMap`, so dropping the checkpoint drops the
+   * buffers with it rather than pinning half a gigabyte of VRAM behind a cache
+   * nobody can reach.
+   */
+  resident = /* @__PURE__ */ new WeakMap();
+  /**
+   * A device, or null where WebGPU is absent or refuses.
+   *
+   * Null rather than a throw: the demo has a working CPU path and falling back
+   * to it is a better answer than a broken page. What must not happen is
+   * falling back **silently** — the caller reports which one ran.
+   */
+  /**
+   * Wrap a device obtained some other way.
+   *
+   * Node has no `navigator.gpu`; the `webgpu` package hands back a `GPU` after
+   * installing its globals, and web-xpu-ops' own harness uses it that way. The
+   * tests need a real device rather than a mock — a kernel that compiles and
+   * computes the wrong thing is exactly what a mock cannot catch.
+   */
+  static fromDevice(device, info) {
+    return new _Gpu(device, info);
+  }
+  static async create() {
+    const gpu = globalThis.navigator?.gpu;
+    if (!gpu) return null;
+    const adapter = await gpu.requestAdapter();
+    if (!adapter) return null;
+    const device = await adapter.requestDevice({
+      requiredLimits: {
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize
+      }
+    });
+    const info = adapter.info ? [adapter.info.vendor, adapter.info.architecture, adapter.info.description].filter(Boolean).join(" ") || "unknown adapter" : "unknown adapter";
+    return new _Gpu(device, info);
+  }
+  pipeline(code) {
+    let pipeline = this.pipelines.get(code);
+    if (!pipeline) {
+      pipeline = this.device.createComputePipeline({
+        layout: "auto",
+        compute: { module: this.device.createShaderModule({ code }), entryPoint: "main" }
+      });
+      this.pipelines.set(code, pipeline);
+    }
+    return pipeline;
+  }
+  upload(data) {
+    const buffer = this.device.createBuffer({
+      size: Math.max(4, data.byteLength),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    this.device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+    return buffer;
+  }
+  /** Upload once and keep, for anything that does not change between calls. */
+  residentBuffer(data) {
+    let buffer = this.resident.get(data);
+    if (!buffer) {
+      buffer = this.upload(data);
+      this.resident.set(data, buffer);
+    }
+    return buffer;
+  }
+  uniform(values) {
+    const words = new Uint32Array(Math.max(4, Math.ceil(values.length / 4) * 4));
+    words.set(values);
+    const buffer = this.device.createBuffer({
+      size: words.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.device.queue.writeBuffer(buffer, 0, words);
+    return buffer;
+  }
+  async dispatch(code, inputs, outputLength, uniforms, workgroups) {
+    const device = this.device;
+    const pipeline = this.pipeline(code);
+    const output = device.createBuffer({
+      size: Math.max(4, outputLength * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const params = this.uniform(uniforms);
+    const entries = [];
+    inputs.forEach((buffer, index) => entries.push({ binding: index, resource: { buffer } }));
+    entries.push({ binding: inputs.length, resource: { buffer: output } });
+    entries.push({ binding: inputs.length + 1, resource: { buffer: params } });
+    const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+    const staging = device.createBuffer({
+      size: Math.max(4, outputLength * 4),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroups[0], workgroups[1] ?? 1, workgroups[2] ?? 1);
+    pass.end();
+    encoder.copyBufferToBuffer(output, 0, staging, 0, Math.max(4, outputLength * 4));
+    device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(staging.getMappedRange().slice(0, outputLength * 4));
+    staging.unmap();
+    staging.destroy();
+    output.destroy();
+    params.destroy();
+    return result;
+  }
+  /**
+   * `[M, K] x [K, N]`, with `b` kept on the device between calls.
+   *
+   * `b` is the transposed weight, which is the same array every time this layer
+   * runs; `a` is the activation, which is not.
+   */
+  async matmul(a, b, M, N, K) {
+    const bBuffer = this.residentBuffer(b);
+    const aBuffer = this.upload(a);
+    try {
+      return await this.dispatch(MATMUL, [aBuffer, bBuffer], M * N, [M, N, K], [
+        Math.ceil(N / TILE),
+        Math.ceil(M / TILE)
+      ]);
+    } finally {
+      aBuffer.destroy();
+    }
+  }
+  /** `conv1d`, with the weight and bias resident. `N` is always 1 here. */
+  async conv1d(input, weight, bias, Cin, Cout, L, K, padding2) {
+    const outLength = L + 2 * padding2 - (K - 1) - 1 + 1;
+    const inputBuffer = this.upload(input);
+    const weightBuffer = this.residentBuffer(weight);
+    const biasBuffer = this.residentBuffer(bias ?? zeros(Cout));
+    try {
+      const dispatchLength = Math.ceil(outLength / WORKGROUP) * WORKGROUP;
+      return await this.dispatch(
+        CONV1D,
+        [inputBuffer, weightBuffer, biasBuffer],
+        Cout * outLength,
+        [Cin, Cout, L, K, outLength, 1, padding2, 1, Cin, Cout, 0, 0],
+        [dispatchLength / WORKGROUP, Cout, 1]
+      );
+    } finally {
+      inputBuffer.destroy();
+    }
+  }
+  /** The inverse transform. `pad` carries the padding convention, resolved by the caller. */
+  async istft(real, imag, window, frames, nFft, hop, pad, outLength) {
+    const bins = Math.floor(nFft / 2) + 1;
+    const realBuffer = this.upload(real);
+    const imagBuffer = this.upload(imag);
+    const windowBuffer = this.residentBuffer(window);
+    try {
+      return await this.dispatch(
+        ISTFT,
+        [realBuffer, imagBuffer, windowBuffer],
+        outLength,
+        [nFft, hop, bins, frames, outLength, pad],
+        [Math.ceil(outLength / WORKGROUP)]
+      );
+    } finally {
+      realBuffer.destroy();
+      imagBuffer.destroy();
+    }
+  }
+  destroy() {
+    this.device.destroy();
+  }
+};
+var ZEROS = /* @__PURE__ */ new Map();
+function zeros(length) {
+  let array = ZEROS.get(length);
+  if (!array) {
+    array = new Float32Array(length);
+    ZEROS.set(length, array);
+  }
+  return array;
+}
+function gpuBackend(gpu) {
+  return {
+    name: `WebGPU (${gpu.adapterInfo})`,
+    matmul: (a, b, M, N, K) => gpu.matmul(a, b, M, N, K),
+    conv1d: (input, weight, bias, Cin, Cout, L, K, padding2) => gpu.conv1d(input, weight, bias, Cin, Cout, L, K, padding2),
+    istft: (real, imag, window, frames, nFft, hop) => (
+      // `"same"` resolved here, because the kernel takes a number and has no
+      // convention of its own: crop `(nFft - hop) / 2` from each end, which
+      // leaves `hop * frames` samples. The reference does the same arithmetic
+      // behind the mode name.
+      gpu.istft(real, imag, window, frames, nFft, hop, (nFft - hop) / 2, hop * frames)
+    )
+  };
 }
 
 // safetensors.ts
@@ -1033,32 +1302,43 @@ async function fetchCheckpoint(report) {
   }
   return buffer.buffer;
 }
-async function run(fixture, report) {
+async function chooseBackend(choice) {
+  if (choice === "cpu") return { backend: cpuBackend, gpu: null };
+  const gpu = await Gpu.create();
+  if (gpu) return { backend: gpuBackend(gpu), gpu };
+  if (choice === "gpu") throw new Error("WebGPU is unavailable, and the GPU backend was required");
+  return { backend: cpuBackend, gpu: null };
+}
+async function run(fixture, report, choice = "auto") {
   const buffer = await fetchCheckpoint(report);
   report("parsing the checkpoint");
   const weights = new Weights(Safetensors.parse(buffer));
-  report("decoding");
+  const { backend, gpu } = await chooseBackend(choice);
+  report(`decoding on ${backend.name}`);
   await new Promise((resolve2) => setTimeout(resolve2, 0));
-  const started = performance.now();
-  const { waveform } = decode(
-    Float32Array.from(fixture.tokens),
-    Float32Array.from(fixture.global_embedding),
-    fixture.stft_length,
-    MIOCODEC_24K,
-    weights
-  );
-  const elapsedMs = performance.now() - started;
-  const seconds = waveform.length / fixture.sample_rate;
-  return {
-    pcm: waveform,
-    sampleRate: fixture.sample_rate,
-    seconds,
-    elapsedMs,
-    // The number #106 exists to produce. Reported rather than hidden: these are
-    // the library's *reference* implementations, whose own README says speed is
-    // unmeasured for every op, so this is a floor and not a verdict on WebGPU.
-    realTimeFactor: elapsedMs / 1e3 / seconds
-  };
+  try {
+    const started = performance.now();
+    const { waveform } = await decode(
+      Float32Array.from(fixture.tokens),
+      Float32Array.from(fixture.global_embedding),
+      fixture.stft_length,
+      MIOCODEC_24K,
+      weights,
+      backend
+    );
+    const elapsedMs = performance.now() - started;
+    const seconds = waveform.length / fixture.sample_rate;
+    return {
+      pcm: waveform,
+      sampleRate: fixture.sample_rate,
+      seconds,
+      elapsedMs,
+      realTimeFactor: elapsedMs / 1e3 / seconds,
+      backend: backend.name
+    };
+  } finally {
+    gpu?.destroy();
+  }
 }
 function toWav(pcm, sampleRate) {
   const buffer = new ArrayBuffer(44 + pcm.length * 2);

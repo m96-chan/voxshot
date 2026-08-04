@@ -150,3 +150,5 @@ spike/**/.venv/
 
 # Python bytecode from the spike generators
 __pycache__/
+.check-gpu.mjs
+.bench.mjs

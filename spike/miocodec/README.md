@@ -47,21 +47,42 @@ npm run build        # esbuild browser.ts -> examples/mio-tts.js
 npm run check:demo   # drives the page in headless Chromium and reads the numbers back
 ```
 
-Measured on this machine, headless Chromium, reference op implementations:
+`check:demo` runs the page twice, once with `?backend=cpu` and once on `auto`,
+and compares **both** against the torch decode of the same tokens — not against
+each other, since two implementations agreeing says nothing if they agree on the
+wrong answer. Measured on this machine:
 
-| | |
-| --- | --- |
-| output | 6.00 s @ 24 kHz |
-| decode | 35.4 s |
-| **RTF** | **5.90** |
-| tokens | 150 @ 25 Hz → 300 STFT frames |
+| backend | decode | RTF | vs torch |
+| --- | ---: | ---: | ---: |
+| reference (CPU) | 36.3 s | 5.98 | 1.64e-4 |
+| WebGPU kernels | 28.0 s | 4.67 | 2.63e-4 |
 
-`npm run bench` runs the same decode in Node — RTF 4.90 there, so a fifth of the
-gap is the browser and the rest is the same naive arithmetic in both.
+**Neither number is a hardware measurement, and the second one especially is
+not.** Chromium here reports its WebGPU adapter as `google swiftshader` — a
+software rasteriser — whatever combination of `--enable-gpu`,
+`--ignore-gpu-blocklist`, Vulkan feature flags, sandbox flags and headed-versus-
+headless it is given, on a machine with an RTX 5090 and a working Vulkan ICD.
+So the run checks that the **kernels compute the right thing**, and says nothing
+about speed. `check:demo` prints a warning when the adapter is software, because
+an RTF printed next to "WebGPU" looks exactly like a hardware number.
 
-**That number is a floor, not a verdict on WebGPU.** These are the library's
-*reference* implementations, which its own README calls the slowest expression
-of each op and marks "Speed unmeasured". The kernels are the next step.
+The WebGPU path is also a **hybrid**: `matmul`, `conv1d` and the inverse
+transform are dispatched as kernels, and every other stage — layernorm, RoPE,
+attention, group norm, the activations — stays on the reference
+implementations. Those three are where the arithmetic is; the rest is linear in
+its data. A full-kernel port would be a different measurement.
+
+`npm run bench` runs the CPU decode in Node — RTF 4.90 there against 5.98 in the
+browser.
+
+### Why the GPU check runs in a browser rather than in Vitest
+
+Dawn's native module works in plain Node — verified with a standalone dispatch —
+but a `matmul` of `25x768x5` core dumps it, and under Vitest 4's fork pool the
+worker dies in 2.6 seconds, before any GPU work starts. Upstream hit the same
+wall on Vitest 2 and lists four pool configurations that did not help
+(`scripts/test.mjs`), which are what `vitest.config.ts` here started from.
+Chromium is the target for this code anyway, so that is where it is checked.
 
 `check:demo` routes the checkpoint request to the local Hugging Face cache
 rather than pulling 523 MB per run. The network path is checked separately and
