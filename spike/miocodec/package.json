@@ -1,0 +1,18 @@
+{
+  "name": "@spike/miocodec",
+  "private": true,
+  "type": "module",
+  "description": "Spike for voxshot#106: MioCodec's decoder on web-xpu-ops, checked against a golden from the reference implementation.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "web-xpu-ops": "file:../../../web-xpu-ops"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}

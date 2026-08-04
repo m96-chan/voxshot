@@ -18,6 +18,39 @@ here runs under `npm test`, and none of it is on the package's install path.
 `golden/index.json` records the checkpoint's sha256, so a golden and the weights
 it was taken from cannot drift apart unnoticed.
 
+## Running the port's tests
+
+```bash
+npm install     # web-xpu-ops arrives as a file: dependency
+npm test
+```
+
+**This assumes [web-xpu-ops](https://github.com/m96-chan/web-xpu-ops) is checked
+out beside this repository** — `package.json` names it as
+`file:../../../web-xpu-ops`. It is unpublished and ships raw TypeScript, so
+there is nothing to install from a registry; `vitest.config.ts` inlines it,
+because a `file:` symlink is still `node_modules` as far as Vitest's
+"don't transform dependencies" rule is concerned.
+
+`npm test` at the repository root does **not** run these. Its `include` is
+`tests/**`, and these tests need goldens that are not in git — a suite that
+skipped itself when its fixtures were absent would report success for having
+checked nothing.
+
+### What is checked so far
+
+`istft.test.ts` — the decoder's **last** stage, taken first because it is the one
+that had no expression in the op library until [web-xpu-ops#92](https://github.com/m96-chan/web-xpu-ops/issues/92),
+and because it needs no weights: the golden already carries the spectrogram that
+enters it.
+
+All three cases reproduce the reference waveform to **2.4–2.9e-7 relative**
+against the peak, which is f32 round-off between a float64 JavaScript reference
+and a float32 torch tensor. The other two padding modes are wrong by a whole hop
+(`center`) or refuse outright (`none` fails NOLA at sample 0, where a periodic
+Hann is zero), and the test asserts both — so it is passing for the reason it
+claims.
+
 ## Regenerating the golden
 
 ```bash
