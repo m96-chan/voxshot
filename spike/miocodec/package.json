@@ -1,0 +1,27 @@
+{
+  "name": "@spike/miocodec",
+  "private": true,
+  "type": "module",
+  "description": "Spike for voxshot#106: MioCodec's decoder on web-xpu-ops, checked against a golden from the reference implementation.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "bench": "esbuild bench.ts --bundle --platform=node --format=esm --outfile=.bench.mjs --log-level=warning && node .bench.mjs",
+    "build": "esbuild browser.ts --bundle --format=esm --target=es2022 --outfile=../../examples/mio-tts.js",
+    "check:demo": "node check-demo.mjs",
+    "check:gpu": "esbuild check-gpu.ts --bundle --platform=node --format=esm --external:webgpu --outfile=.check-gpu.mjs --log-level=warning && node .check-gpu.mjs"
+  },
+  "dependencies": {
+    "web-xpu-ops": "file:../../../web-xpu-ops"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@webgpu/types": "^0.1.71",
+    "esbuild": "^0.28.1",
+    "playwright": "^1.62.1",
+    "tsx": "^4.23.5",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10",
+    "webgpu": "^0.4.0"
+  }
+}

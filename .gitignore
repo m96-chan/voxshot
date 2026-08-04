@@ -141,3 +141,14 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Spike goldens and their virtualenvs (spike/*/README.md says how to rebuild).
+# The generators are in git; their output is not — raw float dumps say nothing
+# in a diff, and the checkpoints they come from are hundreds of megabytes.
+spike/**/golden/
+spike/**/.venv/
+
+# Python bytecode from the spike generators
+__pycache__/
+.check-gpu.mjs
+.bench.mjs
