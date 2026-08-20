@@ -146,6 +146,7 @@ vite.config.ts.timestamp-*
 # The generators are in git; their output is not — raw float dumps say nothing
 # in a diff, and the checkpoints they come from are hundreds of megabytes.
 spike/**/golden/
+spike/**/golden-encoder/
 spike/**/.venv/
 
 # Python bytecode from the spike generators
