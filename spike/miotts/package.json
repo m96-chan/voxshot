@@ -1,0 +1,22 @@
+{
+  "name": "spike-miotts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "web-xpu-ops": "file:../../../web-xpu-ops"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@webgpu/types": "^0.1.71",
+    "esbuild": "^0.28.1",
+    "playwright": "^1.62.1",
+    "tsx": "^4.23.5",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10",
+    "webgpu": "^0.4.0"
+  }
+}
