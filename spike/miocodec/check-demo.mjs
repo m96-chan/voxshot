@@ -82,8 +82,15 @@ const browser = await chromium.launch({
   headless,
   args: [
     "--enable-unsafe-webgpu",
-    // Dawn talks to Vulkan directly; ANGLE is for GL and gets in the way here.
-    "--enable-features=Vulkan,VulkanFromANGLE",
+    // Chromium routes WebGPU through ANGLE's Vulkan backend; without
+    // --use-angle=vulkan it stays on the software path even when the host's
+    // Vulkan ICD sees the hardware. Measured on this machine (RTX 5090,
+    // driver 610.57.04): "Vulkan,VulkanFromANGLE" alone still came back as
+    // "google swiftshader"; with --use-angle=vulkan, headed Chromium reports
+    // vendor nvidia. New headless (--headless=new) still falls back to
+    // software either way, hence headed-when-DISPLAY above.
+    "--enable-features=Vulkan",
+    "--use-angle=vulkan",
     "--ignore-gpu-blocklist",
     "--enable-gpu",
     // Headless Chromium disables the GPU process outright unless told not to,
