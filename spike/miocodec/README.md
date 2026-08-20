@@ -39,11 +39,11 @@ checked nothing.
 
 ### The demo
 
-`examples/mio-tts.html` decodes a committed token fixture in the browser and
+`examples/mio-codec.html` decodes a committed token fixture in the browser and
 plays the result. Build and check it with:
 
 ```bash
-npm run build        # esbuild browser.ts -> examples/mio-tts.js
+npm run build        # esbuild browser.ts -> examples/mio-codec.js
 npm run check:demo   # drives the page in headless Chromium and reads the numbers back
 ```
 

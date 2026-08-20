@@ -1,4 +1,4 @@
-// ../../../web-xpu-ops/ops/activation/reference.ts
+// ../../../web-xpu-ops/dist/ops/activation/reference.js
 var ACTIVATION = {
   relu2: 0,
   silu: 1,
@@ -8,15 +8,18 @@ var ACTIVATION = {
   gelu_tanh: 5
 };
 function erf(x) {
-  if (x < 0) return -erf(-x);
-  if (x >= 6) return 1;
+  if (x < 0)
+    return -erf(-x);
+  if (x >= 6)
+    return 1;
   const twoXSquared = 2 * x * x;
   let term = 1;
   let sum = 1;
   for (let n = 1; n < 400; n += 1) {
     term *= twoXSquared / (2 * n + 1);
     sum += term;
-    if (term < sum * 1e-18) break;
+    if (term < sum * 1e-18)
+      break;
   }
   return 2 * x / Math.sqrt(Math.PI) * Math.exp(-x * x) * sum;
 }
@@ -45,7 +48,7 @@ function apply(x, kind, alpha) {
   }
 }
 
-// ../../../web-xpu-ops/ops/attention/reference.ts
+// ../../../web-xpu-ops/dist/ops/attention/reference.js
 function defaultScale(D) {
   return 1 / Math.sqrt(D);
 }
@@ -53,7 +56,8 @@ function resolveMask(args, op) {
   const { mask, B, H, L, S } = args;
   const shape = args.maskShape ?? [B, 1, 1];
   if (!mask) {
-    if (args.maskShape) throw new Error(`${op}(): maskShape given without a mask`);
+    if (args.maskShape)
+      throw new Error(`${op}(): maskShape given without a mask`);
     return { shape, at: () => 0 };
   }
   if (args.causal) {
@@ -99,18 +103,24 @@ function attention(args) {
             continue;
           }
           let dot = 0;
-          for (let d = 0; d < D; d += 1) dot += q[qHead + i * D + d] * k[kHead + j * D + d];
+          for (let d = 0; d < D; d += 1)
+            dot += q[qHead + i * D + d] * k[kHead + j * D + d];
           row[j] = dot * scale + bias(b, h, i, j);
         }
         let max = -Infinity;
-        for (let j = 0; j < S; j += 1) max = Math.max(max, row[j]);
-        if (max === -Infinity) continue;
+        for (let j = 0; j < S; j += 1)
+          max = Math.max(max, row[j]);
+        if (max === -Infinity)
+          continue;
         let sum = 0;
-        for (let j = 0; j < S; j += 1) sum += Math.exp(row[j] - max);
-        for (let j = 0; j < S; j += 1) probs[pHead + i * S + j] = Math.exp(row[j] - max) / sum;
+        for (let j = 0; j < S; j += 1)
+          sum += Math.exp(row[j] - max);
+        for (let j = 0; j < S; j += 1)
+          probs[pHead + i * S + j] = Math.exp(row[j] - max) / sum;
         for (let c = 0; c < Dv; c += 1) {
           let acc = 0;
-          for (let j = 0; j < S; j += 1) acc += probs[pHead + i * S + j] * v[vHead + j * Dv + c];
+          for (let j = 0; j < S; j += 1)
+            acc += probs[pHead + i * S + j] * v[vHead + j * Dv + c];
           output[oHead + i * Dv + c] = acc;
         }
       }
@@ -119,30 +129,11 @@ function attention(args) {
   return { probs, output };
 }
 
-// ../../../web-xpu-ops/ops/conv/reference.ts
-function conv1dOutputLength({
-  L,
-  K,
-  stride = 1,
-  padding: padding2 = 0,
-  dilation = 1
-}) {
+// ../../../web-xpu-ops/dist/ops/conv/reference.js
+function conv1dOutputLength({ L, K, stride = 1, padding: padding2 = 0, dilation = 1 }) {
   return Math.floor((L + 2 * padding2 - dilation * (K - 1) - 1) / stride) + 1;
 }
-function conv1d({
-  input,
-  weight,
-  bias,
-  N,
-  Cin,
-  Cout,
-  L,
-  K,
-  stride = 1,
-  padding: padding2 = 0,
-  dilation = 1,
-  groups = 1
-}) {
+function conv1d({ input, weight, bias, N, Cin, Cout, L, K, stride = 1, padding: padding2 = 0, dilation = 1, groups = 1 }) {
   if (Cin % groups !== 0 || Cout % groups !== 0) {
     throw new Error(`conv1d(): Cin=${Cin} and Cout=${Cout} must both be divisible by groups=${groups}`);
   }
@@ -168,7 +159,8 @@ function conv1d({
           const ic = group * inPerGroup + icLocal;
           for (let k = 0; k < K; k += 1) {
             const il = ol * stride + k * dilation - padding2;
-            if (il < 0 || il >= L) continue;
+            if (il < 0 || il >= L)
+              continue;
             acc += input[(n * Cin + ic) * L + il] * weight[(oc * inPerGroup + icLocal) * K + k];
           }
         }
@@ -179,39 +171,16 @@ function conv1d({
   return output;
 }
 
-// ../../../web-xpu-ops/ops/conv_transpose/reference.ts
-function convTranspose1dOutputLength({
-  L,
-  K,
-  stride = 1,
-  padding: padding2 = 0,
-  outputPadding = 0,
-  dilation = 1
-}) {
+// ../../../web-xpu-ops/dist/ops/conv_transpose/reference.js
+function convTranspose1dOutputLength({ L, K, stride = 1, padding: padding2 = 0, outputPadding = 0, dilation = 1 }) {
   return (L - 1) * stride - 2 * padding2 + dilation * (K - 1) + outputPadding + 1;
 }
-function convTranspose1d({
-  input,
-  weight,
-  bias,
-  N,
-  Cin,
-  Cout,
-  L,
-  K,
-  stride = 1,
-  padding: padding2 = 0,
-  outputPadding = 0,
-  dilation = 1,
-  groups = 1
-}) {
+function convTranspose1d({ input, weight, bias, N, Cin, Cout, L, K, stride = 1, padding: padding2 = 0, outputPadding = 0, dilation = 1, groups = 1 }) {
   if (padding2 < 0) {
     throw new Error(`convTranspose1d(): negative padding is not supported, got padding=${padding2}`);
   }
   if (outputPadding < 0 || outputPadding >= stride && outputPadding >= dilation) {
-    throw new Error(
-      `convTranspose1d(): output_padding=${outputPadding} must be smaller than either stride=${stride} or dilation=${dilation}`
-    );
+    throw new Error(`convTranspose1d(): output_padding=${outputPadding} must be smaller than either stride=${stride} or dilation=${dilation}`);
   }
   if (Cin % groups !== 0 || Cout % groups !== 0) {
     throw new Error(`convTranspose1d(): Cin=${Cin} and Cout=${Cout} must both be divisible by groups=${groups}`);
@@ -247,7 +216,8 @@ function convTranspose1d({
           const x = input[(n * Cin + ic) * L + l];
           for (let k = 0; k < K; k += 1) {
             const ol = l * stride + k * dilation - padding2;
-            if (ol < 0 || ol >= Lout) continue;
+            if (ol < 0 || ol >= Lout)
+              continue;
             output[(n * Cout + oc) * Lout + ol] += x * weight[(ic * outPerGroup + ocLocal) * K + k];
           }
         }
@@ -257,12 +227,10 @@ function convTranspose1d({
   return output;
 }
 
-// ../../../web-xpu-ops/ops/group_norm/reference.ts
+// ../../../web-xpu-ops/dist/ops/group_norm/reference.js
 function groupNorm({ input, weight, bias, N, C, L, G, eps }) {
   if (G <= 0 || C % G !== 0) {
-    throw new Error(
-      `group_norm: expected number of channels (${C}) to be divisible by num_groups (${G})`
-    );
+    throw new Error(`group_norm: expected number of channels (${C}) to be divisible by num_groups (${G})`);
   }
   const output = new Float32Array(N * C * L);
   const channelsPerGroup = C / G;
@@ -291,7 +259,7 @@ function groupNorm({ input, weight, bias, N, C, L, G, eps }) {
   return output;
 }
 
-// ../../../web-xpu-ops/ops/layernorm/reference.ts
+// ../../../web-xpu-ops/dist/ops/layernorm/reference.js
 function layernorm({ input, weight, bias, N, D, eps }) {
   const output = new Float32Array(N * D);
   for (let row = 0; row < N; row += 1) {
@@ -314,7 +282,7 @@ function layernorm({ input, weight, bias, N, D, eps }) {
   return output;
 }
 
-// ../../../web-xpu-ops/ops/matmul/reference.ts
+// ../../../web-xpu-ops/dist/ops/matmul/reference.js
 function matmul({ a, b, M, N, K }) {
   const output = new Float32Array(M * N);
   for (let row = 0; row < M; row += 1) {
@@ -329,7 +297,7 @@ function matmul({ a, b, M, N, K }) {
   return output;
 }
 
-// ../../../web-xpu-ops/ops/rope/reference.ts
+// ../../../web-xpu-ops/dist/ops/rope/reference.js
 var UNSCALED = {
   interpolationFactor: 1,
   rampLow: 0,
@@ -337,7 +305,8 @@ var UNSCALED = {
   attentionFactor: 1
 };
 function ropeFrequencyParams(headDim, thetaBase, scaling) {
-  if (!scaling) return { ...UNSCALED, effectiveBase: thetaBase };
+  if (!scaling)
+    return { ...UNSCALED, effectiveBase: thetaBase };
   if (scaling.kind === "ntk") {
     return {
       ...UNSCALED,
@@ -348,13 +317,13 @@ function ropeFrequencyParams(headDim, thetaBase, scaling) {
   const correctionDim = (rotations) => headDim * Math.log(originalContextLength / (rotations * 2 * Math.PI)) / (2 * Math.log(thetaBase));
   const rampLow = Math.max(Math.floor(correctionDim(betaFast)), 0);
   let rampHigh = Math.min(Math.ceil(correctionDim(betaSlow)), headDim - 1);
-  if (rampHigh === rampLow) rampHigh += 1e-3;
+  if (rampHigh === rampLow)
+    rampHigh += 1e-3;
   return {
     effectiveBase: thetaBase,
     interpolationFactor: factor,
     rampLow,
     rampHigh,
-    // §3.4: √(1/t) = 0.1·ln(s) + 1, and 1 when there is nothing to extend.
     attentionFactor: scaling.attentionFactor ?? (factor <= 1 ? 1 : 0.1 * Math.log(factor) + 1)
   };
 }
@@ -364,18 +333,7 @@ function invFreq({ effectiveBase, interpolationFactor, rampLow, rampHigh }, head
   const ramp = Math.min(Math.max((pair - rampLow) / (rampHigh - rampLow), 0), 1);
   return extrapolation + (interpolation - extrapolation) * ramp;
 }
-function rope({
-  input,
-  N,
-  numHeads,
-  headDim,
-  posOffset,
-  thetaBase,
-  scaling,
-  cache,
-  headOffset = 0,
-  headCount = numHeads
-}) {
+function rope({ input, N, numHeads, headDim, posOffset, thetaBase, scaling, cache, headOffset = 0, headCount = numHeads }) {
   const output = new Float32Array(input.length);
   const halfDim = headDim / 2;
   const freq = ropeFrequencyParams(headDim, thetaBase, scaling);
@@ -386,22 +344,19 @@ function rope({
     }
     for (const key of Object.keys(freq)) {
       if (cache.freq[key] !== freq[key]) {
-        throw new Error(
-          `rope: cache was built with ${key}=${cache.freq[key]}, called with ${key}=${freq[key]}`
-        );
+        throw new Error(`rope: cache was built with ${key}=${cache.freq[key]}, called with ${key}=${freq[key]}`);
       }
     }
   }
   if (headOffset < 0 || headCount < 0 || headOffset + headCount > numHeads) {
-    throw new Error(
-      `rope: head range [${headOffset}, ${headOffset + headCount}) does not fit ${numHeads} heads`
-    );
+    throw new Error(`rope: head range [${headOffset}, ${headOffset + headCount}) does not fit ${numHeads} heads`);
   }
   for (let token = 0; token < N; token += 1) {
     for (let head = 0; head < numHeads; head += 1) {
       if (head < headOffset || head >= headOffset + headCount) {
         const from = (token * numHeads + head) * headDim;
-        for (let i = 0; i < headDim; i += 1) output[from + i] = input[from + i];
+        for (let i = 0; i < headDim; i += 1)
+          output[from + i] = input[from + i];
         continue;
       }
       for (let pair = 0; pair < halfDim; pair += 1) {
@@ -428,7 +383,7 @@ function rope({
   return output;
 }
 
-// ../../../web-xpu-ops/ops/stft/reference.ts
+// ../../../web-xpu-ops/dist/ops/stft/reference.js
 function stftBins(nFft) {
   return Math.floor(nFft / 2) + 1;
 }
@@ -440,38 +395,35 @@ function istftMaxLength(nFft, hop, frames, mode = true) {
   return resolve(mode) === "same" ? nFft + hop * (frames - 1) - 2 * trim : nFft + hop * (frames - 1) - trim;
 }
 function resolve(mode) {
-  if (mode === true) return "center";
-  if (mode === false) return "none";
+  if (mode === true)
+    return "center";
+  if (mode === false)
+    return "none";
   return mode;
 }
 function padding(nFft, hop, mode) {
   const resolved = resolve(mode);
-  if (resolved === "none") return 0;
-  if (resolved === "same") return Math.floor((nFft - hop) / 2);
+  if (resolved === "none")
+    return 0;
+  if (resolved === "same")
+    return Math.floor((nFft - hop) / 2);
   return Math.floor(nFft / 2);
 }
 function hannWindow(n, periodic = true) {
   const denominator = periodic ? n : n - 1;
   return Float32Array.from({ length: n }, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / denominator));
 }
-function istft({
-  real,
-  imag,
-  frames,
-  nFft,
-  hop,
-  window,
-  center,
-  padding: mode,
-  length
-}) {
+function istft({ real, imag, frames, nFft, hop, window, center, padding: mode, length }) {
   if (center !== void 0 && mode !== void 0) {
     throw new Error("give either center or padding, not both");
   }
   const resolved = resolve(mode ?? center ?? true);
-  if (nFft < 1) throw new Error(`nFft must be positive, got ${nFft}`);
-  if (hop < 1) throw new Error(`hop must be positive, got ${hop}`);
-  if (window.length !== nFft) throw new Error(`window must be ${nFft} long, got ${window.length}`);
+  if (nFft < 1)
+    throw new Error(`nFft must be positive, got ${nFft}`);
+  if (hop < 1)
+    throw new Error(`hop must be positive, got ${hop}`);
+  if (window.length !== nFft)
+    throw new Error(`window must be ${nFft} long, got ${window.length}`);
   const bins = stftBins(nFft);
   for (const [name, side] of [["real", real], ["imag", imag]]) {
     if (side.length !== frames * bins) {
@@ -492,7 +444,8 @@ function istft({
     let envelope = 0;
     for (let frame = 0; frame < frames; frame += 1) {
       const n = position - frame * hop;
-      if (n < 0 || n >= nFft) continue;
+      if (n < 0 || n >= nFft)
+        continue;
       const base = frame * bins;
       let acc = real[base];
       for (let k = 1; k < bins; k += 1) {
@@ -505,9 +458,7 @@ function istft({
       envelope += w * w;
     }
     if (envelope < NOLA_FLOOR) {
-      throw new Error(
-        `window fails NOLA at sample ${t}: the w\xB2 envelope is ${envelope}, below ${NOLA_FLOOR}`
-      );
+      throw new Error(`window fails NOLA at sample ${t}: the w\xB2 envelope is ${envelope}, below ${NOLA_FLOOR}`);
     }
     output[t] = numerator / envelope;
   }

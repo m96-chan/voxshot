@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { decode, MIOCODEC_24K, Weights } from "./decoder.js";
 import { Safetensors } from "./safetensors.js";
 
-const fixture = JSON.parse(readFileSync("../../examples/mio-tts-fixture.json", "utf8"));
+const fixture = JSON.parse(readFileSync("../../examples/mio-codec-fixture.json", "utf8"));
 const hub = join(homedir(), ".cache", "huggingface", "hub", "models--Aratako--MioCodec-25Hz-24kHz");
 const rev = readFileSync(join(hub, "refs", "main"), "utf8").trim();
 const bytes = readFileSync(join(hub, "snapshots", rev, "model.safetensors"));

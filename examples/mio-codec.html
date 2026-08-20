@@ -160,7 +160,7 @@
     </main>
 
     <script type="module">
-      import { run, toWav } from "./mio-tts.js";
+      import { run, toWav } from "./mio-codec.js";
 
       const button = document.getElementById("run");
       const bar = document.getElementById("bar");
@@ -174,7 +174,7 @@
         button.disabled = true;
         bar.classList.remove("hidden");
         try {
-          const fixture = await (await fetch("./mio-tts-fixture.json")).json();
+          const fixture = await (await fetch("./mio-codec-fixture.json")).json();
 
           const report = (stage, detail) => {
             if (detail?.loaded !== undefined && detail.total) {

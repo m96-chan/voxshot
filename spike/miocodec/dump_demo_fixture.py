@@ -24,7 +24,7 @@ from dump_golden import GLOBAL_DIM, REPO_ID, load_model
 
 HERE = Path(__file__).parent
 SOURCE = HERE.parent.parent / "examples" / "browser" / "public" / "models" / "chatterbox-multilingual" / "default_voice.wav"
-OUT = HERE.parent.parent / "examples" / "mio-tts-fixture.json"
+OUT = HERE.parent.parent / "examples" / "mio-codec-fixture.json"
 # Long enough to be recognisably speech, short enough that the reference decode
 # below stays quick and the fixture stays a couple of kilobytes.
 MAX_SECONDS = 6.0

@@ -3,7 +3,7 @@ import { Gpu, gpuBackend } from "./gpu.js";
 import { Safetensors } from "./safetensors.js";
 
 /**
- * The browser entry point for `examples/mio-tts.html`.
+ * The browser entry point for `examples/mio-codec.html`.
  *
  * Fetches MioCodec's checkpoint straight from the Hugging Face CDN, decodes the
  * committed token fixture, and hands back PCM. No server, no build step beyond

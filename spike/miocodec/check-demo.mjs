@@ -1,5 +1,5 @@
 /**
- * Drive `examples/mio-tts.html` in a real browser and report what it produced.
+ * Drive `examples/mio-codec.html` in a real browser and report what it produced.
  *
  * The page is the deliverable, so "it should work" is not a claim this repo
  * accepts (rule 2). This opens it in headless Chromium, clicks the button,
@@ -43,7 +43,7 @@ const server = createServer((request, response) => {
   // `route.fulfill` cannot carry half a gigabyte (Playwright stringifies the
   // body and Node caps a string at 0x1fffffe8), so the route below answers with
   // a redirect here instead.
-  const file = name === "model.safetensors" ? checkpointPath() : join(ROOT, name || "mio-tts.html");
+  const file = name === "model.safetensors" ? checkpointPath() : join(ROOT, name || "mio-codec.html");
   try {
     statSync(file);
   } catch {
@@ -150,7 +150,7 @@ function worstRelative(actual, expected) {
 }
 
 async function decodeWith(backend) {
-  await page.goto(`http://localhost:8081/mio-tts.html?backend=${backend}`);
+  await page.goto(`http://localhost:8081/mio-codec.html?backend=${backend}`);
   await page.click("#run");
   // The reference implementations take about half a minute for six seconds of
   // audio; five is slack for a slower machine, not an expectation.
