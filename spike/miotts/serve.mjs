@@ -22,6 +22,7 @@
  * progress bars need a total.
  */
 
+import { createHash } from "node:crypto";
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
@@ -59,6 +60,40 @@ function resolve(pathname) {
     return join(Q8_DIR, name.slice("miotts/q8/".length));
   }
   return join(EXAMPLES, name || "mio-tts.html");
+}
+
+// Startup gate: the tokenizer.json this server hands the page (resolved via
+// refs/main, which can silently move) must be byte-identical to the one the
+// golden vectors — and therefore the TS tokenizer port — were verified
+// against. Serving a drifted file would break the page in ways no check
+// attributes to the tokenizer.
+{
+  let pinned;
+  try {
+    pinned = JSON.parse(
+      readFileSync(new URL("./golden/tokenizer_vectors.json", import.meta.url), "utf8"),
+    ).tokenizer_sha256;
+  } catch {
+    /* handled below */
+  }
+  if (!pinned) {
+    console.error(
+      "golden/tokenizer_vectors.json (with tokenizer_sha256) is missing — rebuild it with\n" +
+        "  cd spike/miotts && python3 dump_tokenizer_vectors.py",
+    );
+    process.exit(1);
+  }
+  const served = resolve("/miotts/tokenizer.json");
+  const actual = createHash("sha256").update(readFileSync(served)).digest("hex");
+  if (actual !== pinned) {
+    console.error(
+      `tokenizer.json drift: ${served}\n` +
+        `hashes to ${actual}, but the golden vectors were dumped from ${pinned}.\n` +
+        "refs/main moved under us — re-verify the tokenizer port against the new file and rerun\n" +
+        "  cd spike/miotts && python3 dump_tokenizer_vectors.py",
+    );
+    process.exit(1);
+  }
 }
 
 const server = createServer((request, response) => {

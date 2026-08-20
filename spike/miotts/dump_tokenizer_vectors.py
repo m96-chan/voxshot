@@ -15,6 +15,7 @@ oracle is the reference tokenizer itself, run on inputs chosen to hit each stage
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -48,6 +49,11 @@ ENCODE_TEXTS = [
     # the contraction branch stops at "'VE" and the fallback would not)
     "we'rex and I'VEGOT it, don'tx",
     "SHE'LLGO but it'sx THEY'DGO I'mx WE'VEX",
+    # Unicode simple case folding inside the contraction group: the reference's
+    # Rust (?i:...) folds U+017F (ſ) to 's', so "'ſ" is a contraction piece.
+    # A rewrite as explicit [sS] classes misses it; these vectors pin it down.
+    "it'ſ fine",
+    "x'ſy",
     # mixed JA/EN
     "今日はmeetingが3件あります",
     "TTSモデルのlatencyを測る",
@@ -135,9 +141,17 @@ def main() -> None:
         decode.append({"ids": ids, "text": text})
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
+    # Pin the exact tokenizer.json these vectors were dumped from: every
+    # consumer (tokenizer.test.ts, expected-tokens.ts, serve.mjs) resolves
+    # tokenizer.json independently, and a silently different file would make
+    # the vectors test the wrong thing.
+    tokenizer_sha256 = hashlib.sha256(
+        (Path(SNAPSHOT) / "tokenizer.json").read_bytes()
+    ).hexdigest()
     payload = {
         "_rebuild": "cd spike/miotts && python3 dump_tokenizer_vectors.py",
         "snapshot": SNAPSHOT,
+        "tokenizer_sha256": tokenizer_sha256,
         "encode": encode,
         "chat": chat,
         "decode": decode,

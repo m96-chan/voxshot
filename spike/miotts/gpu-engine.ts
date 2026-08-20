@@ -108,9 +108,12 @@ export interface GpuEngineStats {
 export interface GpuEngine {
   /**
    * One token through all 28 layers: one submit, logits-only readback.
-   * Prefill = call this once per prompt token and keep only the last logits.
+   * Prefill = call this once per prompt token and keep only the last logits;
+   * pass `skipLogits` on every prompt token but the last, which drops the
+   * 164k-row lm_head dispatches and the 657 KB readback (returns null) —
+   * only the KV cache write matters for those steps.
    */
-  decodeStep(tokenId: number): Promise<Float32Array>;
+  decodeStep(tokenId: number, opts?: { skipLogits?: boolean }): Promise<Float32Array | null>;
   /** Positions already resident in the KV cache. */
   readonly position: number;
   /** Start a new generation: rewinds the position; the KV cache is overwritten in place. */
@@ -174,9 +177,16 @@ export async function createGpuEngine(
   const pipelines = new Map<string, GPUComputePipeline>();
   const modules = new Map<string, GPUShaderModule>();
 
+  // EVERY GPUBuffer this engine makes goes through createStorageBuffer or
+  // uniformOf, and both register here — destroy() must free the shared
+  // activation buffers and the ~30 uniforms too, not just the weights.
+  const trackedBuffers: GPUBuffer[] = [];
+
   function createStorageBuffer(bytes: number, usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC): GPUBuffer {
     stats.buffersCreated += 1;
-    return device.createBuffer({ size: Math.max(4, bytes), usage });
+    const buffer = device.createBuffer({ size: Math.max(4, bytes), usage });
+    trackedBuffers.push(buffer);
+    return buffer;
   }
 
   function upload(buffer: GPUBuffer, offset: number, data: ArrayBufferView): void {
@@ -187,6 +197,7 @@ export async function createGpuEngine(
     stats.buffersCreated += 1;
     const data = packFields(fields);
     const buffer = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    trackedBuffers.push(buffer);
     device.queue.writeBuffer(buffer, 0, data);
     return buffer;
   }
@@ -314,33 +325,25 @@ export async function createGpuEngine(
   const add2Group = await bindGroup(elementwisePipeline, [hiddenB, downOutBuf, hiddenA, addUniform]);
 
   // ---- Per-layer weights, bind groups and KV cache. ----
-  const trackedBuffers: GPUBuffer[] = [];
-  const track = (buf: GPUBuffer): GPUBuffer => {
-    trackedBuffers.push(buf);
-    return buf;
-  };
-
   async function projectionGroup(w: PackedQ8, uniform: GPUBuffer, vectorBuf: GPUBuffer, outBuf: GPUBuffer): Promise<GPUBindGroup> {
     const { weightBuf, scaleBuf } = uploadPacked(w);
-    track(weightBuf);
-    track(scaleBuf);
     return bindGroup(matvecPipeline, [weightBuf, scaleBuf, vectorBuf, outBuf, uniform]);
   }
 
   const layers: LayerResident[] = [];
   for (const lw of weights.perLayer) {
-    const attnNormBuf = track(createStorageBuffer(lw.attnNorm.byteLength));
+    const attnNormBuf = createStorageBuffer(lw.attnNorm.byteLength);
     upload(attnNormBuf, 0, lw.attnNorm);
-    const ffnNormBuf = track(createStorageBuffer(lw.ffnNorm.byteLength));
+    const ffnNormBuf = createStorageBuffer(lw.ffnNorm.byteLength);
     upload(ffnNormBuf, 0, lw.ffnNorm);
     // Permuted gammas (ops/rope channel order), per weights-q8.ts's contract.
-    const qGammaBuf = track(createStorageBuffer(lw.qNorm.byteLength));
+    const qGammaBuf = createStorageBuffer(lw.qNorm.byteLength);
     upload(qGammaBuf, 0, lw.qNorm);
-    const kGammaBuf = track(createStorageBuffer(lw.kNorm.byteLength));
+    const kGammaBuf = createStorageBuffer(lw.kNorm.byteLength);
     upload(kGammaBuf, 0, lw.kNorm);
 
-    const kCacheBuf = track(createStorageBuffer(numKvHeads * maxSeqLen * headDim * 4));
-    const vCacheBuf = track(createStorageBuffer(numKvHeads * maxSeqLen * headDim * 4));
+    const kCacheBuf = createStorageBuffer(numKvHeads * maxSeqLen * headDim * 4);
+    const vCacheBuf = createStorageBuffer(numKvHeads * maxSeqLen * headDim * 4);
 
     layers.push({
       kCacheBuf,
@@ -361,7 +364,7 @@ export async function createGpuEngine(
     });
   }
 
-  const finalNormBuf = track(createStorageBuffer(weights.finalNorm.byteLength));
+  const finalNormBuf = createStorageBuffer(weights.finalNorm.byteLength);
   upload(finalNormBuf, 0, weights.finalNorm);
   const finalNormGroup = await bindGroup(rmsnormPipeline, [hiddenA, finalNormBuf, finalNormedBuf, hiddenNormUniform]);
 
@@ -372,8 +375,8 @@ export async function createGpuEngine(
   for (let rowStart = 0; rowStart < vocabSize; rowStart += MAX_WORKGROUPS_PER_DISPATCH) {
     const rowCount = Math.min(MAX_WORKGROUPS_PER_DISPATCH, vocabSize - rowStart);
     const chunkUniform = uniformOf([["u32", rowCount], ["u32", hiddenSize]]);
-    const outBuf = track(createStorageBuffer(rowCount * 4));
-    const staging = track(createStorageBuffer(rowCount * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ));
+    const outBuf = createStorageBuffer(rowCount * 4);
+    const staging = createStorageBuffer(rowCount * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
     const group = await projectionGroup(
       {
         packed: weights.embedTokens.packed.subarray(rowStart * wordsPerRow, (rowStart + rowCount) * wordsPerRow),
@@ -392,7 +395,8 @@ export async function createGpuEngine(
   let position = 0;
   let firstStepCounted = false;
 
-  async function decodeStep(tokenId: number): Promise<Float32Array> {
+  async function decodeStep(tokenId: number, opts?: { skipLogits?: boolean }): Promise<Float32Array | null> {
+    const skipLogits = opts?.skipLogits ?? false;
     const at = position;
     if (at + 1 > maxSeqLen) {
       // Without this, the KV copy below lands in the next head's region — a
@@ -446,10 +450,17 @@ export async function createGpuEngine(
       dispatch(matvecPipeline, layer.downGroup, [hiddenSize]);
       dispatch(elementwisePipeline, add2Group, [wg256(hiddenSize)]);
     }
-    dispatch(rmsnormPipeline, finalNormGroup, [1]);
-    for (const chunk of lmHeadChunks) dispatch(matvecPipeline, chunk.group, [chunk.rowCount]);
+    // On skip steps (prefill, all but the last prompt token) the final norm
+    // and the 164k-row lm_head matvec have no consumer — only the KV cache
+    // writes above matter — so neither is dispatched and nothing is read back.
+    if (!skipLogits) {
+      dispatch(rmsnormPipeline, finalNormGroup, [1]);
+      for (const chunk of lmHeadChunks) dispatch(matvecPipeline, chunk.group, [chunk.rowCount]);
+    }
 
-    if (!firstStepCounted) {
+    if (!firstStepCounted && !skipLogits) {
+      // The stats describe the canonical FULL decode step (skip steps record
+      // fewer dispatches and no readback; the decode loop never skips).
       firstStepCounted = true;
       stats.dispatchesPerStep = ops.filter((op) => op.kind === "dispatch").length;
       stats.copiesPerStep = ops.filter((op) => op.kind === "copy").length;
@@ -477,11 +488,18 @@ export async function createGpuEngine(
       }
     }
     endPass();
-    for (const chunk of lmHeadChunks) {
-      encoder.copyBufferToBuffer(chunk.outBuf, 0, chunk.staging, 0, chunk.rowCount * 4);
+    if (!skipLogits) {
+      for (const chunk of lmHeadChunks) {
+        encoder.copyBufferToBuffer(chunk.outBuf, 0, chunk.staging, 0, chunk.rowCount * 4);
+      }
     }
     device.queue.submit([encoder.finish()]);
     stats.submits += 1;
+
+    if (skipLogits) {
+      position += 1;
+      return null;
+    }
 
     const logits = new Float32Array(vocabSize);
     let offset = 0;

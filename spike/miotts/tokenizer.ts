@@ -100,20 +100,24 @@ const { byteToChar: BYTE_TO_CHAR, charToByte: CHAR_TO_BYTE } = buildByteMaps();
 // ---------------------------------------------------------------------------
 // Pre-tokenizer
 //
-// The Qwen2 regex, with the Rust-only `(?i:...)` scoped case-insensitivity
-// rewritten as explicit character classes (JS regexes have no inline-scoped
-// `i`). The contraction-casing golden vectors are what keep this rewrite
-// honest.
+// The Qwen2 regex. The reference's Rust-only `(?i:...)` scoped
+// case-insensitivity is reproduced by compiling the WHOLE pattern with the
+// `i` flag: with `u`, JS applies the same Unicode simple case folding
+// fancy-regex does, so U+017F (ſ) folds to 's' — an explicit `[sS]` class
+// would miss it. Making the whole pattern case-insensitive changes nothing
+// else: outside the contraction group the pattern contains no cased literals,
+// only `\p{L}` / `\p{N}` / `\s` classes and uncased punctuation. The
+// contraction-casing golden vectors and the fold split test keep this honest.
 
-const PRE_TOKENIZE = new RegExp(
-  "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])" +
+export const PRE_TOKENIZE = new RegExp(
+  "(?:'s|'t|'re|'ve|'m|'ll|'d)" +
     "|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+" +
     "|\\p{N}" +
     "| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*" +
     "|\\s*[\\r\\n]+" +
     "|\\s+(?!\\S)" +
     "|\\s+",
-  "gu",
+  "giu",
 );
 
 // ---------------------------------------------------------------------------

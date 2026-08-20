@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,7 @@ import {
   IM_END_ID,
   IM_START_ID,
   loadTokenizer,
+  PRE_TOKENIZE,
   SPEECH_TOKEN_BASE,
   SPEECH_TOKEN_COUNT,
   speechIndexOf,
@@ -44,6 +46,8 @@ interface DecodeVector {
 }
 interface Vectors {
   _rebuild: string;
+  /** sha256 of the exact tokenizer.json the vectors were dumped from. */
+  tokenizer_sha256: string;
   encode: EncodeVector[];
   chat: ChatVector[];
   decode: DecodeVector[];
@@ -75,6 +79,19 @@ beforeAll(async () => {
   tokenizer = await loadTokenizer(json);
 });
 
+describe("tokenizer.json pin", () => {
+  it("the file under test is byte-identical to the one the vectors were dumped from", () => {
+    // Every consumer resolves tokenizer.json independently (this test pins
+    // the snapshot path, expected-tokens.ts and serve.mjs resolve refs/main)
+    // — a silent drift between them would make the vectors test the wrong
+    // file. Loud failure here means: rerun dump_tokenizer_vectors.py against
+    // the file you actually want, and check the other resolvers.
+    const bytes = readFileSync(join(SNAPSHOT, "tokenizer.json"));
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    expect(sha).toBe(vectors.tokenizer_sha256);
+  });
+});
+
 describe("encode against golden vectors", () => {
   for (const { text, ids } of vectors.encode) {
     it(`encodes ${JSON.stringify(text.length > 40 ? text.slice(0, 40) + "…" : text)}`, () => {
@@ -97,6 +114,28 @@ describe("chat template against golden vectors", () => {
       expect(tokenizer.encodeChat(user)).toEqual(ids);
     });
   }
+});
+
+describe("pre-tokenizer Unicode case folding (contraction group)", () => {
+  // The reference's Rust `(?i:'s|...)` applies Unicode simple case folding,
+  // so U+017F (ſ) folds to 's' and "'ſ" is a contraction piece. The split is
+  // NOT observable in encode ids with this vocab — ſ's byte-mapped pieces
+  // ("Å", "¿") merge only with each other, so no BPE merge ever crosses the
+  // boundary — which is why this test pins the pre-tokenizer split itself.
+  // Expected splits below are the reference tokenizer's own
+  // `pre_tokenizer.pre_tokenize_str` output, measured 2026-08-21 against the
+  // pinned snapshot (901ee12c…): "x'ſy" → ["x", "'ſ", "y"].
+  const split = (text: string) => Array.from(text.matchAll(PRE_TOKENIZE), (m) => m[0]);
+
+  it("folds ſ into the contraction group like the reference", () => {
+    expect(split("x'ſy")).toEqual(["x", "'ſ", "y"]);
+    expect(split("it'ſ fine")).toEqual(["it", "'ſ", " fine"]);
+  });
+
+  it("still stops uppercase contractions where the reference does", () => {
+    expect(split("I'VEGOT")).toEqual(["I", "'VE", "GOT"]);
+    expect(split("we'rex")).toEqual(["we", "'re", "x"]);
+  });
 });
 
 describe("speech token arithmetic (no golden needed)", () => {

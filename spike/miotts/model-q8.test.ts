@@ -245,9 +245,22 @@ describe("q8 greedy generation (ja)", () => {
     { timeout: 360_000 }, // two prefill+12-step runs at ~2.4 s/token
     () => {
       const prompt = idsOf(golden, "prompt_ids");
-      const a = generateQ8(prompt, 12, q8, { stopAtEos: true });
+      // onLogits observes each step's pre-sampling logits: exactly one call
+      // per emitted id, and under greedy the emitted id IS that vector's
+      // argmax — this is what --dump-margins in expected-tokens.ts builds on.
+      const observed: { step: number; argmax: number }[] = [];
+      const a = generateQ8(prompt, 12, q8, {
+        stopAtEos: true,
+        onLogits: (step, logits) => {
+          let best = 0;
+          for (let i = 1; i < logits.length; i += 1) if (logits[i]! > logits[best]!) best = i;
+          observed.push({ step, argmax: best });
+        },
+      });
       const b = generateQ8(prompt, 12, q8, { stopAtEos: true });
       expect(a).toEqual(b);
+      expect(observed.map((o) => o.step)).toEqual(a.map((_, i) => i));
+      expect(observed.map((o) => o.argmax)).toEqual(a);
       // And the long run above starts the same way — no state leaks between
       // runner instances.
       expect(ids.slice(0, a.length)).toEqual(a);

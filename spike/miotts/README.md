@@ -35,9 +35,10 @@ RTX 5090, driver 610.57.04, headed Chromium with `--use-angle=vulkan`
 
 | stage | greedy, ja golden text |
 | --- | ---: |
-| LM, 102 steps (15 prompt + 87 generated) | 0.52–0.58 s, **175–198 tok/s** |
+| LM prefill, 15 prompt tokens (no logits) | 35 ms |
+| LM decode, 87 generated tokens | ~0.48 s, **~210 tok/s** |
 | MioCodec decode, 87 tokens | 1.2–1.3 s |
-| **text → 3.48 s of audio, total** | **1.7–1.9 s** |
+| **text → 3.48 s of audio, total** | **~1.75 s (RTF 0.50)** |
 
 Processing time is ~0.5× the audio's length, and the LM is a rounding error
 next to the codec. Cold start — 583 MB of q8 weights plus the 523 MB codec
@@ -83,12 +84,12 @@ permutation disabled and watching exactly the permutation tests fail.
 
 ## Checks, in dependency order
 
-Everything below `check:tts` runs in Vitest (`npm test`, 173 tests; no GPU —
+Everything below `check:tts` runs in Vitest (`npm test`, 182 tests; no GPU —
 Dawn kills Vitest workers, same story as the decoder spike).
 
 | check | oracle | agreement |
 | --- | --- | --- |
-| `tokenizer.test.ts` | HF tokenizer vectors | exact ids, 50 tests |
+| `tokenizer.test.ts` | HF tokenizer vectors (sha-pinned) | exact ids |
 | `text.test.ts` | reference `normalize_text` outputs | exact strings |
 | `model.test.ts` | torch per-stage golden | ≤2.3e-6 rel; greedy ids exact |
 | `model-q8.test.ts` | f32 golden + graph parity | see bounds above |
@@ -110,7 +111,7 @@ npm install
 python3 dump_golden.py            # per-stage LM golden into golden/  (~35 s)
 python3 dump_tokenizer_vectors.py # tokenizer vectors into golden/
 python3 convert_weights.py        # bf16 -> q8 artifacts into q8/     (~6 s)
-npm test                          # 173 tests, ~6 min (the q8 greedy is slow)
+npm test                          # 182 tests, ~6 min (the q8 greedy is slow)
 npm run build                     # browser.ts -> ../../examples/mio-tts.js
 npm run serve                     # port 8082
 # open http://localhost:8082/mio-tts.html in Chromium with the WebGPU flags

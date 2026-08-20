@@ -1,5 +1,6 @@
 import { sampleNext, type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
 import { fetchCheckpoint, toWav, type Fixture } from "../miocodec/browser.js";
+import { MAX_SEQ_LEN, maxNewFor } from "./constants.js";
 import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "../miocodec/decoder.js";
 import { Gpu, gpuBackend } from "../miocodec/gpu.js";
 import { Safetensors } from "../miocodec/safetensors.js";
@@ -38,7 +39,7 @@ import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./we
  *     adapter: string, mode: "greedy" | "sample", seed: number,
  *     promptIds: number[], generatedIds: number[],   // generatedIds includes the eos when one was produced
  *     speechIndices: number[], nonSpeechIds: number[], // nonSpeechIds excludes eos; should be []
- *     lmMs, lmSteps, lmTokensPerSec, decodeMs, totalMs, audioSeconds, rtf: number,
+ *     prefillMs, lmMs, lmSteps, lmTokensPerSec, decodeMs, totalMs, audioSeconds, rtf: number,
  *       // rtf follows the codec spike's convention: processing seconds per
  *       // second of audio, so smaller is better and < 1 is faster than realtime.
  *   }
@@ -48,8 +49,6 @@ import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./we
  */
 
 const EOS_IDS = [151645, 151643];
-const MAX_NEW_TOKENS = 700; // the MioTTS reference server's own cap
-const MAX_SEQ_LEN = 768; // prompt (~15) + 700 generated, with slack
 const SAMPLE_RATE_EXPECTED = 24000;
 
 interface RunResult {
@@ -61,6 +60,8 @@ interface RunResult {
   generatedIds: number[];
   speechIndices: number[];
   nonSpeechIds: number[];
+  /** The prompt's share of lmMs — the KV-only steps (skipLogits) plus the one full step. */
+  prefillMs: number;
   lmMs: number;
   lmSteps: number;
   lmTokensPerSec: number;
@@ -168,9 +169,33 @@ async function loadEverything(report: Progress): Promise<Loaded> {
   if (!manifestResponse.ok) throw new Error(`q8 manifest: HTTP ${manifestResponse.status}`);
   const manifest = (await manifestResponse.json()) as WeightsQ8Manifest;
 
-  const codes = await fetchWithProgress(`./miotts/q8/${manifest.files.codes.name}`, "LM weights (codes)", report);
-  const scales = await fetchWithProgress(`./miotts/q8/${manifest.files.scales.name}`, "LM weights (scales)", report);
-  const norms = await fetchWithProgress(`./miotts/q8/${manifest.files.norms.name}`, "LM weights (norms)", report);
+  // The three bins in parallel (they are independent streams off the same
+  // server); progress is aggregated under one label so the bar stays coherent.
+  const parts: { loaded: number; total?: number }[] = [{ loaded: 0 }, { loaded: 0 }, { loaded: 0 }];
+  const partReport = (index: number): Progress => (_stage, detail) => {
+    if (detail?.loaded === undefined) return;
+    parts[index] = { loaded: detail.loaded, total: detail.total };
+    const loaded = parts.reduce((sum, p) => sum + p.loaded, 0);
+    const total = parts.every((p) => p.total !== undefined)
+      ? parts.reduce((sum, p) => sum + (p.total ?? 0), 0)
+      : undefined;
+    report("LM weights (q8)", { loaded, total });
+  };
+  const [codes, scales, norms] = await Promise.all([
+    fetchWithProgress(`./miotts/q8/${manifest.files.codes.name}`, "LM weights (q8)", partReport(0)),
+    fetchWithProgress(`./miotts/q8/${manifest.files.scales.name}`, "LM weights (q8)", partReport(1)),
+    fetchWithProgress(`./miotts/q8/${manifest.files.norms.name}`, "LM weights (q8)", partReport(2)),
+  ]);
+
+  // MioCodec: the same checkpoint URL and streaming loader as mio-codec.html.
+  // STARTED here, before the ~1s q8 unpack and the GPU upload, so its network
+  // time overlaps that CPU/GPU work; progress stays silent until we actually
+  // wait on it (two writers on one status line would just flicker).
+  let checkpointVisible = false;
+  const checkpointPromise = fetchCheckpoint((stage, detail) => {
+    if (checkpointVisible) report(stage, detail);
+  });
+  checkpointPromise.catch(() => {}); // surfaced at the await below, not as an unhandled rejection
 
   report("unpacking the q8 weights");
   await new Promise((resolve) => setTimeout(resolve, 0)); // let the status paint before ~1s of packing
@@ -179,8 +204,9 @@ async function loadEverything(report: Progress): Promise<Loaded> {
   report("uploading the LM to the GPU");
   const engine = await createGpuEngine(device, weights, { maxSeqLen: MAX_SEQ_LEN });
 
-  // MioCodec: the same checkpoint URL and streaming loader as mio-codec.html.
-  const checkpoint = await fetchCheckpoint(report);
+  checkpointVisible = true;
+  report("downloading the checkpoint");
+  const checkpoint = await checkpointPromise;
   report("parsing the codec checkpoint");
   const codecWeights = new Weights(Safetensors.parse(checkpoint));
 
@@ -222,7 +248,7 @@ async function generate(
   if (promptIds.length + 1 >= MAX_SEQ_LEN) {
     throw new Error(`prompt is ${promptIds.length} tokens; the engine was built for maxSeqLen=${MAX_SEQ_LEN}`);
   }
-  const maxNew = Math.min(MAX_NEW_TOKENS, MAX_SEQ_LEN - promptIds.length);
+  const maxNew = maxNewFor(promptIds.length);
   const sampler: SamplerOptions =
     mode === "greedy"
       ? { mode: "greedy" }
@@ -233,13 +259,16 @@ async function generate(
   report("generating speech tokens");
   const lmStart = performance.now();
   // Prefill = the decode path, one token at a time (see gpu-engine.ts' module
-  // doc — 15 tokens do not earn a batched prefill). Only the last logits matter.
+  // doc — 15 tokens do not earn a batched prefill). Only the last token's
+  // logits matter, so every earlier step skips the 164k-row lm_head matvec
+  // and its 657 KB readback entirely.
   let lmSteps = 0;
   let logits: Float32Array | null = null;
-  for (const id of promptIds) {
-    logits = await engine.decodeStep(id);
+  for (let i = 0; i < promptIds.length; i += 1) {
+    logits = await engine.decodeStep(promptIds[i]!, { skipLogits: i + 1 < promptIds.length });
     lmSteps += 1;
   }
+  const prefillMs = performance.now() - lmStart;
 
   const generatedIds: number[] = [];
   for (let step = 0; step < maxNew; step += 1) {
@@ -290,6 +319,7 @@ async function generate(
       generatedIds,
       speechIndices,
       nonSpeechIds,
+      prefillMs,
       lmMs,
       lmSteps,
       lmTokensPerSec: lmSteps / (lmMs / 1000),
@@ -347,12 +377,21 @@ function main(): void {
     window.__result = null;
     try {
       // Loaded once, kept across runs: weights stay resident on the device and
-      // a second click only pays the generation itself.
-      loadedPromise ??= loadEverything(report);
+      // a second click only pays the generation itself. On failure the cached
+      // promise is dropped so the next click retries the load instead of
+      // re-awaiting a forever-rejected promise.
+      loadedPromise ??= loadEverything(report).catch((error: unknown) => {
+        loadedPromise = null;
+        throw error;
+      });
       const loaded = await loadedPromise;
 
       const mode = modeSelect.value === "sample" ? "sample" : "greedy";
-      const seed = Number(seedInput.value) || 42;
+      // The input's value when it parses to a finite number (0 is a valid
+      // seed); the default 42 only when it is empty or garbage.
+      const seedText = seedInput.value.trim();
+      const parsedSeed = Number(seedText);
+      const seed = seedText !== "" && Number.isFinite(parsedSeed) ? parsedSeed : 42;
       const { result, pcm, sampleRate } = await generate(loaded, textArea.value, mode, seed, report);
 
       bar.classList.add("hidden");

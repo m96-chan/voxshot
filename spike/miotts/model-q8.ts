@@ -272,6 +272,12 @@ export interface GenerateQ8Options {
   stopAtEos?: boolean;
   /** Defaults to greedy. Top-p is what the reference server runs. */
   sampler?: SamplerOptions;
+  /**
+   * Observes each step's full-vocab logits right before sampling — one call
+   * per emitted id. Lets a caller dump argmax margins without a second run.
+   * The array is the runner's live buffer: read it synchronously, do not keep it.
+   */
+  onLogits?: (step: number, logits: Float32Array) => void;
 }
 
 /**
@@ -291,6 +297,7 @@ export function generateQ8(
   let logits = runner.prefill(promptIds);
   const out: number[] = [];
   for (let step = 0; step < maxNew; step += 1) {
+    opts.onLogits?.(step, logits);
     const id = sampleNext(logits, [...promptIds, ...out], sampler);
     out.push(id);
     if (stopAtEos && weights.config.eosIds.includes(id)) break;

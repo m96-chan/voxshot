@@ -8,9 +8,18 @@
  * each side of the pipeline is held against an independent implementation:
  *
  *   - the GPU engine's greedy token ids must EXACTLY equal the CPU q8
- *     oracle's (expected-tokens.ts / model-q8.ts — same quantized weights,
- *     scalar f32/f64 arithmetic, no WGSL). Exact, not tolerant: both engines
- *     are deterministic and argmax over the same numbers must agree.
+ *     oracle's (expected-tokens.ts / model-q8.ts — same quantized weights, no
+ *     WGSL). The two do NOT compute the same numbers: the CPU oracle sums
+ *     sequentially (f64 accumulator), the WGSL kernels tree-reduce in f32,
+ *     and web-xpu-ops documents agreement-not-equality for exactly this
+ *     reason. What IS pinned here is the empirical fact that on this model,
+ *     this machine and these weights, greedy argmax never lands close enough
+ *     to a tie for the summation orders to pick different ids — both runs
+ *     are deterministic, so the id streams either match exactly or something
+ *     changed. On divergence the dump below must distinguish a near-tie
+ *     argmax flip (tiny relGap at the diverging step — summation-order noise,
+ *     re-examine this assertion) from a real bug (large relGap — the GPU
+ *     computed different math).
  *   - the WAV blob the page hands a listener must match the MioCodec CPU
  *     backend's decode of the same ids, run here in Node. The comparison is
  *     16-bit tolerant (the WAV is int16; ~3e-5 of quantisation on its own),
@@ -160,9 +169,11 @@ async function readWav() {
 
 await page.goto(`${BASE}/mio-tts.html`);
 
-// --- Greedy run: the textarea prefill IS the golden ja text; greedy is the
-// select's default. Cold path (downloads + q8 packing + GPU upload) ≈ 4 s
-// locally; the timeout is slack, not an expectation.
+// --- Greedy run: fill the golden ja text explicitly (the page prefills it,
+// but this check must not depend on the HTML's prefill staying in sync);
+// greedy is the select's default. Cold path (downloads + q8 packing + GPU
+// upload) ≈ 4 s locally; the timeout is slack, not an expectation.
+await page.fill("#text", JA_TEXT);
 const greedy = await runOnce(900_000);
 if (!check(greedy?.status === "done", `greedy run: ${JSON.stringify(greedy)}`)) {
   finish();
@@ -202,6 +213,31 @@ if (!check(idsEqual(greedy.generatedIds, oracle.ids), "generated ids differ from
   console.log(`  first divergence at step ${first}: gpu ${greedy.generatedIds[first]} vs oracle ${oracle.ids[first]}`);
   console.log(`  gpu    ${JSON.stringify(greedy.generatedIds)}`);
   console.log(`  oracle ${JSON.stringify(oracle.ids)}`);
+  if (first >= 0) {
+    // Near-tie or real bug? Rerun the oracle with --dump-margins (failure
+    // path only — the success path never pays this second ~4 min run) and
+    // show the CPU argmax margin at the diverging step: a relGap near f32
+    // rounding noise means the two summation orders picked different sides
+    // of a tie; a large relGap means the GPU computed genuinely different math.
+    console.log("  rerunning the oracle with --dump-margins for the divergence step (~4 min)...");
+    try {
+      const { stdout } = await promisify(execFile)(
+        tsx,
+        ["expected-tokens.ts", JA_TEXT, "--dump-margins"],
+        { cwd: HERE, maxBuffer: 64 * 1024 * 1024 },
+      );
+      const margin = JSON.parse(stdout).margins?.[first];
+      if (margin) {
+        console.log(
+          `  cpu oracle margin at step ${first}: top1 ${margin.top1}, top2 ${margin.top2}, ` +
+            `relGap ${margin.relGap.toExponential(2)} ` +
+            `(tiny relGap = near-tie argmax flip; large = real bug)`,
+        );
+      }
+    } catch (error) {
+      console.log(`  (margin rerun failed: ${error?.message ?? error})`);
+    }
+  }
 }
 check(oracle.eosReached, "the oracle itself did not reach eos — the comparison is against a truncated run");
 check(EOS_IDS.includes(greedy.generatedIds.at(-1)), "greedy: last generated id is not an eos");
@@ -263,7 +299,8 @@ if (check(sampled?.status === "done", `sampled run: ${JSON.stringify(sampled)}`)
  * The numbers (greedy run, hardware adapter — asserted above)
  * -------------------------------------------------------------------------- */
 
-console.log(`\nlm              ${greedy.lmMs.toFixed(0)} ms / ${greedy.lmSteps} steps = ${greedy.lmTokensPerSec.toFixed(1)} tok/s`);
+console.log(`\nprefill         ${greedy.prefillMs.toFixed(0)} ms / ${greedy.promptIds.length} prompt tokens (KV-only steps skip the lm_head)`);
+console.log(`lm              ${greedy.lmMs.toFixed(0)} ms / ${greedy.lmSteps} steps = ${greedy.lmTokensPerSec.toFixed(1)} tok/s`);
 console.log(`codec decode    ${(greedy.decodeMs / 1000).toFixed(2)} s`);
 console.log(`total e2e       ${(greedy.totalMs / 1000).toFixed(2)} s for ${greedy.audioSeconds.toFixed(2)} s of audio`);
 console.log(`rtf             ${greedy.rtf.toFixed(2)}  (processing / audio, same convention as ../miocodec)`);

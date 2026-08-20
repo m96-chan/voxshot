@@ -1360,6 +1360,13 @@ function toWav(pcm, sampleRate) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+// constants.ts
+var MAX_NEW_TOKENS = 700;
+var MAX_SEQ_LEN = 768;
+function maxNewFor(promptLen, maxNew = MAX_NEW_TOKENS) {
+  return Math.min(maxNew, MAX_SEQ_LEN - promptLen);
+}
+
 // ../../../web-xpu-ops/dist/ops/elementwise/reference.js
 var ELEMENTWISE = { add: 0, multiply: 1 };
 
@@ -1519,9 +1526,12 @@ async function createGpuEngine(device, weights, opts) {
   };
   const pipelines = /* @__PURE__ */ new Map();
   const modules = /* @__PURE__ */ new Map();
+  const trackedBuffers = [];
   function createStorageBuffer(bytes, usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC) {
     stats.buffersCreated += 1;
-    return device.createBuffer({ size: Math.max(4, bytes), usage });
+    const buffer = device.createBuffer({ size: Math.max(4, bytes), usage });
+    trackedBuffers.push(buffer);
+    return buffer;
   }
   function upload(buffer, offset, data) {
     device.queue.writeBuffer(buffer, offset, data.buffer, data.byteOffset, data.byteLength);
@@ -1530,6 +1540,7 @@ async function createGpuEngine(device, weights, opts) {
     stats.buffersCreated += 1;
     const data = packFields(fields);
     const buffer = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    trackedBuffers.push(buffer);
     device.queue.writeBuffer(buffer, 0, data);
     return buffer;
   }
@@ -1671,29 +1682,22 @@ ${errors.map((m) => `${m.lineNum}:${m.linePos}: ${m.message}`).join("\n")}`);
   const siluGroup = await bindGroup(activationPipeline, [gateOutBuf, gateActBuf, siluUniform]);
   const mulGroup = await bindGroup(elementwisePipeline, [gateActBuf, upOutBuf, gatedBuf, mulUniform]);
   const add2Group = await bindGroup(elementwisePipeline, [hiddenB, downOutBuf, hiddenA, addUniform]);
-  const trackedBuffers = [];
-  const track = (buf) => {
-    trackedBuffers.push(buf);
-    return buf;
-  };
   async function projectionGroup(w, uniform, vectorBuf, outBuf) {
     const { weightBuf, scaleBuf } = uploadPacked(w);
-    track(weightBuf);
-    track(scaleBuf);
     return bindGroup(matvecPipeline, [weightBuf, scaleBuf, vectorBuf, outBuf, uniform]);
   }
   const layers = [];
   for (const lw of weights.perLayer) {
-    const attnNormBuf = track(createStorageBuffer(lw.attnNorm.byteLength));
+    const attnNormBuf = createStorageBuffer(lw.attnNorm.byteLength);
     upload(attnNormBuf, 0, lw.attnNorm);
-    const ffnNormBuf = track(createStorageBuffer(lw.ffnNorm.byteLength));
+    const ffnNormBuf = createStorageBuffer(lw.ffnNorm.byteLength);
     upload(ffnNormBuf, 0, lw.ffnNorm);
-    const qGammaBuf = track(createStorageBuffer(lw.qNorm.byteLength));
+    const qGammaBuf = createStorageBuffer(lw.qNorm.byteLength);
     upload(qGammaBuf, 0, lw.qNorm);
-    const kGammaBuf = track(createStorageBuffer(lw.kNorm.byteLength));
+    const kGammaBuf = createStorageBuffer(lw.kNorm.byteLength);
     upload(kGammaBuf, 0, lw.kNorm);
-    const kCacheBuf = track(createStorageBuffer(numKvHeads * maxSeqLen * headDim * 4));
-    const vCacheBuf = track(createStorageBuffer(numKvHeads * maxSeqLen * headDim * 4));
+    const kCacheBuf = createStorageBuffer(numKvHeads * maxSeqLen * headDim * 4);
+    const vCacheBuf = createStorageBuffer(numKvHeads * maxSeqLen * headDim * 4);
     layers.push({
       kCacheBuf,
       vCacheBuf,
@@ -1712,7 +1716,7 @@ ${errors.map((m) => `${m.lineNum}:${m.linePos}: ${m.message}`).join("\n")}`);
       downGroup: await projectionGroup(lw.wDown, downUniform, gatedBuf, downOutBuf)
     });
   }
-  const finalNormBuf = track(createStorageBuffer(weights.finalNorm.byteLength));
+  const finalNormBuf = createStorageBuffer(weights.finalNorm.byteLength);
   upload(finalNormBuf, 0, weights.finalNorm);
   const finalNormGroup = await bindGroup(rmsnormPipeline, [hiddenA, finalNormBuf, finalNormedBuf, hiddenNormUniform]);
   const wordsPerRow = Math.ceil(hiddenSize / 4);
@@ -1720,8 +1724,8 @@ ${errors.map((m) => `${m.lineNum}:${m.linePos}: ${m.message}`).join("\n")}`);
   for (let rowStart = 0; rowStart < vocabSize; rowStart += MAX_WORKGROUPS_PER_DISPATCH) {
     const rowCount = Math.min(MAX_WORKGROUPS_PER_DISPATCH, vocabSize - rowStart);
     const chunkUniform = uniformOf([["u32", rowCount], ["u32", hiddenSize]]);
-    const outBuf = track(createStorageBuffer(rowCount * 4));
-    const staging = track(createStorageBuffer(rowCount * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ));
+    const outBuf = createStorageBuffer(rowCount * 4);
+    const staging = createStorageBuffer(rowCount * 4, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
     const group = await projectionGroup(
       {
         packed: weights.embedTokens.packed.subarray(rowStart * wordsPerRow, (rowStart + rowCount) * wordsPerRow),
@@ -1738,7 +1742,8 @@ ${errors.map((m) => `${m.lineNum}:${m.linePos}: ${m.message}`).join("\n")}`);
   const wg256 = (n) => Math.ceil(n / 256);
   let position = 0;
   let firstStepCounted = false;
-  async function decodeStep(tokenId) {
+  async function decodeStep(tokenId, opts2) {
+    const skipLogits = opts2?.skipLogits ?? false;
     const at = position;
     if (at + 1 > maxSeqLen) {
       throw new Error(`decodeStep: position ${at + 1} exceeds maxSeqLen=${maxSeqLen}`);
@@ -1779,9 +1784,11 @@ ${errors.map((m) => `${m.lineNum}:${m.linePos}: ${m.message}`).join("\n")}`);
       dispatch(matvecPipeline, layer.downGroup, [hiddenSize]);
       dispatch(elementwisePipeline, add2Group, [wg256(hiddenSize)]);
     }
-    dispatch(rmsnormPipeline, finalNormGroup, [1]);
-    for (const chunk of lmHeadChunks) dispatch(matvecPipeline, chunk.group, [chunk.rowCount]);
-    if (!firstStepCounted) {
+    if (!skipLogits) {
+      dispatch(rmsnormPipeline, finalNormGroup, [1]);
+      for (const chunk of lmHeadChunks) dispatch(matvecPipeline, chunk.group, [chunk.rowCount]);
+    }
+    if (!firstStepCounted && !skipLogits) {
       firstStepCounted = true;
       stats.dispatchesPerStep = ops.filter((op) => op.kind === "dispatch").length;
       stats.copiesPerStep = ops.filter((op) => op.kind === "copy").length;
@@ -1806,11 +1813,17 @@ ${errors.map((m) => `${m.lineNum}:${m.linePos}: ${m.message}`).join("\n")}`);
       }
     }
     endPass();
-    for (const chunk of lmHeadChunks) {
-      encoder.copyBufferToBuffer(chunk.outBuf, 0, chunk.staging, 0, chunk.rowCount * 4);
+    if (!skipLogits) {
+      for (const chunk of lmHeadChunks) {
+        encoder.copyBufferToBuffer(chunk.outBuf, 0, chunk.staging, 0, chunk.rowCount * 4);
+      }
     }
     device.queue.submit([encoder.finish()]);
     stats.submits += 1;
+    if (skipLogits) {
+      position += 1;
+      return null;
+    }
     const logits = new Float32Array(vocabSize);
     let offset = 0;
     for (const chunk of lmHeadChunks) {
@@ -1914,8 +1927,8 @@ function buildByteMaps() {
 }
 var { byteToChar: BYTE_TO_CHAR, charToByte: CHAR_TO_BYTE } = buildByteMaps();
 var PRE_TOKENIZE = new RegExp(
-  "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
-  "gu"
+  "(?:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+  "giu"
 );
 var SPEECH_TOKEN_RE = /^<\|s_(\d+)\|>$/;
 var BpeTokenizer = class {
@@ -2088,8 +2101,6 @@ async function loadTokenizer(json) {
 
 // browser.ts
 var EOS_IDS = [151645, 151643];
-var MAX_NEW_TOKENS = 700;
-var MAX_SEQ_LEN = 768;
 var SAMPLE_RATE_EXPECTED = 24e3;
 async function fetchWithProgress(url, label, report) {
   report(label);
@@ -2150,15 +2161,33 @@ async function loadEverything(report) {
   const manifestResponse = await fetch("./miotts/q8/manifest.json");
   if (!manifestResponse.ok) throw new Error(`q8 manifest: HTTP ${manifestResponse.status}`);
   const manifest = await manifestResponse.json();
-  const codes = await fetchWithProgress(`./miotts/q8/${manifest.files.codes.name}`, "LM weights (codes)", report);
-  const scales = await fetchWithProgress(`./miotts/q8/${manifest.files.scales.name}`, "LM weights (scales)", report);
-  const norms = await fetchWithProgress(`./miotts/q8/${manifest.files.norms.name}`, "LM weights (norms)", report);
+  const parts = [{ loaded: 0 }, { loaded: 0 }, { loaded: 0 }];
+  const partReport = (index) => (_stage, detail) => {
+    if (detail?.loaded === void 0) return;
+    parts[index] = { loaded: detail.loaded, total: detail.total };
+    const loaded = parts.reduce((sum, p) => sum + p.loaded, 0);
+    const total = parts.every((p) => p.total !== void 0) ? parts.reduce((sum, p) => sum + (p.total ?? 0), 0) : void 0;
+    report("LM weights (q8)", { loaded, total });
+  };
+  const [codes, scales, norms] = await Promise.all([
+    fetchWithProgress(`./miotts/q8/${manifest.files.codes.name}`, "LM weights (q8)", partReport(0)),
+    fetchWithProgress(`./miotts/q8/${manifest.files.scales.name}`, "LM weights (q8)", partReport(1)),
+    fetchWithProgress(`./miotts/q8/${manifest.files.norms.name}`, "LM weights (q8)", partReport(2))
+  ]);
+  let checkpointVisible = false;
+  const checkpointPromise = fetchCheckpoint((stage, detail) => {
+    if (checkpointVisible) report(stage, detail);
+  });
+  checkpointPromise.catch(() => {
+  });
   report("unpacking the q8 weights");
   await new Promise((resolve2) => setTimeout(resolve2, 0));
   const weights = loadWeightsQ8({ manifest, codes, scales, norms });
   report("uploading the LM to the GPU");
   const engine = await createGpuEngine(device, weights, { maxSeqLen: MAX_SEQ_LEN });
-  const checkpoint = await fetchCheckpoint(report);
+  checkpointVisible = true;
+  report("downloading the checkpoint");
+  const checkpoint = await checkpointPromise;
   report("parsing the codec checkpoint");
   const codecWeights = new Weights(Safetensors.parse(checkpoint));
   report("loading the speaker fixture");
@@ -2177,17 +2206,18 @@ async function generate(loaded, text, mode, seed, report) {
   if (promptIds.length + 1 >= MAX_SEQ_LEN) {
     throw new Error(`prompt is ${promptIds.length} tokens; the engine was built for maxSeqLen=${MAX_SEQ_LEN}`);
   }
-  const maxNew = Math.min(MAX_NEW_TOKENS, MAX_SEQ_LEN - promptIds.length);
+  const maxNew = maxNewFor(promptIds.length);
   const sampler = mode === "greedy" ? { mode: "greedy" } : { mode: "top-p", temperature: 0.8, topP: 1, rng: xorshift32(seed) };
   engine.reset();
   report("generating speech tokens");
   const lmStart = performance.now();
   let lmSteps = 0;
   let logits = null;
-  for (const id of promptIds) {
-    logits = await engine.decodeStep(id);
+  for (let i = 0; i < promptIds.length; i += 1) {
+    logits = await engine.decodeStep(promptIds[i], { skipLogits: i + 1 < promptIds.length });
     lmSteps += 1;
   }
+  const prefillMs = performance.now() - lmStart;
   const generatedIds = [];
   for (let step = 0; step < maxNew; step += 1) {
     const id = sampleNext(logits, generatedIds, sampler);
@@ -2234,6 +2264,7 @@ async function generate(loaded, text, mode, seed, report) {
       generatedIds,
       speechIndices,
       nonSpeechIds,
+      prefillMs,
       lmMs,
       lmSteps,
       lmTokensPerSec: lmSteps / (lmMs / 1e3),
@@ -2282,10 +2313,15 @@ function main() {
     metrics.classList.add("hidden");
     window.__result = null;
     try {
-      loadedPromise ??= loadEverything(report);
+      loadedPromise ??= loadEverything(report).catch((error) => {
+        loadedPromise = null;
+        throw error;
+      });
       const loaded = await loadedPromise;
       const mode = modeSelect.value === "sample" ? "sample" : "greedy";
-      const seed = Number(seedInput.value) || 42;
+      const seedText = seedInput.value.trim();
+      const parsedSeed = Number(seedText);
+      const seed = seedText !== "" && Number.isFinite(parsedSeed) ? parsedSeed : 42;
       const { result, pcm, sampleRate } = await generate(loaded, textArea.value, mode, seed, report);
       bar.classList.add("hidden");
       status.textContent = "\u5B8C\u4E86";
