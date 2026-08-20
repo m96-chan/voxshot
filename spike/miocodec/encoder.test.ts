@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import { cpuBackend, type Backend } from "./decoder.js";
 import { calculateWaveformPadding, encodeGlobal } from "./encoder.js";
 import { GoldenCase, worstDifference, type CaseManifest } from "./golden.js";
 import { loadEncoderWeights } from "./weights-cache.js";
@@ -103,11 +104,43 @@ describe("MioCodec encoder (global path) against the golden", () => {
       // of minutes, which is the design, not a bug. The hook timeout (600 s in
       // vitest.config.ts) is the budget.
       const stages: Record<string, Float32Array> = {};
+      // The encode runs through a counting wrapper around the reference
+      // backend: same numbers on every stage, but the counts observe that
+      // `encodeGlobal` actually routes its heavy ops through the injected
+      // seam. An implementation that quietly used `cpuBackend` directly would
+      // pass every stage comparison and fail only the counter test below —
+      // verified red by exactly that mutation.
+      const calls = { matmul: 0, conv1d: 0 };
+      const countingBackend: Backend = {
+        name: "counting (reference)",
+        matmul: (...args) => {
+          calls.matmul += 1;
+          return cpuBackend.matmul(...args);
+        },
+        conv1d: (...args) => {
+          calls.conv1d += 1;
+          return cpuBackend.conv1d(...args);
+        },
+        istft: (...args) => cpuBackend.istft(...args),
+      };
       beforeAll(async () => {
-        encodeGlobal(golden.tensor("waveform_24k").data, weights, (stage, data) => {
-          stages[stage] = data;
+        await encodeGlobal(golden.tensor("waveform_24k").data, weights, {
+          backend: countingBackend,
+          trace: (stage, data) => {
+            stages[stage] = data;
+          },
         });
       }, 600_000);
+
+      it("routes the heavy ops through the injected backend", () => {
+        // Exact counts by graph shape: convs = 1 resample + 7 frontend +
+        // 1 pos_conv + 1 embed + 4 depthwise; matmuls = 1 projection +
+        // 2 layers x 5 (gate, qkv, out, 2 FFN) + 4 blocks x 2 pointwise +
+        // 1 final projection. Exact rather than `> 0`, so an op that silently
+        // drops off the seam (or doubles) is caught, not just total absence.
+        expect(calls.conv1d).toBe(14);
+        expect(calls.matmul).toBe(20);
+      });
 
       it("reproduces the recorded waveform padding", () => {
         // The golden records what `_calculate_waveform_padding` produced so a

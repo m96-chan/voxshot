@@ -4,9 +4,8 @@ import { conv1d, conv1dOutputLength } from "web-xpu-ops/ops/conv";
 import { gather } from "web-xpu-ops/ops/gather";
 import { groupNorm } from "web-xpu-ops/ops/group_norm";
 import { layernorm } from "web-xpu-ops/ops/layernorm";
-import { matmul } from "web-xpu-ops/ops/matmul";
 import { softmax } from "web-xpu-ops/ops/softmax";
-import type { Tensor, Weights } from "./decoder.js";
+import { cpuBackend, type Backend, type Tensor, type Weights } from "./decoder.js";
 
 /**
  * MioCodec's encoder, global path only — reference audio to the 128-dim
@@ -30,10 +29,16 @@ import type { Tensor, Weights } from "./decoder.js";
  *               ─▶ AttentiveStatsPool     softmax over time; cat(mean, std)
  *               ─▶ Linear 768 → 128 → LayerNorm(128) ─▶ global_embedding
  *
- * Runs on the **reference** op implementations, like `decoder.ts` — it exists
- * to be checked against the golden stage by stage, not to be fast. The weights
- * come from `export_encoder_weights.py`, which folds pos_conv's weight-norm
- * and precomputes the resample kernel so nothing here reimplements either.
+ * The heavy ops — every `conv1d` (resample, WavLM frontend, pos_conv,
+ * ConvNeXt embed and depthwise) and every projection `matmul` — go through the
+ * decoder's {@link Backend} seam, defaulting to the reference `cpuBackend`;
+ * the browser passes the WGSL-kernel backend instead, because the reference
+ * frontend alone costs ~40 s per clip. Everything that is linear in its data
+ * (norms, attention softmax, activations, the gather) stays on the reference
+ * implementations regardless of backend, exactly as `decoder.ts` does. The
+ * weights come from `export_encoder_weights.py`, which folds pos_conv's
+ * weight-norm and precomputes the resample kernel so nothing here reimplements
+ * either.
  */
 
 /** Same contract as `spike/miotts`'s TraceFn: no trace, no copies, no cost. */
@@ -90,7 +95,13 @@ const CONVNEXT_EPS = 1e-6;
  */
 const transposed = new WeakMap<Float32Array, Float32Array>();
 
-function linear(x: Float32Array, rows: number, weight: Tensor, bias: Tensor | null): Float32Array {
+async function linear(
+  x: Float32Array,
+  rows: number,
+  weight: Tensor,
+  bias: Tensor | null,
+  backend: Backend,
+): Promise<Float32Array> {
   const [outFeatures, inFeatures] = weight.shape as [number, number];
   let b = transposed.get(weight.data);
   if (!b) {
@@ -102,7 +113,7 @@ function linear(x: Float32Array, rows: number, weight: Tensor, bias: Tensor | nu
     }
     transposed.set(weight.data, b);
   }
-  const out = matmul({ a: x, b, M: rows, N: outFeatures, K: inFeatures });
+  const out = await backend.matmul(x, b, rows, outFeatures, inFeatures);
   if (bias) {
     for (let r = 0; r < rows; r += 1) {
       for (let o = 0; o < outFeatures; o += 1) {
@@ -172,21 +183,22 @@ export function calculateWaveformPadding(audioLength: number): number {
  * stride `orig`, interleave the phase channels back into time order, trim to
  * `ceil(new * L / orig)`.
  */
-function resample(waveform: Float32Array, kernel: Tensor): Float32Array {
+async function resample(waveform: Float32Array, kernel: Tensor, backend: Backend): Promise<Float32Array> {
   const K = kernel.shape[2]!;
   const padded = new Float32Array(RESAMPLE_WIDTH + waveform.length + RESAMPLE_WIDTH + RESAMPLE_ORIG);
   padded.set(waveform, RESAMPLE_WIDTH);
 
-  const phases = conv1d({
-    input: padded,
-    weight: kernel.data,
-    N: 1,
-    Cin: 1,
-    Cout: RESAMPLE_NEW,
-    L: padded.length,
+  const phases = await backend.conv1d(
+    padded,
+    kernel.data,
+    null,
+    1,
+    RESAMPLE_NEW,
+    padded.length,
     K,
-    stride: RESAMPLE_ORIG,
-  });
+    0,
+    RESAMPLE_ORIG,
+  );
   const perPhase = phases.length / RESAMPLE_NEW;
 
   // `transpose(1, 2).reshape(-1)`: sample t comes from phase t % new.
@@ -203,23 +215,28 @@ function resample(waveform: Float32Array, kernel: Tensor): Float32Array {
  * -------------------------------------------------------------------------- */
 
 /** The conv frontend: `[1, L16]` in, `[T, 512]` out (time-major, like torch). */
-function featureExtractor(wave16: Float32Array, weights: Weights): Float32Array {
+async function featureExtractor(
+  wave16: Float32Array,
+  weights: Weights,
+  backend: Backend,
+): Promise<Float32Array> {
   let x = wave16;
   let length = wave16.length;
   let cin = 1;
   for (let i = 0; i < FRONTEND.length; i += 1) {
     const [kernel, stride] = FRONTEND[i]!;
-    x = conv1d({
-      input: x,
-      weight: weights.get(`wavlm.feature_extractor.conv_layers.${i}.conv.weight`).data,
+    x = await backend.conv1d(
+      x,
+      weights.get(`wavlm.feature_extractor.conv_layers.${i}.conv.weight`).data,
       // bias-free throughout: `extractor_conv_bias = False` for the base arch.
-      N: 1,
-      Cin: cin,
-      Cout: FRONTEND_DIM,
-      L: length,
-      K: kernel,
+      null,
+      cin,
+      FRONTEND_DIM,
+      length,
+      kernel,
+      0,
       stride,
-    });
+    );
     length = conv1dOutputLength({ L: length, K: kernel, stride });
     if (i === 0) {
       // "group_norm" extractor mode: one GroupNorm with as many groups as
@@ -242,21 +259,21 @@ function featureExtractor(wave16: Float32Array, weights: Weights): Float32Array 
 }
 
 /** pos_conv: grouped conv over `[C, T]`, crop the extra sample, GELU. */
-function posConv(x: Float32Array, T: number, weights: Weights): Float32Array {
+async function posConv(x: Float32Array, T: number, weights: Weights, backend: Backend): Promise<Float32Array> {
   const weight = weights.get("wavlm.encoder.transformer.pos_conv_embed.conv.weight");
   const K = weight.shape[2]!; // 128
-  const convOut = conv1d({
-    input: transpose2d(x, T, EMBED_DIM),
-    weight: weight.data,
-    bias: weights.get("wavlm.encoder.transformer.pos_conv_embed.conv.bias").data,
-    N: 1,
-    Cin: EMBED_DIM,
-    Cout: EMBED_DIM,
-    L: T,
+  const convOut = await backend.conv1d(
+    transpose2d(x, T, EMBED_DIM),
+    weight.data,
+    weights.get("wavlm.encoder.transformer.pos_conv_embed.conv.bias").data,
+    EMBED_DIM,
+    EMBED_DIM,
+    T,
     K,
-    padding: K / 2,
-    groups: 16,
-  });
+    K / 2,
+    1,
+    16,
+  );
   // Even kernel with pad K/2 emits T + 1 samples; `num_remove = 1` crops the last.
   const cropped = new Float32Array(EMBED_DIM * T);
   for (let c = 0; c < EMBED_DIM; c += 1) {
@@ -320,15 +337,23 @@ function positionBias(T: number, weights: Weights): Float32Array {
  * Linear(64 → 8) summed in fours and squashed — `gate_a * (gate_b * const - 1)
  * + 2`, one scalar per (head, query row), multiplied into the shared bias.
  */
-function wavlmLayer(x: Float32Array, T: number, layer: number, bias: Float32Array, weights: Weights): Float32Array {
+async function wavlmLayer(
+  x: Float32Array,
+  T: number,
+  layer: number,
+  bias: Float32Array,
+  weights: Weights,
+  backend: Backend,
+): Promise<Float32Array> {
   const prefix = `wavlm.encoder.transformer.layers.${layer}`;
 
   // -- gate. `x` as [T, 768] row-major is exactly [T * H, 64] in (t, h) order.
-  const gate = linear(
+  const gate = await linear(
     x,
     T * NUM_HEADS,
     weights.get(`${prefix}.attention.gru_rel_pos_linear.weight`),
     weights.get(`${prefix}.attention.gru_rel_pos_linear.bias`),
+    backend,
   );
   const gateConst = weights.get(`${prefix}.attention.gru_rel_pos_const`).data; // [1, H, 1, 1]
   const mask = new Float32Array(NUM_HEADS * T * T);
@@ -350,11 +375,12 @@ function wavlmLayer(x: Float32Array, T: number, layer: number, bias: Float32Arra
   }
 
   // -- qkv: one packed projection, chunked thirds.
-  const qkv = linear(
+  const qkv = await linear(
     x,
     T,
     weights.get(`${prefix}.attention.attention.in_proj_weight`),
     weights.get(`${prefix}.attention.attention.in_proj_bias`),
+    backend,
   );
   const q = new Float32Array(T * EMBED_DIM);
   const k = new Float32Array(T * EMBED_DIM);
@@ -396,11 +422,12 @@ function wavlmLayer(x: Float32Array, T: number, layer: number, bias: Float32Arra
       }
     }
   }
-  const attended = linear(
+  const attended = await linear(
     merged,
     T,
     weights.get(`${prefix}.attention.attention.out_proj.weight`),
     weights.get(`${prefix}.attention.attention.out_proj.bias`),
+    backend,
   );
 
   for (let i = 0; i < attended.length; i += 1) attended[i] = attended[i]! + x[i]!;
@@ -413,13 +440,20 @@ function wavlmLayer(x: Float32Array, T: number, layer: number, bias: Float32Arra
   );
 
   const hidden = gelu(
-    linear(out, T, weights.get(`${prefix}.feed_forward.intermediate_dense.weight`), weights.get(`${prefix}.feed_forward.intermediate_dense.bias`)),
+    await linear(
+      out,
+      T,
+      weights.get(`${prefix}.feed_forward.intermediate_dense.weight`),
+      weights.get(`${prefix}.feed_forward.intermediate_dense.bias`),
+      backend,
+    ),
   );
-  const forwarded = linear(
+  const forwarded = await linear(
     hidden,
     T,
     weights.get(`${prefix}.feed_forward.output_dense.weight`),
     weights.get(`${prefix}.feed_forward.output_dense.bias`),
+    backend,
   );
   for (let i = 0; i < forwarded.length; i += 1) forwarded[i] = forwarded[i]! + out[i]!;
   return layerNorm(
@@ -436,18 +470,23 @@ function wavlmLayer(x: Float32Array, T: number, layer: number, bias: Float32Arra
  * -------------------------------------------------------------------------- */
 
 /** ConvNeXt backbone: `[T, 768]` in, `[T, 384]` out; blocks traced channel-major. */
-function backbone(x: Float32Array, T: number, weights: Weights, trace?: TraceFn): Float32Array {
-  let c = conv1d({
-    input: transpose2d(x, T, EMBED_DIM),
-    weight: weights.get("global_encoder.backbone.embed.weight").data,
-    bias: weights.get("global_encoder.backbone.embed.bias").data,
-    N: 1,
-    Cin: EMBED_DIM,
-    Cout: BACKBONE_DIM,
-    L: T,
-    K: 7,
-    padding: 3,
-  });
+async function backbone(
+  x: Float32Array,
+  T: number,
+  weights: Weights,
+  backend: Backend,
+  trace?: TraceFn,
+): Promise<Float32Array> {
+  let c = await backend.conv1d(
+    transpose2d(x, T, EMBED_DIM),
+    weights.get("global_encoder.backbone.embed.weight").data,
+    weights.get("global_encoder.backbone.embed.bias").data,
+    EMBED_DIM,
+    BACKBONE_DIM,
+    T,
+    7,
+    3,
+  );
   c = transpose2d(
     layerNorm(
       transpose2d(c, BACKBONE_DIM, T),
@@ -462,18 +501,20 @@ function backbone(x: Float32Array, T: number, weights: Weights, trace?: TraceFn)
 
   for (let block = 0; block < 4; block += 1) {
     const prefix = `global_encoder.backbone.convnext.${block}`;
-    const depthwise = conv1d({
-      input: c,
-      weight: weights.get(`${prefix}.dwconv.weight`).data,
-      bias: weights.get(`${prefix}.dwconv.bias`).data,
-      N: 1,
-      Cin: BACKBONE_DIM,
-      Cout: BACKBONE_DIM,
-      L: T,
-      K: 7,
-      padding: 3,
-      groups: BACKBONE_DIM,
-    });
+    // Depthwise = groups 384, still ONE dispatch: the WGSL kernel takes the
+    // per-group channel counts in its uniform, so no per-group slicing here.
+    const depthwise = await backend.conv1d(
+      c,
+      weights.get(`${prefix}.dwconv.weight`).data,
+      weights.get(`${prefix}.dwconv.bias`).data,
+      BACKBONE_DIM,
+      BACKBONE_DIM,
+      T,
+      7,
+      3,
+      1,
+      BACKBONE_DIM,
+    );
     let h = layerNorm(
       transpose2d(depthwise, BACKBONE_DIM, T),
       weights.get(`${prefix}.norm.weight`),
@@ -481,8 +522,10 @@ function backbone(x: Float32Array, T: number, weights: Weights, trace?: TraceFn)
       BACKBONE_DIM,
       CONVNEXT_EPS,
     );
-    h = gelu(linear(h, T, weights.get(`${prefix}.pwconv1.weight`), weights.get(`${prefix}.pwconv1.bias`)));
-    h = linear(h, T, weights.get(`${prefix}.pwconv2.weight`), weights.get(`${prefix}.pwconv2.bias`));
+    h = gelu(
+      await linear(h, T, weights.get(`${prefix}.pwconv1.weight`), weights.get(`${prefix}.pwconv1.bias`), backend),
+    );
+    h = await linear(h, T, weights.get(`${prefix}.pwconv2.weight`), weights.get(`${prefix}.pwconv2.bias`), backend);
 
     const gamma = weights.get(`${prefix}.gamma`).data;
     const next = new Float32Array(c.length);
@@ -504,7 +547,12 @@ function backbone(x: Float32Array, T: number, weights: Weights, trace?: TraceFn)
   );
 }
 
-/** AttentiveStatsPool over `[C, T]`: α-weighted mean and std, concatenated. */
+/**
+ * AttentiveStatsPool over `[C, T]`: α-weighted mean and std, concatenated.
+ *
+ * Its two k=1 convs stay on the reference implementation whatever backend
+ * runs the rest: ~15 MFLOP between them, less than a GPU round-trip costs.
+ */
 function attentiveStatsPool(x: Float32Array, T: number, weights: Weights, trace?: TraceFn): Float32Array {
   const attnDim = weights.get("global_encoder.pooling.attn.0.weight").shape[0]!; // 128
   const scores = activation({
@@ -554,7 +602,13 @@ function attentiveStatsPool(x: Float32Array, T: number, weights: Weights, trace?
  * The whole encoder
  * -------------------------------------------------------------------------- */
 
-export function encodeGlobal(waveform24k: Float32Array, weights: Weights, trace?: TraceFn): Float32Array {
+export async function encodeGlobal(
+  waveform24k: Float32Array,
+  weights: Weights,
+  opts?: { backend?: Backend; trace?: TraceFn },
+): Promise<Float32Array> {
+  const backend = opts?.backend ?? cpuBackend;
+  const trace = opts?.trace;
   trace?.("waveform_24k", waveform24k.slice());
 
   // -- pad + resample. The pad is at 24 kHz, before the rate change, which is
@@ -562,15 +616,15 @@ export function encodeGlobal(waveform24k: Float32Array, weights: Weights, trace?
   const padding = calculateWaveformPadding(waveform24k.length);
   const padded = new Float32Array(waveform24k.length + 2 * padding);
   padded.set(waveform24k, padding);
-  const wave16 = resample(padded, weights.get("resample.kernel"));
+  const wave16 = await resample(padded, weights.get("resample.kernel"), backend);
   trace?.("after_resample", wave16.slice());
 
   // -- WavLM frontend and projection.
-  const features = featureExtractor(wave16, weights);
+  const features = await featureExtractor(wave16, weights, backend);
   const T = features.length / FRONTEND_DIM;
   trace?.("after_feature_extractor", features.slice());
 
-  const projected = linear(
+  const projected = await linear(
     layerNorm(
       features,
       weights.get("wavlm.encoder.feature_projection.layer_norm.weight"),
@@ -581,13 +635,14 @@ export function encodeGlobal(waveform24k: Float32Array, weights: Weights, trace?
     T,
     weights.get("wavlm.encoder.feature_projection.projection.weight"),
     weights.get("wavlm.encoder.feature_projection.projection.bias"),
+    backend,
   );
   trace?.("after_feature_projection", projected.slice());
 
   // -- positional conv, residual add, then the encoder-level LayerNorm: the
   // Transformer is built with `layer_norm_first = not layer_norm_first`, so
   // for post-norm base+ this LN runs here, before layer 1.
-  const positional = posConv(projected, T, weights);
+  const positional = await posConv(projected, T, weights, backend);
   trace?.("after_pos_conv", positional.slice());
   for (let i = 0; i < projected.length; i += 1) positional[i] = positional[i]! + projected[i]!;
   let x = layerNorm(
@@ -601,9 +656,9 @@ export function encodeGlobal(waveform24k: Float32Array, weights: Weights, trace?
   // -- layers 1..2. The bias is computed once at layer 1 and reused, ungated;
   // each layer applies its own gate to its own copy.
   const bias = positionBias(T, weights);
-  const layer1 = wavlmLayer(x, T, 0, bias, weights);
+  const layer1 = await wavlmLayer(x, T, 0, bias, weights, backend);
   trace?.("ssl_layer1", layer1.slice());
-  const layer2 = wavlmLayer(layer1, T, 1, bias, weights);
+  const layer2 = await wavlmLayer(layer1, T, 1, bias, weights, backend);
   trace?.("ssl_layer2", layer2.slice());
 
   // -- the global branch reads the mean of the two, un-normalised (the z-norm
@@ -613,14 +668,20 @@ export function encodeGlobal(waveform24k: Float32Array, weights: Weights, trace?
   trace?.("global_input", globalInput.slice());
 
   // -- ConvNeXt backbone and attentive stats pooling.
-  const pooledInput = backbone(globalInput, T, weights, trace);
+  const pooledInput = await backbone(globalInput, T, weights, backend, trace);
   trace?.("after_backbone", pooledInput.slice());
 
   const pooled = attentiveStatsPool(transpose2d(pooledInput, T, BACKBONE_DIM), T, weights, trace);
   trace?.("pooled_stats", pooled.slice());
 
   const embedding = layerNorm(
-    linear(pooled, 1, weights.get("global_encoder.pooling.proj.weight"), weights.get("global_encoder.pooling.proj.bias")),
+    await linear(
+      pooled,
+      1,
+      weights.get("global_encoder.pooling.proj.weight"),
+      weights.get("global_encoder.pooling.proj.bias"),
+      backend,
+    ),
     weights.get("global_encoder.pooling.norm.weight"),
     weights.get("global_encoder.pooling.norm.bias"),
     128,

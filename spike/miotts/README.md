@@ -18,15 +18,45 @@ text ─ normalize (text.ts, = reference server's normalize_text)
      ─ MioTTS-0.6B, int8 on WebGPU (gpu-engine.ts)     → <|s_n|> ids
      ─ n = id − 151669                                  → codec indices
      ─ MioCodec decoder (../miocodec, WebGPU)           → 24 kHz waveform
+
+ref audio ─ decodeAudioData → mono → 24 kHz (WebAudio)
+          ─ MioCodec encoder (../miocodec, WebGPU)      → 128-dim embedding
 ```
 
 Speaker identity enters **only** through MioCodec's 128-dim global embedding —
 the LM prompt carries just the text. That is how the reference server
 ([Aratako/MioTTS-Inference](https://github.com/Aratako/MioTTS-Inference))
 works too: it feeds a preset embedding to the codec and never shows the LM any
-reference audio. The demo uses the embedding from
-`examples/mio-codec-fixture.json`; the encoder half (reference audio → a new
-embedding, i.e. actual zero-shot cloning) is out of this spike's scope.
+reference audio. The default voice is the embedding from
+`examples/mio-codec-fixture.json`; the page's Voice section can instead make
+one from any audio file — actual zero-shot cloning, below.
+
+## Voice cloning
+
+Pick "reference audio…" under 話者 and choose a clip. The page decodes it
+(WebAudio, resampled to 24 kHz mono), runs `../miocodec/encoder.ts` —
+`encodeGlobal`, the WavLM→ConvNeXt global path — through the codec's **GPU
+backend** on the same shared device, and conditions every later synthesis on
+the resulting 128-dim embedding. Embeddings are cached per file (name+size),
+so a clip is encoded once; the encoder's 117 MB weight file
+(`export_encoder_weights.py`'s artifact, served by serve.mjs) is fetched
+lazily on the first encode, so the default voice never pays for it.
+
+Measured on this machine: **1.17 s** to encode the 5.08 s `jp_ref1.wav` on the
+GPU — the reference implementation needs 40–55 s for the same clip, which is
+why the run path rides the WGSL kernels (the CPU reference stays what it is
+everywhere else in this repo: the test oracle).
+
+**The resample caveat.** The page resamples with Chrome's WebAudio resampler;
+the encoder golden's 24 kHz input came through torchaudio's polyphase. The two
+waveforms disagree by a measured **4.4e-2** of peak — yet the embeddings land
+**5.97e-4** apart, because the encoder's pooled statistics attenuate input
+skew by ~two orders of magnitude. `check:tts` therefore holds the page's
+embedding to the golden at 3e-3 (end-to-end, resampler included) *and* to a
+reference-CPU encode of the **same browser-resampled samples** at 5e-6
+(measured 8.05e-7 — pure kernel arithmetic, the authoritative comparison for
+the port; a Chrome resampler change can move the first bound but not this
+one).
 
 ## Measured on this machine
 
@@ -39,6 +69,7 @@ RTX 5090, driver 610.57.04, headed Chromium with `--use-angle=vulkan`
 | LM decode, 87 generated tokens | ~0.48 s, **~210 tok/s** |
 | MioCodec decode, 87 tokens | 1.2–1.3 s |
 | **text → 3.48 s of audio, total** | **~1.75 s (RTF 0.50)** |
+| voice encode, 5.08 s reference clip (once per file) | 1.17 s |
 
 Processing time is ~0.5× the audio's length, and the LM is a rounding error
 next to the codec. Cold start — 583 MB of q8 weights plus the 523 MB codec
@@ -94,15 +125,21 @@ Dawn kills Vitest workers, same story as the decoder spike).
 | `model.test.ts` | torch per-stage golden | ≤2.3e-6 rel; greedy ids exact |
 | `model-q8.test.ts` | f32 golden + graph parity | see bounds above |
 | `weights-q8.test.ts` | ops/quantize bit-parity, sha256, permutation | exact |
+| `../miocodec/encoder.test.ts` | torch per-stage encoder golden | ≤1e-4/5e-4 rel per stage |
 | `check:tts` (browser) | CPU q8 oracle + Node codec decode | ids exact; WAV 9.9e-5 rel |
+| `check:tts` voice clone | encoder golden + same-input CPU encode | 5.97e-4 / **8.05e-7** rel |
 
 `check:tts` (`DISPLAY=:1 npm run check:tts`) drives the real page: it spawns
 the CPU oracle for the golden text, clicks the page's run button, and asserts
 the GPU ids equal the oracle's exactly, the WAV is `960 × tokens` samples, the
 audio matches an independent CPU decode of the same ids to 16-bit fidelity,
 and the adapter is real hardware (it refuses to print SwiftShader numbers as
-if they were measurements). ~4.5 min, nearly all of it the ~2.5 s/token CPU
-oracle.
+if they were measurements). It then clones a voice from `jp_ref1.wav` (the
+clip the encoder golden was dumped from), holds the page's embedding to both
+bounds in the Voice-cloning section above, and asserts the cloned-voice
+greedy ids **equal** the default voice's — the LM never sees the voice, so
+that equality is free and sharp — with a well-formed `960 × tokens` WAV.
+~5 min, nearly all of it the ~2.5 s/token CPU oracle.
 
 ## Running it yourself
 
@@ -111,6 +148,10 @@ npm install
 python3 dump_golden.py            # per-stage LM golden into golden/  (~35 s)
 python3 dump_tokenizer_vectors.py # tokenizer vectors into golden/
 python3 convert_weights.py        # bf16 -> q8 artifacts into q8/     (~6 s)
+(cd ../miocodec && .venv/bin/python dump_encoder_golden.py \
+                && .venv/bin/python export_encoder_weights.py)
+                                  # encoder golden + weights — serve.mjs
+                                  # refuses to start without the weights
 npm test                          # 182 tests, ~6 min (the q8 greedy is slow)
 npm run build                     # browser.ts -> ../../examples/mio-tts.js
 npm run serve                     # port 8082
@@ -128,8 +169,9 @@ was derived from, so artifacts and weights cannot drift apart unnoticed.
 
 ## Known gaps
 
-- **No encoder half**: voices are limited to saved global embeddings; actual
-  zero-shot cloning from reference audio is a follow-up issue.
+- **Voice-clone audio is shape-checked, not listened to**: the embedding is
+  held to the golden and the ids to the default voice's, but whether the
+  cloned voice *sounds like* the reference is for a human and the page.
 - **Sampled-mode throughput** (~25 tok/s) is CPU-sampler-bound, not GPU-bound.
 - **Sampled audio is shape-checked, not listened to** — the check asserts
   well-formedness; judging how it sounds needs a human and the page.

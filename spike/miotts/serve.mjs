@@ -8,6 +8,11 @@
  *
  *   /miotts/q8/*            -> spike/miotts/q8/*            (convert_weights.py's artifacts)
  *   /miotts/tokenizer.json  -> the MioTTS-0.6B HF cache snapshot's tokenizer.json
+ *   /miotts/encoder-weights.safetensors
+ *                           -> ../miocodec/golden-encoder/encoder-weights.safetensors
+ *                              (export_encoder_weights.py's artifact — the voice-clone encoder)
+ *   /samples/*.wav          -> the MioTTS-0.6B HF cache snapshot's samples/
+ *                              (reference clips for the voice-clone UI and its check)
  *   /model.safetensors      -> the MioCodec HF cache checkpoint
  *
  * The page requests the MioCodec checkpoint from its canonical huggingface.co
@@ -30,6 +35,10 @@ import { extname, join, normalize } from "node:path";
 
 const EXAMPLES = new URL("../../examples/", import.meta.url).pathname;
 const Q8_DIR = new URL("./q8/", import.meta.url).pathname;
+const ENCODER_WEIGHTS = new URL(
+  "../miocodec/golden-encoder/encoder-weights.safetensors",
+  import.meta.url,
+).pathname;
 const HUB = join(homedir(), ".cache", "huggingface", "hub");
 const PORT = 8082;
 
@@ -39,6 +48,7 @@ const TYPES = {
   ".json": "application/json; charset=utf-8",
   ".bin": "application/octet-stream",
   ".safetensors": "application/octet-stream",
+  ".wav": "audio/wav",
 };
 
 /** `refs/main` -> snapshot file, the layout huggingface_hub writes (same resolve as check-demo.mjs). */
@@ -55,6 +65,12 @@ function resolve(pathname) {
   }
   if (name === "miotts/tokenizer.json") {
     return hubFile("models--Aratako--MioTTS-0.6B", "tokenizer.json");
+  }
+  if (name === "miotts/encoder-weights.safetensors") {
+    return ENCODER_WEIGHTS;
+  }
+  if (name.startsWith("samples/")) {
+    return hubFile("models--Aratako--MioTTS-0.6B", name);
   }
   if (name.startsWith("miotts/q8/")) {
     return join(Q8_DIR, name.slice("miotts/q8/".length));
@@ -94,6 +110,21 @@ function resolve(pathname) {
     );
     process.exit(1);
   }
+}
+
+// Same policy for the encoder weights: fail at startup with the command,
+// rather than letting the page's first voice-clone attempt 404 into a message
+// that names neither the file nor how to build it.
+try {
+  statSync(ENCODER_WEIGHTS);
+} catch {
+  console.error(
+    `${ENCODER_WEIGHTS} is missing — the voice-clone encoder cannot be served. It is exported\n` +
+      "from the two source checkpoints, not in git:\n" +
+      "  cd spike/miocodec && .venv/bin/python export_encoder_weights.py\n" +
+      "(dump the golden first if golden-encoder/ is empty: .venv/bin/python dump_encoder_golden.py)",
+  );
+  process.exit(1);
 }
 
 const server = createServer((request, response) => {

@@ -112,6 +112,35 @@ and a float32 torch tensor. The other two padding modes are wrong by a whole hop
 Hann is zero), and the test asserts both — so it is passing for the reason it
 claims.
 
+## The encoder (global path)
+
+The other half — reference audio → the 128-dim speaker embedding — lives in
+`encoder.ts` (`encodeGlobal`): pad → polyphase 24k→16k resample → WavLM's conv
+frontend and first two transformer layers → ConvNeXt backbone → attentive
+stats pooling. Like the decoder it threads its heavy ops — every conv and
+every projection matmul — through the same `Backend` seam (the seam gained
+optional `stride`/`groups` for it; the WGSL conv kernel always had both in its
+uniform, so even the depthwise g384 convs are one dispatch each), defaulting
+to the CPU reference; the browser page passes the GPU backend, ~40x faster
+(1.2 s vs 40–55 s per 5 s clip, ~78% of the reference's time being the WavLM
+conv frontend). Norms, attention softmax and activations stay on the
+reference implementations either way, and the pooling's two k=1 convs stay
+CPU-side deliberately (~15 MFLOP, less than a GPU round-trip).
+
+- `encoder.test.ts` — stage by stage against `golden-encoder/`, in graph
+  order, through a call-counting backend so the seam itself is observed
+  (agreement 1e-4, 5e-4 on the ConvNeXt tail — the reference's own f32
+  conditioning floor, measured in the test's comments).
+- `dump_encoder_golden.py` — the per-stage golden, three cases
+  (`jp_ref1`, `en_ref1`, `synthetic`), same venv as `dump_golden.py`.
+- `export_encoder_weights.py` — folds pos_conv's weight-norm and precomputes
+  torchaudio's resample kernel into one gitignored
+  `golden-encoder/encoder-weights.safetensors` (117 MB), so the port
+  reimplements neither.
+
+The browser wiring (voice cloning in `examples/mio-tts.html`) and its E2E
+check are `../miotts`'s — see that README's Voice-cloning section.
+
 ## Regenerating the golden
 
 ```bash

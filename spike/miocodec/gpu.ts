@@ -191,7 +191,14 @@ export class Gpu {
     }
   }
 
-  /** `conv1d`, with the weight and bias resident. `N` is always 1 here. */
+  /**
+   * `conv1d`, with the weight and bias resident. `N` is always 1 here.
+   *
+   * `stride` and `groups` were always in the kernel's uniform (the host
+   * passes `in_per_group`/`out_per_group`, not `groups` itself); the encoder
+   * is what first needs them non-1 — strided frontend convs, the g16
+   * pos_conv, and ConvNeXt's depthwise g384 — each still one dispatch.
+   */
   async conv1d(
     input: Float32Array,
     weight: Float32Array,
@@ -201,8 +208,11 @@ export class Gpu {
     L: number,
     K: number,
     padding: number,
+    stride = 1,
+    groups = 1,
   ): Promise<Float32Array> {
-    const outLength = L + 2 * padding - (K - 1) - 1 + 1;
+    // torch's formula at dilation 1: floor((L + 2p - (K-1) - 1) / stride) + 1.
+    const outLength = Math.floor((L + 2 * padding - (K - 1) - 1) / stride) + 1;
     const inputBuffer = this.upload(input);
     const weightBuffer = this.residentBuffer(weight);
     // The kernel binds a bias buffer whether or not there is one, and since #46
@@ -215,7 +225,7 @@ export class Gpu {
         CONV1D,
         [inputBuffer, weightBuffer, biasBuffer],
         Cout * outLength,
-        [Cin, Cout, L, K, outLength, 1, padding, 1, Cin, Cout, 0, 0],
+        [Cin, Cout, L, K, outLength, stride, padding, 1, Cin / groups, Cout / groups, 0, 0],
         [dispatchLength / WORKGROUP, Cout, 1],
       );
     } finally {
@@ -279,8 +289,8 @@ export function gpuBackend(gpu: Gpu): import("./decoder.js").Backend {
   return {
     name: `WebGPU (${gpu.adapterInfo})`,
     matmul: (a, b, M, N, K) => gpu.matmul(a, b, M, N, K),
-    conv1d: (input, weight, bias, Cin, Cout, L, K, padding) =>
-      gpu.conv1d(input, weight, bias, Cin, Cout, L, K, padding),
+    conv1d: (input, weight, bias, Cin, Cout, L, K, padding, stride, groups) =>
+      gpu.conv1d(input, weight, bias, Cin, Cout, L, K, padding, stride, groups),
     istft: (real, imag, window, frames, nFft, hop) =>
       // `"same"` resolved here, because the kernel takes a number and has no
       // convention of its own: crop `(nFft - hop) / 2` from each end, which

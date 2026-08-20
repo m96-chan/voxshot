@@ -51,6 +51,12 @@ export interface Tensor {
 export interface Backend {
   readonly name: string;
   matmul(a: Float32Array, b: Float32Array, M: number, N: number, K: number): Promise<Float32Array>;
+  /**
+   * `stride` and `groups` default to 1 — the decoder never needs either, but
+   * the encoder's frontend strides and its pos_conv is grouped, and the WGSL
+   * kernel always supported both (its uniform carries stride and the
+   * per-group channel counts); only this seam used to pin them to 1.
+   */
   conv1d(
     input: Float32Array,
     weight: Float32Array,
@@ -60,6 +66,8 @@ export interface Backend {
     L: number,
     K: number,
     padding: number,
+    stride?: number,
+    groups?: number,
   ): Promise<Float32Array>;
   /** Always `"same"` here; the backend resolves what that means for its own API. */
   istft(
@@ -78,8 +86,8 @@ export const cpuBackend: Backend = {
   async matmul(a, b, M, N, K) {
     return matmul({ a, b, M, N, K });
   },
-  async conv1d(input, weight, bias, Cin, Cout, L, K, padding) {
-    return conv1d({ input, weight, bias: bias ?? undefined, N: 1, Cin, Cout, L, K, padding });
+  async conv1d(input, weight, bias, Cin, Cout, L, K, padding, stride, groups) {
+    return conv1d({ input, weight, bias: bias ?? undefined, N: 1, Cin, Cout, L, K, padding, stride, groups });
   },
   async istft(real, imag, window, frames, nFft, hop) {
     return istft({ real, imag, frames, nFft, hop, window, padding: "same" });

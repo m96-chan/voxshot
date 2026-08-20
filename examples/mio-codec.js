@@ -472,8 +472,8 @@ var cpuBackend = {
   async matmul(a, b, M, N, K) {
     return matmul({ a, b, M, N, K });
   },
-  async conv1d(input, weight, bias, Cin, Cout, L, K, padding2) {
-    return conv1d({ input, weight, bias: bias ?? void 0, N: 1, Cin, Cout, L, K, padding: padding2 });
+  async conv1d(input, weight, bias, Cin, Cout, L, K, padding2, stride, groups) {
+    return conv1d({ input, weight, bias: bias ?? void 0, N: 1, Cin, Cout, L, K, padding: padding2, stride, groups });
   },
   async istft(real, imag, window, frames, nFft, hop) {
     return istft({ real, imag, frames, nFft, hop, window, padding: "same" });
@@ -1099,9 +1099,16 @@ var Gpu = class _Gpu {
       aBuffer.destroy();
     }
   }
-  /** `conv1d`, with the weight and bias resident. `N` is always 1 here. */
-  async conv1d(input, weight, bias, Cin, Cout, L, K, padding2) {
-    const outLength = L + 2 * padding2 - (K - 1) - 1 + 1;
+  /**
+   * `conv1d`, with the weight and bias resident. `N` is always 1 here.
+   *
+   * `stride` and `groups` were always in the kernel's uniform (the host
+   * passes `in_per_group`/`out_per_group`, not `groups` itself); the encoder
+   * is what first needs them non-1 — strided frontend convs, the g16
+   * pos_conv, and ConvNeXt's depthwise g384 — each still one dispatch.
+   */
+  async conv1d(input, weight, bias, Cin, Cout, L, K, padding2, stride = 1, groups = 1) {
+    const outLength = Math.floor((L + 2 * padding2 - (K - 1) - 1) / stride) + 1;
     const inputBuffer = this.upload(input);
     const weightBuffer = this.residentBuffer(weight);
     const biasBuffer = this.residentBuffer(bias ?? zeros(Cout));
@@ -1111,7 +1118,7 @@ var Gpu = class _Gpu {
         CONV1D,
         [inputBuffer, weightBuffer, biasBuffer],
         Cout * outLength,
-        [Cin, Cout, L, K, outLength, 1, padding2, 1, Cin, Cout, 0, 0],
+        [Cin, Cout, L, K, outLength, stride, padding2, 1, Cin / groups, Cout / groups, 0, 0],
         [dispatchLength / WORKGROUP, Cout, 1]
       );
     } finally {
@@ -1154,7 +1161,7 @@ function gpuBackend(gpu) {
   return {
     name: `WebGPU (${gpu.adapterInfo})`,
     matmul: (a, b, M, N, K) => gpu.matmul(a, b, M, N, K),
-    conv1d: (input, weight, bias, Cin, Cout, L, K, padding2) => gpu.conv1d(input, weight, bias, Cin, Cout, L, K, padding2),
+    conv1d: (input, weight, bias, Cin, Cout, L, K, padding2, stride, groups) => gpu.conv1d(input, weight, bias, Cin, Cout, L, K, padding2, stride, groups),
     istft: (real, imag, window, frames, nFft, hop) => (
       // `"same"` resolved here, because the kernel takes a number and has no
       // convention of its own: crop `(nFft - hop) / 2` from each end, which

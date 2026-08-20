@@ -43,6 +43,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -50,7 +51,8 @@ import { promisify } from "node:util";
 import { chromium } from "playwright";
 
 import { cpuBackend, decode, MIOCODEC_24K } from "../miocodec/decoder.js";
-import { loadWeights } from "../miocodec/weights-cache.js";
+import { encodeGlobal } from "../miocodec/encoder.js";
+import { loadEncoderWeights, loadWeights } from "../miocodec/weights-cache.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BASE = "http://localhost:8082";
@@ -193,6 +195,43 @@ await page.selectOption("#mode", "sample");
 await page.fill("#seed", "42");
 const sampled = await runOnce(300_000);
 
+/* -------------------------------------------------------------------------- *
+ * Voice clone, in the browser: choose jp_ref1.wav as the reference, wait for
+ * the page's GPU encode, then synthesize greedy with the cloned voice. The
+ * embedding and the browser-resampled input are read back here; the numeric
+ * checks against the golden run below, after the browser closes.
+ * -------------------------------------------------------------------------- */
+
+// The same clip the encoder golden was dumped from, out of the HF snapshot
+// (serve.mjs's resolve, inlined — it is three lines).
+const refWavPath = (() => {
+  const root = join(homedir(), ".cache", "huggingface", "hub", "models--Aratako--MioTTS-0.6B");
+  const revision = readFileSync(join(root, "refs", "main"), "utf8").trim();
+  return join(root, "snapshots", revision, "samples", "jp_ref1.wav");
+})();
+
+await page.selectOption("#voice", "reference");
+await page.setInputFiles("#refaudio", refWavPath);
+await page.waitForFunction(() => window.__voice !== null && window.__voice.status !== "encoding", {
+  timeout: 300_000,
+});
+const voice = await page.evaluate(() => window.__voice);
+let cloned = null;
+let clonedWav = null;
+let voiceWave = null;
+if (check(voice?.status === "ready", `voice encode: ${JSON.stringify(voice)}`)) {
+  // What the encoder actually consumed — Chrome's resample of the 44.1 kHz
+  // clip — for the same-input oracle below.
+  voiceWave = await page.evaluate(() => window.__voiceWave());
+
+  // Greedy again, now with the cloned voice (mode was left on "sample" above).
+  await page.selectOption("#mode", "greedy");
+  cloned = await runOnce(300_000);
+  if (check(cloned?.status === "done", `cloned-voice run: ${JSON.stringify(cloned)}`)) {
+    clonedWav = await readWav();
+  }
+}
+
 await browser.close();
 
 /* -------------------------------------------------------------------------- *
@@ -292,6 +331,112 @@ if (check(sampled?.status === "done", `sampled run: ${JSON.stringify(sampled)}`)
   console.log(
     `sampled (s=42)  ${sampled.generatedIds.length} ids, ${sampled.speechIndices.length} speech, ` +
       `${sampled.audioSeconds.toFixed(2)} s audio, ${sampled.lmTokensPerSec.toFixed(1)} tok/s`,
+  );
+}
+
+/* -------------------------------------------------------------------------- *
+ * Check 4 — voice clone: the page's GPU embedding against the encoder golden,
+ * then the cloned-voice synthesis
+ * -------------------------------------------------------------------------- */
+
+// Bounds are ~5x over what this machine measures (printed alongside):
+//
+//   page GPU vs golden           5.97e-4 measured -> bound 3e-3
+//   page GPU vs CPU same-input   8.05e-7 measured -> bound 5e-6
+//
+// The two comparisons answer different questions, and the SAME-INPUT one is
+// authoritative for the port: it runs the reference encoder on the very
+// samples the page encoded, so the resampler cancels and only the WGSL
+// conv/matmul arithmetic is on trial — 8e-7 is f32 summation-order noise.
+// The golden comparison additionally swallows the input skew (Chrome's
+// WebAudio resampler vs torchaudio's polyphase disagree by a measured
+// **4.4e-2** of the waveform's peak), which the encoder's pooled statistics
+// attenuate by ~two orders of magnitude. Its looser bound guards the whole
+// path end to end; if it ever fails alone, suspect a resampler change
+// (Chrome update), not the kernels.
+const EMBED_GOLDEN_BOUND = 3e-3;
+const EMBED_SAME_INPUT_BOUND = 5e-6;
+
+const worstRelOf = (actual, expected) => {
+  if (actual.length !== expected.length) return Infinity;
+  let scale = 0;
+  for (const v of expected) scale = Math.max(scale, Math.abs(v));
+  let worstAbs = 0;
+  for (let i = 0; i < expected.length; i += 1) {
+    worstAbs = Math.max(worstAbs, Math.abs(actual[i] - expected[i]));
+  }
+  return worstAbs / scale;
+};
+
+const readF32 = (path) => {
+  const bytes = readFileSync(path);
+  return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+};
+
+if (voice?.status === "ready" && cloned?.status === "done" && clonedWav) {
+  const goldenDir = join(HERE, "../miocodec/golden-encoder/jp_ref1");
+  console.log(`\nvoice encode    ${voice.encodeMs.toFixed(0)} ms (GPU, jp_ref1.wav — paid once per file)`);
+
+  check(voice.embedding.length === 128, `embedding has ${voice.embedding.length} dims, expected 128`);
+
+  // The input skew, named before the embedding is judged: the page resampled
+  // 44.1 kHz -> 24 kHz with Chrome's WebAudio resampler, the golden's input
+  // came through torchaudio's polyphase. Same length, different arithmetic.
+  const goldenWave = readF32(join(goldenDir, "waveform_24k.f32"));
+  const waveRel = worstRelOf(voiceWave, goldenWave);
+  console.log(
+    `resample skew   browser wave vs golden wave: worst rel ${waveRel === Infinity ? `length ${voiceWave.length} vs ${goldenWave.length}` : waveRel.toExponential(2)}`,
+  );
+
+  // End to end: page GPU embedding vs the torch golden — kernels AND
+  // resampler together, at the looser bound (see the block above for why,
+  // and which of the two comparisons is authoritative).
+  const goldenEmbedding = readF32(join(goldenDir, "global_embedding.f32"));
+  const embedRelGolden = worstRelOf(voice.embedding, goldenEmbedding);
+  console.log(`embedding       page GPU vs golden: worst rel ${embedRelGolden.toExponential(2)}  (bound ${EMBED_GOLDEN_BOUND.toExponential(0)})`);
+  check(
+    embedRelGolden < EMBED_GOLDEN_BOUND,
+    `page embedding vs golden: worst rel ${embedRelGolden.toExponential(2)} >= ${EMBED_GOLDEN_BOUND}`,
+  );
+
+  // The authoritative, same-input oracle: the reference (CPU) encoder on the
+  // SAME browser-resampled samples. The resampler cancels; only the WGSL
+  // kernels are on trial, at the tight bound. ~40 s of reference conv, the
+  // check's second-largest cost — paid because it is the one comparison a
+  // Chrome resampler change cannot move.
+  console.log("encoder reference (CPU) on the browser-resampled wave...");
+  const encoderWeights = loadEncoderWeights();
+  const sameInput = await encodeGlobal(Float32Array.from(voiceWave), encoderWeights);
+  const embedRelSame = worstRelOf(voice.embedding, sameInput);
+  console.log(`embedding       page GPU vs CPU same-input: worst rel ${embedRelSame.toExponential(2)}  (bound ${EMBED_SAME_INPUT_BOUND.toExponential(0)})`);
+  check(
+    embedRelSame < EMBED_SAME_INPUT_BOUND,
+    `page embedding vs same-input reference: worst rel ${embedRelSame.toExponential(2)} >= ${EMBED_SAME_INPUT_BOUND}`,
+  );
+
+  // The cloned synthesis. The LM never sees the voice — identity enters only
+  // at the decoder — so greedy ids must EQUAL the default-voice greedy ids.
+  check(cloned.voice === "reference", `cloned run reports voice "${cloned.voice}", expected "reference"`);
+  check(
+    Array.isArray(cloned.embedding) && idsEqual(cloned.embedding, voice.embedding),
+    "the cloned run's embedding is not the one the encode produced",
+  );
+  check(
+    idsEqual(cloned.generatedIds, greedy.generatedIds),
+    "cloned-voice greedy ids differ from the default voice's — the LM must not see the voice",
+  );
+  check(
+    clonedWav.riff === "RIFF" && clonedWav.wave === "WAVE",
+    `cloned WAV is not a WAV (${clonedWav.riff}/${clonedWav.wave})`,
+  );
+  const clonedExpected = SAMPLES_PER_TOKEN * cloned.speechIndices.length;
+  check(
+    clonedWav.pcm.length === clonedExpected,
+    `cloned WAV has ${clonedWav.pcm.length} samples, expected ${clonedExpected}`,
+  );
+  console.log(
+    `cloned voice    ${cloned.speechIndices.length} speech tokens (ids = default greedy), ` +
+      `${clonedWav.pcm.length.toLocaleString()} samples, decode ${(cloned.decodeMs / 1000).toFixed(2)} s`,
   );
 }
 
