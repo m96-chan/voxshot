@@ -11,6 +11,15 @@ import * as miotts from "../../../src/engine/miotts/index.js";
  * tarball, which this test cannot see.
  */
 describe("the voxshot/miotts surface", () => {
+  it("exports the engine factory as the way in", () => {
+    // A factory rather than the class: obtaining the device is what answers
+    // "can this environment run the model at all", and that question has to be
+    // settled before a caller arranges 1.1 GB of weights.
+    expect(typeof miotts.createMioTtsEngine).toBe("function");
+    expect(typeof miotts.MioTtsEngine).toBe("function");
+    expect(typeof miotts.requestBrowserGpuDevice).toBe("function");
+  });
+
   it("names the parts a weight source has to answer", () => {
     expect(miotts.MIOTTS_WEIGHT_PARTS).toContain("lm-codes");
     expect(miotts.MIOTTS_WEIGHT_PARTS).toContain("codec-encoder");

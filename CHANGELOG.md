@@ -9,9 +9,22 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 ## [Unreleased]
 
 ### Added
-- A `voxshot/miotts` entry point, carrying the MioTTS engine's contract for
-  being fed weights: `MioTtsWeightSource`, the part names it asks for, and the
-  engine's constants. A subpath rather than part of the main entry, because the
+- A `voxshot/miotts` entry point, carrying `createMioTtsEngine` — Japanese text
+  to 24 kHz speech, entirely in the browser on WebGPU, with zero-shot voice
+  cloning from a reference clip. A Qwen3-0.6B language model (int8, resident on
+  the GPU) produces speech tokens at a fixed 25 Hz and MioCodec's decoder turns
+  those into audio, conditioned on a 128-dimension speaker embedding; the
+  language model never sees the voice.
+
+  Three things a caller should know before reaching for it. `speed` does not
+  work — the model has no pace control, so it is ignored rather than
+  approximated by resampling, which would shift the pitch of a voice that was
+  cloned specifically to keep. `expressiveness` maps onto the sampling
+  temperature. And chunks are generated independently, so prosody does not
+  carry across a sentence boundary.
+
+  Alongside it, the contract for being fed weights: `MioTtsWeightSource`, the
+  part names it asks for, and the engine's constants. A subpath rather than part of the main entry, because the
   WGSL this engine dispatches is large string literals that a consumer running
   another engine should not carry. Nothing under it touches the network, a
   cache or a filesystem — where ~1.1 GB of weights come from, how they are
@@ -20,6 +33,12 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   in the way of everyone it picked wrong for. Parts are requested one at a time
   so a caller who never clones a voice never pays for the 117 MB encoder.
   ([#124])
+- `web-xpu-ops` as an optional peer dependency. The MioTTS engine dispatches its
+  kernels through it; consumers who use another engine never install it. The
+  engine also accepts a `GPUDevice` the caller already owns, so an application
+  keeping another model resident does not end up with a second device and a
+  second budget, and `maxSeqLen` is a caller's choice because the KV cache is
+  sized from it — 768 positions cost ~176 MiB against 256's ~59 MiB. ([#124])
 - `@webgpu/types` as an optional peer dependency, alongside
   `@huggingface/transformers`. The MioTTS engine accepts a `GPUDevice` the
   caller already owns — an application keeping another model resident should

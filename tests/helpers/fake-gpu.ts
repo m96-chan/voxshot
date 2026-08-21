@@ -79,7 +79,19 @@ export function installGpuGlobals(): void {
   globals.GPUMapMode ??= { READ: 0x0001, WRITE: 0x0002 };
 }
 
-export function createFakeGpu(): FakeGpu {
+export interface FakeGpuOptions {
+  /**
+   * Fill a buffer's contents just before it is mapped for reading.
+   *
+   * Without this every readback is zeros, which is right for tests about the
+   * shape of the work. A test that drives a decode loop needs the logits to
+   * pick *something*, so it supplies a pattern — still not arithmetic, just a
+   * stand-in for a model that produces tokens.
+   */
+  onMap?: (backing: ArrayBuffer) => void;
+}
+
+export function createFakeGpu(options: FakeGpuOptions = {}): FakeGpu {
   installGpuGlobals();
 
   const log: FakeGpuLog = {
@@ -111,6 +123,7 @@ export function createFakeGpu(): FakeGpu {
       },
       async mapAsync() {
         log.bytesRead += size;
+        options.onMap?.(backing);
       },
       getMappedRange: () => backing,
       unmap: () => {},

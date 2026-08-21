@@ -29,7 +29,10 @@ export const TINY_DECODER: DecoderConfig = {
   // the resnet stack and the decoder transformer both run on, and the real
   // config has them equal (512) for the same reason.
   prenet: { dim: 8, layers: 1, heads: 2, windowSize: 5, ropeTheta: 10_000, outputDim: 8 },
-  decoder: { dim: 8, layers: 1, heads: 2, windowSize: 5, ropeTheta: 10_000, adaLnConditionDim: 4 },
+  // 128 like the real model, not scaled down with everything else: the
+  // speaker embedding's width is a contract `assertUsableVoice` enforces, so
+  // a tiny one here would make this checkpoint unusable through the engine.
+  decoder: { dim: 8, layers: 1, heads: 2, windowSize: 5, ropeTheta: 10_000, adaLnConditionDim: 128 },
 };
 
 /** Width of the SwiGLU hidden layer; fixed by the w1/w2/w3 shapes alone. */

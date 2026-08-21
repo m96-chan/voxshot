@@ -19,6 +19,9 @@
  * sampling temperature, which is the one delivery control this model has.
  */
 
+export { MioTtsEngine, createMioTtsEngine, requestBrowserGpuDevice } from "./engine.js";
+export type { GpuDeviceRequest } from "./engine.js";
+
 export {
   MIOTTS_ENGINE_NAME,
   MIOTTS_SAMPLE_RATE,

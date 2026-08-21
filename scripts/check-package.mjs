@@ -9,9 +9,17 @@
  * is how the maps came to point at a directory that was never included.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -88,6 +96,18 @@ try {
   // `--strip-components=1` drops the "package/" prefix npm wraps a tarball in.
   execFileSync("tar", ["-xzf", join(tmp, tarball), "-C", installed, "--strip-components=1"]);
   writeFileSync(join(tmp, "package.json"), JSON.stringify({ type: "module" }));
+
+  // Declared peers are linked in, because a consumer installs them too — an
+  // optional peer that is absent is a documented requirement, not a packaging
+  // defect. Only what `peerDependencies` actually names: an import of anything
+  // that is neither bundled nor declared still fails here, which is the point.
+  for (const name of Object.keys(pkg.peerDependencies ?? {})) {
+    const source = new URL(`../node_modules/${name}`, import.meta.url).pathname;
+    if (!existsSync(source)) continue;
+    const target = join(tmp, "node_modules", name);
+    mkdirSync(dirname(target), { recursive: true });
+    symlinkSync(source, target, "dir");
+  }
 
   for (const entry of Object.keys(pkg.exports ?? { ".": null })) {
     const specifier = entry === "." ? pkg.name : `${pkg.name}/${entry.replace(/^\.\//, "")}`;
