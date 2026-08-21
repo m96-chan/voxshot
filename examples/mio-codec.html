@@ -113,7 +113,11 @@
         <button id="run">デコードする</button>
         <progress id="bar" class="hidden" max="1" value="0"></progress>
         <p id="status">
-          初回はチェックポイントを Hugging Face から 523 MB ダウンロードします。
+          チェックポイントを Hugging Face から 523 MB ダウンロードします。
+          <strong>このページは保存しないので、開き直すたびに毎回 523 MB 落とし直します。</strong>
+          Hugging Face が <code>cache-control: no-store</code> を返すためブラウザの
+          HTTP キャッシュにも残りません（<a href="./mio-tts.html">MioTTS デモ</a>のほうは
+          Cache API に自分で保存するので、こちらとは違い再訪問でダウンロードしません）。
           デコードは WebGPU が使えればカーネル、無ければ参照実装で走ります。
           どちらで走ったかは結果欄に表示されます（<code>?backend=cpu</code> で強制可）。
         </p>

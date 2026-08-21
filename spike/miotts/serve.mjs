@@ -2,9 +2,15 @@
  * Static server for the MioTTS browser demo.
  *
  *     cd spike/miotts && npm run build   # bundle browser.ts -> examples/mio-tts.js
- *     node serve.mjs                     # then open http://localhost:8082/mio-tts.html
+ *     node serve.mjs                     # then open
+ *                                        # http://localhost:8082/mio-tts.html?assets=local
  *
- * Serves `examples/` and maps the model assets the page fetches:
+ * **`?assets=local` matters.** The page's default asset table is the Hugging
+ * Face one (assets.ts) — the hosted copy at voxshot.m96-chan.dev pulls 1.15 GB
+ * from the CDN. `?assets=local` is what points it back at this server, and it
+ * is what check-tts.mjs drives.
+ *
+ * Serves `examples/` and maps the model assets the page fetches in local mode:
  *
  *   /miotts/q8/*            -> spike/miotts/q8/*            (convert_weights.py's artifacts)
  *   /miotts/tokenizer.json  -> the MioTTS-0.6B HF cache snapshot's tokenizer.json

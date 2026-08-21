@@ -41,6 +41,29 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
   `VoxShot.device` to see where it landed, or `requiresGpu` to refuse. No
   behaviour changed — the promise was never kept. ([#107])
 
+### Demos and research
+
+*Not in the package.* These entries describe the demo pages and the spikes under
+`spike/`, which are not published to npm and change nothing for anyone
+installing `voxshot`. They are here because what the demos can do is the most
+honest signal of where the engines are headed.
+
+- The MioTTS demo is deployed alongside the Chatterbox one, at `/mio/` on the
+  Pages site: Japanese text in, speech out, entirely in the browser on WebGPU,
+  with zero-shot voice cloning from a reference clip. Its 1.15 GB of weights
+  cannot live on Pages (100 MB per file, 1 GB per site), so the page fetches
+  them from Hugging Face and keeps them in the Cache API — a returning visitor
+  downloads nothing. What a run will download, what cloning adds on top, whether
+  it is already cached and whether WebGPU is present are all stated **before**
+  the button starts a gigabyte of traffic. `?assets=local` keeps the
+  localhost/serve.mjs path for development and for the end-to-end check.
+  ([#126])
+- That demo generates with sampling (T=0.8, top-p=1.0) rather than greedy.
+  Greedy is not what the reference server does, and on some inputs (`あー`) it
+  never reaches eos and cycles to the 700-token cap — measured on the reference
+  implementation (torch, f32) as well, so it is a property of argmax decoding
+  and not of this port. It stays available, marked as the debug mode it is: it
+  is what makes a GPU run bit-comparable to the CPU oracle. ([#130])
 
 ### Fixed
 
@@ -244,4 +267,6 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#90]: https://github.com/m96-chan/voxshot/issues/90
 [#98]: https://github.com/m96-chan/voxshot/issues/98
 [#107]: https://github.com/m96-chan/voxshot/issues/107
+[#126]: https://github.com/m96-chan/voxshot/issues/126
+[#130]: https://github.com/m96-chan/voxshot/issues/130
 [#92]: https://github.com/m96-chan/voxshot/issues/92

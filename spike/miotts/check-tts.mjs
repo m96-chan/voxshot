@@ -171,13 +171,27 @@ async function readWav() {
   });
 }
 
-await page.goto(`${BASE}/mio-tts.html`);
+// `?assets=local` is what keeps this script cheap: the page's default asset
+// table is the Hugging Face one (1.15 GB per cold run), and local mode swaps
+// every URL for the copies serve.mjs maps — see assets.ts. The one URL that
+// stays on huggingface.co in both modes is the MioCodec checkpoint, which the
+// route above turns into a 302 back to this server.
+await page.goto(`${BASE}/mio-tts.html?assets=local`);
 
 // --- Greedy run: fill the golden ja text explicitly (the page prefills it,
-// but this check must not depend on the HTML's prefill staying in sync);
-// greedy is the select's default. Cold path (downloads + q8 packing + GPU
-// upload) ≈ 4 s locally; the timeout is slack, not an expectation.
+// but this check must not depend on the HTML's prefill staying in sync), and
+// SELECT greedy explicitly — the page's default is sample, because greedy is
+// the reference server's non-default and loops forever on some inputs (#130).
+// Greedy is this check's oracle mode (bit-identical ids against the CPU q8
+// run), so it is chosen here rather than inherited from the page.
+// Cold path (downloads + q8 packing + GPU upload) ≈ 4 s locally; the timeout
+// is slack, not an expectation.
 await page.fill("#text", JA_TEXT);
+// Pin the default itself, since this script is the only thing that drives the
+// page: a visitor who touches nothing must get sampling.
+const defaultMode = await page.inputValue("#mode");
+check(defaultMode === "sample", `the page's default mode is "${defaultMode}", expected "sample" (#130)`);
+await page.selectOption("#mode", "greedy");
 const greedy = await runOnce(900_000);
 if (!check(greedy?.status === "done", `greedy run: ${JSON.stringify(greedy)}`)) {
   finish();
