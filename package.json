@@ -24,7 +24,8 @@
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build",
-    "check:package": "node scripts/check-package.mjs"
+    "check:package": "node scripts/check-package.mjs",
+    "check:changelog": "node scripts/check-changelog.mjs"
   },
   "repository": {
     "type": "git",
