@@ -13,7 +13,10 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "lcov"],
       include: ["src/**/*.ts"],
-      exclude: ["src/**/*.d.ts", "src/index.ts"],
+      // Entry points only: they re-export and hold no logic of their own,
+      // and tests/index.test.ts and tests/engine/miotts/index.test.ts assert
+      // the surface each one promises.
+      exclude: ["src/**/*.d.ts", "src/index.ts", "src/engine/miotts/index.ts"],
       thresholds: {
         statements: 90,
         branches: 90,

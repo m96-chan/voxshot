@@ -9,6 +9,23 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 ## [Unreleased]
 
 ### Added
+- A `voxshot/miotts` entry point, carrying the MioTTS engine's contract for
+  being fed weights: `MioTtsWeightSource`, the part names it asks for, and the
+  engine's constants. A subpath rather than part of the main entry, because the
+  WGSL this engine dispatches is large string literals that a consumer running
+  another engine should not carry. Nothing under it touches the network, a
+  cache or a filesystem — where ~1.1 GB of weights come from, how they are
+  cached and how progress is reported stay the caller's decisions, since the
+  right answer differs per application and an engine that picked one would be
+  in the way of everyone it picked wrong for. Parts are requested one at a time
+  so a caller who never clones a voice never pays for the 117 MB encoder.
+  ([#124])
+- `@webgpu/types` as an optional peer dependency, alongside
+  `@huggingface/transformers`. The MioTTS engine accepts a `GPUDevice` the
+  caller already owns — an application keeping another model resident should
+  not end up with a second device — so the name reaches the published type
+  declarations. Only consumers who import `voxshot/miotts` need it. ([#124])
+
 - A `load-compiling` milestone on `ChatterboxLifecycleEvent`, marking the end of
   downloading and the start of ONNX session creation. That step dominates a warm
   load — roughly 35 s idle, over two minutes on a busy machine — and emitted
@@ -67,6 +84,13 @@ honest signal of where the engines are headed.
 
 ### Fixed
 
+- `npm run check:package` now checks every `exports` entry, and checks it by
+  packing the real tarball and asking Node to import each subpath from a
+  throwaway `node_modules`. It previously read `exports["."].types` alone,
+  which was the whole surface until a subpath existed. Verified against a
+  subpath pointing at a file that *is* shipped but cannot be imported — the
+  declaration-reading half passes that, and only the resolution half catches
+  it. ([#124])
 - `ChatterboxEngine` releases the tensors it allocates. Every `synthesize` built
   four speaker tensors and abandoned them along with the waveform, and `embed`
   did the same with its input and the encoder's four outputs — roughly a
@@ -270,3 +294,4 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#126]: https://github.com/m96-chan/voxshot/issues/126
 [#130]: https://github.com/m96-chan/voxshot/issues/130
 [#92]: https://github.com/m96-chan/voxshot/issues/92
+[#124]: https://github.com/m96-chan/voxshot/issues/124
