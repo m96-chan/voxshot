@@ -9,7 +9,7 @@ export default defineConfig({
       // main.ts and the workers drive real browser APIs (DOM, Web Worker,
       // WebGPU) and can only be exercised in a browser; unit-testable logic
       // lives in extracted modules like model-cache.ts.
-      include: ["src/model-cache.ts"],
+      include: ["src/model-cache.ts", "src/miotts-weights.ts"],
       thresholds: {
         statements: 90,
         branches: 90,

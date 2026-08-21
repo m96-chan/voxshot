@@ -84,6 +84,14 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 installing `voxshot`. They are here because what the demos can do is the most
 honest signal of where the engines are headed.
 
+- `examples/browser/src/miotts-weights.ts`: a reference answer to the question
+  `voxshot/miotts` deliberately does not answer — where the weights come from
+  and how they are kept. Hugging Face URLs, the Cache API, progress reporting,
+  and a pre-flight that says what a run will cost before it starts. Written to
+  be copied and changed; the one posture worth keeping whatever else you alter
+  is that a `CacheStorage` which cannot be opened, read or written is reported
+  and stepped around, never thrown from — a broken cache should cost a
+  re-download, not the page. ([#124])
 - The MioTTS demo is deployed alongside the Chatterbox one, at `/mio/` on the
   Pages site: Japanese text in, speech out, entirely in the browser on WebGPU,
   with zero-shot voice cloning from a reference clip. Its 1.15 GB of weights

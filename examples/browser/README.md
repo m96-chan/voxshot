@@ -19,6 +19,45 @@ npm run dev
 
 Open the printed URL (default <http://localhost:5173>).
 
+## Feeding MioTTS its weights
+
+`voxshot/miotts` never fetches anything. It asks for bytes by part name and
+stops there, because where 1.1 GB of weights come from and how they are kept
+depends on the application — a private CDN, a Service Worker, the Cache API,
+IndexedDB, the File System Access API, a bundled asset, `readFileSync` in Node.
+
+[`src/miotts-weights.ts`](src/miotts-weights.ts) is one answer, written to be
+copied and changed: Hugging Face URLs, the Cache API, progress reporting, and a
+pre-flight that says what a run will cost before it starts.
+
+```ts
+import { VoxShot } from "voxshot";
+import { createMioTtsEngine } from "voxshot/miotts";
+import {
+  SPEECH_PARTS,
+  createHuggingFaceWeightSource,
+  estimateDownload,
+} from "./miotts-weights.js";
+
+// Tell the visitor before a gigabyte of traffic, not after.
+const { pending } = await estimateDownload(SPEECH_PARTS, globalThis.caches);
+
+const engine = await createMioTtsEngine({
+  weights: createHuggingFaceWeightSource({
+    cacheStorage: globalThis.caches,
+    onProgress: (part, { loaded, total }) => report(part, loaded, total),
+  }),
+});
+const tts = await VoxShot.create({ engine, device: "webgpu" });
+```
+
+Two things to know before you use it. The engine needs `web-xpu-ops` installed
+— it is an optional peer dependency, so only consumers who reach for MioTTS
+pay for it. And the voice encoder's 117 MB is fetched on the first
+`cloneVoice()` and never otherwise, so an application whose speaker never
+changes can ship the 128-float embedding as a constant and never download it at
+all.
+
 ## Engines
 
 - **Placeholder** (default) — no model download. Renders speech-shaped tones,
