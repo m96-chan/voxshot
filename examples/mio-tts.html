@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MioTTS — text to speech in the browser</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #16181d;
+        --muted: #5b6472;
+        --bg: #fbfbfd;
+        --panel: #ffffff;
+        --line: #e2e5ea;
+        --accent: #2f6df6;
+        --warn-bg: #fff6e5;
+        --warn-line: #e8c88a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e8eaee;
+          --muted: #9aa4b2;
+          --bg: #101318;
+          --panel: #171b22;
+          --line: #272d37;
+          --accent: #6f9bff;
+          --warn-bg: #2a2314;
+          --warn-line: #5c4a20;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 2rem 1.25rem 4rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.65 ui-sans-serif, system-ui, -apple-system, "Hiragino Kaku Gothic ProN",
+          "Noto Sans JP", sans-serif;
+      }
+      main { max-width: 46rem; margin: 0 auto; }
+      h1 { font-size: 1.5rem; margin: 0 0 0.25rem; letter-spacing: -0.01em; }
+      .sub { color: var(--muted); margin: 0 0 1.75rem; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 1.25rem;
+        margin-bottom: 1.25rem;
+      }
+      .notice {
+        background: var(--warn-bg);
+        border-color: var(--warn-line);
+      }
+      textarea {
+        width: 100%;
+        min-height: 4.5rem;
+        font: inherit;
+        color: inherit;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.6rem 0.75rem;
+        resize: vertical;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+        margin-top: 0.85rem;
+      }
+      select, input[type="number"] {
+        font: inherit;
+        color: inherit;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.45rem 0.6rem;
+      }
+      input[type="number"] { width: 7rem; }
+      label { color: var(--muted); }
+      button {
+        font: inherit;
+        font-weight: 600;
+        color: #fff;
+        background: var(--accent);
+        border: 0;
+        border-radius: 8px;
+        padding: 0.6rem 1.1rem;
+        cursor: pointer;
+      }
+      button[disabled] { opacity: 0.5; cursor: default; }
+      progress { width: 100%; height: 0.5rem; margin-top: 0.85rem; }
+      #status { margin-top: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+      audio { width: 100%; margin-top: 1rem; }
+      dl.metrics {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.3rem 1.25rem;
+        margin: 1rem 0 0;
+        font-variant-numeric: tabular-nums;
+      }
+      dl.metrics dt { color: var(--muted); }
+      dl.metrics dd { margin: 0; }
+      code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+      pre {
+        overflow-x: auto;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.85rem;
+        margin: 0.85rem 0 0;
+        font-size: 0.86em;
+        line-height: 1.5;
+      }
+      h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+      a { color: var(--accent); }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>MioTTS — text to speech in the browser</h1>
+      <p class="sub">
+        <a href="https://huggingface.co/Aratako/MioTTS-0.6B">MioTTS-0.6B</a>（Qwen3, int8）が
+        テキストを音声トークンにし、
+        <a href="https://huggingface.co/Aratako/MioCodec-25Hz-24kHz">MioCodec</a> のデコーダが
+        24 kHz の波形にします。両方とも
+        <a href="https://github.com/m96-chan/web-xpu-ops">web-xpu-ops</a> の WGSL カーネルで、
+        すべてこのページの中で動きます。サーバ推論も Python もありません。
+      </p>
+
+      <section class="panel notice">
+        <h2>WebGPU が必須です</h2>
+        <p style="margin: 0">
+          言語モデルは WebGPU 常駐エンジン（1 トークン = 1 submit、読み戻しは logits のみ）で
+          走ります。CPU フォールバックは意図的にありません（参照実装はテストのオラクル専用）。
+          話者は同梱フィクスチャの global embedding か、参照音声から MioCodec エンコーダ
+          （こちらも WGSL カーネル）で作る 128 次元 embedding です。
+        </p>
+      </section>
+
+      <section class="panel">
+        <textarea id="text">こんにちは、今日はいい天気ですね</textarea>
+        <div class="controls">
+          <label for="mode">サンプリング</label>
+          <select id="mode">
+            <option value="greedy" selected>greedy</option>
+            <option value="sample">sample (T=0.8, top-p=1.0)</option>
+          </select>
+          <label for="seed">seed</label>
+          <input id="seed" type="number" value="42" />
+          <button id="run">生成する</button>
+        </div>
+        <div class="controls">
+          <label for="voice">話者</label>
+          <select id="voice">
+            <option value="default" selected>default (fixture)</option>
+            <option value="reference">reference audio…</option>
+          </select>
+          <input id="refaudio" type="file" accept="audio/*" class="hidden" />
+          <span id="voice-status" class="mono" style="color: var(--muted)"></span>
+        </div>
+        <progress id="bar" class="hidden" max="1" value="0"></progress>
+        <p id="status">
+          初回は LM の int8 重み（約 583 MB）と MioCodec のチェックポイント（523 MB）を
+          ダウンロードします。2 回目以降のクリックは生成だけが走ります。
+        </p>
+        <audio id="player" controls class="hidden"></audio>
+        <dl class="metrics hidden" id="metrics">
+          <dt>アダプタ</dt><dd id="m-adapter"></dd>
+          <dt>話者</dt><dd id="m-voice"></dd>
+          <dt>エンコード時間</dt><dd id="m-encode-ms"></dd>
+          <dt>プロンプト</dt><dd id="m-prompt-tokens"></dd>
+          <dt>生成トークン</dt><dd id="m-gen-tokens"></dd>
+          <dt>LM 時間</dt><dd id="m-lm-ms"></dd>
+          <dt>LM スループット</dt><dd id="m-lm-tps"></dd>
+          <dt>デコード時間</dt><dd id="m-decode-ms"></dd>
+          <dt>合計</dt><dd id="m-total-ms"></dd>
+          <dt>RTF</dt><dd id="m-rtf"></dd>
+        </dl>
+      </section>
+
+      <section class="panel">
+        <h2>パイプライン</h2>
+        <pre>text ─▶ ChatML prompt      &lt;|im_start|&gt;user … assistant
+     ─▶ Qwen3-0.6B q8      28L, 1024h, 16Q/8KV×128, QK-norm, RoPE(θ=1e6)
+                           WebGPU 常駐: ~480 dispatch/token, logits のみ読み戻し
+     ─▶ &lt;|s_n|&gt; tokens     25 Hz, eos で停止（最大 700）
+     ─▶ MioCodec decoder   FSQ → Transformer ×2 → iSTFT (1920/480)
+     ─▶ waveform, 24 kHz
+
+voice ─▶ MioCodec encoder  参照音声 24 kHz → WavLM 2L → ConvNeXt → 128-dim
+                           speaker embedding（未指定なら同梱フィクスチャ）</pre>
+      </section>
+    </main>
+
+    <script type="module" src="./mio-tts.js"></script>
+  </body>
+</html>
