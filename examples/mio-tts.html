@@ -135,7 +135,8 @@
         <p style="margin: 0">
           言語モデルは WebGPU 常駐エンジン（1 トークン = 1 submit、読み戻しは logits のみ）で
           走ります。CPU フォールバックは意図的にありません（参照実装はテストのオラクル専用）。
-          話者は同梱フィクスチャの global embedding 固定です。
+          話者は同梱フィクスチャの global embedding か、参照音声から MioCodec エンコーダ
+          （こちらも WGSL カーネル）で作る 128 次元 embedding です。
         </p>
       </section>
 
@@ -151,6 +152,15 @@
           <input id="seed" type="number" value="42" />
           <button id="run">生成する</button>
         </div>
+        <div class="controls">
+          <label for="voice">話者</label>
+          <select id="voice">
+            <option value="default" selected>default (fixture)</option>
+            <option value="reference">reference audio…</option>
+          </select>
+          <input id="refaudio" type="file" accept="audio/*" class="hidden" />
+          <span id="voice-status" class="mono" style="color: var(--muted)"></span>
+        </div>
         <progress id="bar" class="hidden" max="1" value="0"></progress>
         <p id="status">
           初回は LM の int8 重み（約 583 MB）と MioCodec のチェックポイント（523 MB）を
@@ -159,6 +169,8 @@
         <audio id="player" controls class="hidden"></audio>
         <dl class="metrics hidden" id="metrics">
           <dt>アダプタ</dt><dd id="m-adapter"></dd>
+          <dt>話者</dt><dd id="m-voice"></dd>
+          <dt>エンコード時間</dt><dd id="m-encode-ms"></dd>
           <dt>プロンプト</dt><dd id="m-prompt-tokens"></dd>
           <dt>生成トークン</dt><dd id="m-gen-tokens"></dd>
           <dt>LM 時間</dt><dd id="m-lm-ms"></dd>
@@ -176,7 +188,10 @@
                            WebGPU 常駐: ~480 dispatch/token, logits のみ読み戻し
      ─▶ &lt;|s_n|&gt; tokens     25 Hz, eos で停止（最大 700）
      ─▶ MioCodec decoder   FSQ → Transformer ×2 → iSTFT (1920/480)
-     ─▶ waveform, 24 kHz</pre>
+     ─▶ waveform, 24 kHz
+
+voice ─▶ MioCodec encoder  参照音声 24 kHz → WavLM 2L → ConvNeXt → 128-dim
+                           speaker embedding（未指定なら同梱フィクスチャ）</pre>
       </section>
     </main>
 

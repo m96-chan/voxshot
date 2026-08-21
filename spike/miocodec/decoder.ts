@@ -51,6 +51,12 @@ export interface Tensor {
 export interface Backend {
   readonly name: string;
   matmul(a: Float32Array, b: Float32Array, M: number, N: number, K: number): Promise<Float32Array>;
+  /**
+   * `stride` and `groups` default to 1 — the decoder never needs either, but
+   * the encoder's frontend strides and its pos_conv is grouped, and the WGSL
+   * kernel always supported both (its uniform carries stride and the
+   * per-group channel counts); only this seam used to pin them to 1.
+   */
   conv1d(
     input: Float32Array,
     weight: Float32Array,
@@ -60,6 +66,8 @@ export interface Backend {
     L: number,
     K: number,
     padding: number,
+    stride?: number,
+    groups?: number,
   ): Promise<Float32Array>;
   /** Always `"same"` here; the backend resolves what that means for its own API. */
   istft(
@@ -78,8 +86,8 @@ export const cpuBackend: Backend = {
   async matmul(a, b, M, N, K) {
     return matmul({ a, b, M, N, K });
   },
-  async conv1d(input, weight, bias, Cin, Cout, L, K, padding) {
-    return conv1d({ input, weight, bias: bias ?? undefined, N: 1, Cin, Cout, L, K, padding });
+  async conv1d(input, weight, bias, Cin, Cout, L, K, padding, stride, groups) {
+    return conv1d({ input, weight, bias: bias ?? undefined, N: 1, Cin, Cout, L, K, padding, stride, groups });
   },
   async istft(real, imag, window, frames, nFft, hop) {
     return istft({ real, imag, frames, nFft, hop, window, padding: "same" });
@@ -146,7 +154,8 @@ export const MIOCODEC_24K: DecoderConfig = {
  */
 const transposed = new WeakMap<Float32Array, Float32Array>();
 
-async function linear(
+/** Exported for `encoder.ts`, which shares the helper (and this cache) instead of carrying a drifting copy. */
+export async function linear(
   x: Tensor,
   weight: Tensor,
   bias: Tensor | null,
@@ -191,7 +200,7 @@ function addInPlace(a: Float32Array, b: Float32Array): Float32Array {
 }
 
 /** `[L, C]` to `[C, L]`, the axis swap that separates conv stages from attention ones. */
-function transpose2d(data: Float32Array, rows: number, cols: number): Float32Array {
+export function transpose2d(data: Float32Array, rows: number, cols: number): Float32Array {
   const out = new Float32Array(data.length);
   for (let r = 0; r < rows; r += 1) {
     for (let c = 0; c < cols; c += 1) out[c * rows + r] = data[r * cols + c]!;
@@ -320,8 +329,14 @@ export async function fsqDecode(
   );
 }
 
-/** `LayerNorm(dim)` with learned scale and shift, over the last axis. */
-function layerNorm(x: Tensor, weight: Tensor, bias: Tensor, dim: number): Tensor {
+/**
+ * `LayerNorm(dim)` with learned scale and shift, over the last axis.
+ *
+ * Exported for `encoder.ts`, whose ConvNeXt norms pass eps 1e-6 explicitly —
+ * hence the parameter, defaulting to the decoder's own NORM_EPS so every
+ * existing call here is byte-for-byte unchanged.
+ */
+export function layerNorm(x: Tensor, weight: Tensor, bias: Tensor, dim: number, eps = NORM_EPS): Tensor {
   return {
     data: layernorm({
       input: x.data,
@@ -329,7 +344,7 @@ function layerNorm(x: Tensor, weight: Tensor, bias: Tensor, dim: number): Tensor
       bias: bias.data,
       N: x.data.length / dim,
       D: dim,
-      eps: NORM_EPS,
+      eps,
     }),
     shape: [...x.shape],
   };

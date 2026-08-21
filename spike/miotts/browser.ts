@@ -2,6 +2,7 @@ import { sampleNext, type SamplerOptions } from "../../../web-xpu-ops/llm/sample
 import { fetchCheckpoint, toWav, type Fixture } from "../miocodec/browser.js";
 import { MAX_SEQ_LEN, maxNewFor } from "./constants.js";
 import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "../miocodec/decoder.js";
+import { encodeGlobal } from "../miocodec/encoder.js";
 import { Gpu, gpuBackend } from "../miocodec/gpu.js";
 import { Safetensors } from "../miocodec/safetensors.js";
 import { createGpuEngine, type GpuEngine, type GpuEngineStats } from "./gpu-engine.js";
@@ -37,6 +38,8 @@ import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./we
  *   window.__result = {
  *     status: "done",
  *     adapter: string, mode: "greedy" | "sample", seed: number,
+ *     voice: "default" | "reference",
+ *     encodeMs?: number, embedding?: number[128],    // only when voice === "reference"
  *     promptIds: number[], generatedIds: number[],   // generatedIds includes the eos when one was produced
  *     speechIndices: number[], nonSpeechIds: number[], // nonSpeechIds excludes eos; should be []
  *     prefillMs, lmMs, lmSteps, lmTokensPerSec, decodeMs, totalMs, audioSeconds, rtf: number,
@@ -46,16 +49,41 @@ import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./we
  *
  * On failure `window.__result = { status: "error", error: string }` and
  * `#status` shows the message. `__result` is reset to null when a run starts.
+ *
+ * Voice cloning has its own hook, because the encode happens on file *choice*,
+ * not on run: after a file lands in `#refaudio` (with `#voice` = "reference"),
+ * `window.__voice` moves "encoding" -> `{ status: "ready", key, encodeMs,
+ * embedding: number[128] }` (or `{ status: "error", error }`), and
+ * `window.__voiceWave()` returns the browser-resampled 24 kHz mono samples the
+ * embedding was computed from — so a checker can run the reference encoder on
+ * the *same* input and separate GPU-kernel error from resampler skew (the page
+ * resamples with Chrome's WebAudio sinc, the golden used torchaudio's).
  */
 
 const EOS_IDS = [151645, 151643];
 const SAMPLE_RATE_EXPECTED = 24000;
+/**
+ * The reference clip is trimmed to this many seconds before it reaches the
+ * encoder — the MioTTS reference server's own `max_reference_seconds = 20.0`.
+ *
+ * Not a nicety: WavLM's attention is O(T²), so a 3-minute clip means T≈9000
+ * and 12·T² f32 scratch arrays, ~3.9 GB, which is a dead tab rather than a
+ * slow one. `encodeGlobal` carries its own hard cap for any other caller; this
+ * is the page matching the server it is a port of.
+ */
+const MAX_REFERENCE_SECONDS = 20;
 
 interface RunResult {
   status: "done";
   adapter: string;
   mode: "greedy" | "sample";
   seed: number;
+  /** Whose 128-dim global embedding conditioned the decoder. */
+  voice: "default" | "reference";
+  /** GPU encode wall time for the reference clip (cached per file, so paid once). */
+  encodeMs?: number;
+  /** The encoded embedding itself, for the E2E check. Reference voice only. */
+  embedding?: number[];
   promptIds: number[];
   generatedIds: number[];
   speechIndices: number[];
@@ -73,9 +101,18 @@ interface RunResult {
   engineStats: GpuEngineStats;
 }
 
+type VoiceHook =
+  | { status: "encoding"; key: string }
+  | { status: "ready"; key: string; encodeMs: number; embedding: number[] }
+  | { status: "error"; error: string };
+
 declare global {
   interface Window {
     __result: RunResult | { status: "error"; error: string } | null;
+    /** Voice-clone E2E hook — see the module doc. */
+    __voice: VoiceHook | null;
+    /** The browser-resampled 24 kHz mono input of the current voice, for the check's same-input oracle. */
+    __voiceWave: (() => number[]) | null;
   }
 }
 
@@ -229,6 +266,78 @@ async function loadEverything(report: Progress): Promise<Loaded> {
   return { adapter, engine, tokenizer, normalize: normalizeText, codecWeights, codecBackend, fixture };
 }
 
+/* -------------------------------------------------------------------------- *
+ * Voice cloning: reference audio -> the codec encoder -> a 128-dim embedding
+ * -------------------------------------------------------------------------- */
+
+/**
+ * The encoder weights (117 MB, `export_encoder_weights.py`'s artifact, served
+ * by serve.mjs), fetched lazily on the FIRST reference-voice encode: the
+ * default voice never pays for them. One promise, kept across files and runs
+ * — like the LM/codec loads, a failure drops the cache so the next attempt
+ * retries instead of re-awaiting a forever-rejected promise.
+ */
+let encoderWeightsPromise: Promise<Weights> | null = null;
+
+function loadEncoderWeights(report: Progress): Promise<Weights> {
+  encoderWeightsPromise ??= (async () => {
+    const buffer = await fetchWithProgress(
+      "./miotts/encoder-weights.safetensors",
+      "encoder weights",
+      report,
+    );
+    report("parsing the encoder weights");
+    return new Weights(Safetensors.parse(buffer));
+  })().catch((error: unknown) => {
+    encoderWeightsPromise = null;
+    throw error;
+  });
+  return encoderWeightsPromise;
+}
+
+/**
+ * Decode an audio file to 24 kHz mono.
+ *
+ * `decodeAudioData` resamples to its context's rate per spec, so decoding on a
+ * 24 kHz OfflineAudioContext usually IS the resample — one pass through the
+ * browser's sinc resampler. The render fallback covers an implementation that
+ * hands back the file's native rate instead (an `AudioBufferSourceNode`
+ * resamples its buffer to the context rate while rendering). Either way this
+ * is the **browser's** resampler, not torchaudio's polyphase that produced the
+ * golden's 24 kHz input — check-tts.mjs measures that skew rather than
+ * assuming it away.
+ */
+async function toMono24k(bytes: ArrayBuffer): Promise<Float32Array> {
+  const probe = new OfflineAudioContext(1, 1, SAMPLE_RATE_EXPECTED);
+  const decoded = await probe.decodeAudioData(bytes);
+
+  const channels = decoded.numberOfChannels;
+  const mono = new Float32Array(decoded.length);
+  for (let c = 0; c < channels; c += 1) {
+    const data = decoded.getChannelData(c);
+    for (let i = 0; i < mono.length; i += 1) mono[i] = mono[i]! + data[i]! / channels;
+  }
+  if (decoded.sampleRate === SAMPLE_RATE_EXPECTED) return mono;
+
+  const frames = Math.ceil((mono.length * SAMPLE_RATE_EXPECTED) / decoded.sampleRate);
+  const context = new OfflineAudioContext(1, frames, SAMPLE_RATE_EXPECTED);
+  const buffer = context.createBuffer(1, mono.length, decoded.sampleRate);
+  buffer.copyToChannel(mono, 0);
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  source.connect(context.destination);
+  source.start();
+  const rendered = await context.startRendering();
+  return rendered.getChannelData(0).slice();
+}
+
+interface VoiceEntry {
+  embedding: Float32Array;
+  encodeMs: number;
+  /** What the encoder actually saw, kept for `window.__voiceWave`. */
+  wave: Float32Array;
+}
+
 interface GenerateOutcome {
   result: RunResult;
   pcm: Float32Array;
@@ -240,9 +349,13 @@ async function generate(
   text: string,
   mode: "greedy" | "sample",
   seed: number,
+  voice: VoiceEntry | null,
   report: Progress,
 ): Promise<GenerateOutcome> {
   const { engine, tokenizer, normalize, codecWeights, codecBackend, fixture } = loaded;
+  // The LM never sees the voice — speaker identity enters only at the decoder,
+  // as AdaLN-Zero conditioning. Same ids whichever embedding is used.
+  const globalEmbedding = voice ? voice.embedding : Float32Array.from(fixture.global_embedding);
 
   const promptIds = tokenizer.encodeChat(normalize(text));
   if (promptIds.length + 1 >= MAX_SEQ_LEN) {
@@ -298,7 +411,7 @@ async function generate(
   const decodeStart = performance.now();
   const { waveform } = await decode(
     Float32Array.from(speechIndices),
-    Float32Array.from(fixture.global_embedding),
+    globalEmbedding,
     // The "aligned" path: 2 STFT frames per 25 Hz token -> n*960 samples at 24 kHz.
     2 * speechIndices.length,
     MIOCODEC_24K,
@@ -315,6 +428,8 @@ async function generate(
       adapter: loaded.adapter,
       mode,
       seed,
+      voice: voice ? "reference" : "default",
+      ...(voice ? { encodeMs: voice.encodeMs, embedding: Array.from(voice.embedding) } : {}),
       promptIds,
       generatedIds,
       speechIndices,
@@ -348,13 +463,39 @@ function main(): void {
   const textArea = element<HTMLTextAreaElement>("text");
   const modeSelect = element<HTMLSelectElement>("mode");
   const seedInput = element<HTMLInputElement>("seed");
+  const voiceSelect = element<HTMLSelectElement>("voice");
+  const refAudio = element<HTMLInputElement>("refaudio");
+  const voiceStatus = element<HTMLSpanElement>("voice-status");
   const bar = element<HTMLProgressElement>("bar");
   const status = element<HTMLParagraphElement>("status");
   const player = element<HTMLAudioElement>("player");
   const metrics = element<HTMLDListElement>("metrics");
 
   window.__result = null;
+  window.__voice = null;
+  window.__voiceWave = null;
   let loadedPromise: Promise<Loaded> | null = null;
+
+  // Embeddings are cached per file (name + size + lastModified — enough to
+  // tell one chosen file from another without hashing 5 MB of WAV; the mtime
+  // is what separates a re-recorded take from the identically-named,
+  // identically-sized one it replaced), so re-picking the same clip, or
+  // re-running with it, never re-encodes.
+  const voiceCache = new Map<string, VoiceEntry>();
+  let activeVoice: VoiceEntry | null = null;
+  /** The in-flight encode; a run with #voice=reference awaits it first. */
+  let voicePromise: Promise<void> | null = null;
+  /**
+   * Bumped on every file choice, captured by that choice's encode.
+   *
+   * Encodes are slow (seconds) and a user can pick a second file while the
+   * first is still running. Without this, a superseded encode would finish
+   * later and overwrite `activeVoice` / `__voice` with ITS result — the page
+   * would then synthesise in a voice the user had already replaced, and a late
+   * failure would clobber a newer "ready". Every commit below checks that the
+   * counter has not moved and bails if it has.
+   */
+  let voiceGeneration = 0;
 
   const formatMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   const report: Progress = (stage, detail) => {
@@ -369,6 +510,109 @@ function main(): void {
       status.textContent = stage;
     }
   };
+
+  voiceSelect.addEventListener("change", () => {
+    refAudio.classList.toggle("hidden", voiceSelect.value !== "reference");
+  });
+
+  refAudio.addEventListener("change", () => {
+    const file = refAudio.files?.[0];
+    if (!file) return;
+    const key = `${file.name}:${file.size}:${file.lastModified}`;
+    const generation = (voiceGeneration += 1);
+    /** This encode is still the current selection — see `voiceGeneration`. */
+    const current = () => generation === voiceGeneration;
+
+    voicePromise = (async () => {
+      const cached = voiceCache.get(key);
+      if (cached) {
+        // Reached synchronously (no await above), so nothing can have
+        // superseded this choice yet — the guard is here anyway so that an
+        // `await` creeping in above cannot silently reintroduce the race.
+        if (!current()) return;
+        activeVoice = cached;
+        window.__voiceWave = () => Array.from(cached.wave);
+        window.__voice = {
+          status: "ready",
+          key,
+          encodeMs: cached.encodeMs,
+          embedding: Array.from(cached.embedding),
+        };
+        voiceStatus.textContent = `${file.name}: encoded (cached, ${cached.encodeMs.toFixed(0)} ms)`;
+        return;
+      }
+
+      activeVoice = null;
+      window.__voice = { status: "encoding", key };
+      voiceStatus.textContent = `${file.name}: encoding…`;
+      bar.classList.remove("hidden");
+      try {
+        // The encode needs the shared GPU device, which arrives with
+        // everything else — so choosing a file is also what triggers the
+        // model loads if no run has yet. Same cache and retry story as the
+        // run button's.
+        loadedPromise ??= loadEverything(report).catch((error: unknown) => {
+          loadedPromise = null;
+          throw error;
+        });
+        const loaded = await loadedPromise;
+        const weights = await loadEncoderWeights(report);
+
+        report("decoding + resampling the reference audio");
+        const decoded = await toMono24k(await file.arrayBuffer());
+
+        // Trim to the reference server's own `max_reference_seconds = 20.0`
+        // before anything expensive touches it — see MAX_REFERENCE_SECONDS.
+        // The note is visible rather than silent: the embedding a user gets
+        // from a 3-minute clip is the first 20 s of it, and that is something
+        // they should be told, not left to infer from the voice.
+        const limit = MAX_REFERENCE_SECONDS * SAMPLE_RATE_EXPECTED;
+        const trimmed = decoded.length > limit;
+        const wave = trimmed ? decoded.slice(0, limit) : decoded;
+        const trimNote = trimmed ? ` (reference trimmed to ${MAX_REFERENCE_SECONDS} s)` : "";
+        if (trimmed) {
+          voiceStatus.textContent = `${file.name}: encoding…${trimNote}`;
+        }
+
+        report(`encoding the voice on ${loaded.codecBackend.name}${trimNote}`);
+        await new Promise((resolve) => setTimeout(resolve, 0)); // let the status paint
+        const started = performance.now();
+        const embedding = await encodeGlobal(wave, weights, { backend: loaded.codecBackend });
+        const encodeMs = performance.now() - started;
+
+        const entry: VoiceEntry = { embedding, encodeMs, wave };
+        // Cached under this file's own key whether or not it is still the
+        // current choice — the work is done and correct for that file, and a
+        // later re-pick should not repay for it.
+        voiceCache.set(key, entry);
+        // Everything past here is a COMMIT to the shared "current voice"
+        // state, so a superseded encode stops at this line rather than
+        // overwriting a newer selection.
+        if (!current()) return;
+        activeVoice = entry;
+        window.__voiceWave = () => Array.from(wave);
+        window.__voice = { status: "ready", key, encodeMs, embedding: Array.from(embedding) };
+        voiceStatus.textContent = `${file.name}: encoded in ${encodeMs.toFixed(0)} ms${trimNote}`;
+        status.textContent = `話者エンコード完了${trimNote}`;
+      } catch (error) {
+        // Same rule on the failure path: a stale encode's error must not
+        // clobber a newer selection's "ready" (or its own in-flight status).
+        // Still rethrown, so the promise a run awaits stays rejected.
+        if (current()) {
+          const message = error instanceof Error ? error.message : String(error);
+          window.__voice = { status: "error", error: message };
+          voiceStatus.textContent = `${file.name}: 失敗`;
+          status.textContent = `話者エンコード失敗: ${message}`;
+        }
+        throw error;
+      } finally {
+        // The bar belongs to whatever is running NOW; a superseded encode
+        // finishing must not hide the bar its successor is still using.
+        if (current()) bar.classList.add("hidden");
+      }
+    })();
+    voicePromise.catch(() => {}); // surfaced via __voice and at the next run's await
+  });
 
   button.addEventListener("click", async () => {
     button.disabled = true;
@@ -392,13 +636,25 @@ function main(): void {
       const seedText = seedInput.value.trim();
       const parsedSeed = Number(seedText);
       const seed = seedText !== "" && Number.isFinite(parsedSeed) ? parsedSeed : 42;
-      const { result, pcm, sampleRate } = await generate(loaded, textArea.value, mode, seed, report);
+
+      let voice: VoiceEntry | null = null;
+      if (voiceSelect.value === "reference") {
+        if (!voicePromise) throw new Error("reference voice selected but no audio file chosen");
+        await voicePromise; // finish (or surface) an in-flight encode first
+        if (!activeVoice) throw new Error("the reference voice has no embedding");
+        voice = activeVoice;
+      }
+
+      const { result, pcm, sampleRate } = await generate(loaded, textArea.value, mode, seed, voice, report);
 
       bar.classList.add("hidden");
       status.textContent = "完了";
       player.src = URL.createObjectURL(toWav(pcm, sampleRate));
       player.classList.remove("hidden");
       element("m-adapter").textContent = result.adapter;
+      element("m-voice").textContent = result.voice === "reference" ? "reference audio" : "default (fixture)";
+      element("m-encode-ms").textContent =
+        result.encodeMs !== undefined ? `${result.encodeMs.toFixed(0)} ms (cached per file)` : "—";
       element("m-prompt-tokens").textContent = String(result.promptIds.length);
       element("m-gen-tokens").textContent =
         `${result.generatedIds.length} (${result.speechIndices.length} speech)` +
