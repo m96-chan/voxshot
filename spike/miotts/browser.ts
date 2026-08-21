@@ -1,4 +1,4 @@
-import { sampleNext, type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
+import { type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
 import { fetchCheckpoint, toWav, type Fixture } from "../miocodec/browser.js";
 import { MAX_SEQ_LEN, maxNewFor } from "./constants.js";
 import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "../miocodec/decoder.js";
@@ -6,6 +6,7 @@ import { encodeGlobal } from "../miocodec/encoder.js";
 import { Gpu, gpuBackend } from "../miocodec/gpu.js";
 import { Safetensors } from "../miocodec/safetensors.js";
 import { createGpuEngine, type GpuEngine, type GpuEngineStats } from "./gpu-engine.js";
+import { createSamplerStats, sampleNextTopK, xorshift32 } from "./sampler.js";
 import { normalizeText } from "./text.js";
 import { loadTokenizer, speechIndexOf, type Tokenizer, type TokenizerJson } from "./tokenizer.js";
 import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./weights-q8.js";
@@ -43,6 +44,7 @@ import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./we
  *     promptIds: number[], generatedIds: number[],   // generatedIds includes the eos when one was produced
  *     speechIndices: number[], nonSpeechIds: number[], // nonSpeechIds excludes eos; should be []
  *     prefillMs, lmMs, lmSteps, lmTokensPerSec, decodeMs, totalMs, audioSeconds, rtf: number,
+ *     samplerFallbacks: number,                      // steps that paid for upstream's full sort
  *       // rtf follows the codec spike's convention: processing seconds per
  *       // second of audio, so smaller is better and < 1 is faster than realtime.
  *   }
@@ -99,6 +101,13 @@ interface RunResult {
   rtf: number;
   /** gpu-engine.ts' allocation/submit counters — lets a driver assert the loop shape. */
   engineStats: GpuEngineStats;
+  /**
+   * Steps whose draw fell outside sampler.ts' top-k window and paid for
+   * upstream's full-vocabulary sort. Greedy runs report 0 by construction.
+   * A driver watches this because it is what the sampled tok/s hangs on:
+   * ISSUE #120 was every step taking that path.
+   */
+  samplerFallbacks: number;
 }
 
 type VoiceHook =
@@ -144,19 +153,6 @@ async function fetchWithProgress(url: string, label: string, report: Progress): 
     offset += chunk.byteLength;
   }
   return buffer.buffer;
-}
-
-/** Deterministic xorshift32 in [0, 1) so sampled runs are reproducible from a seed. */
-function xorshift32(seed: number): () => number {
-  let s = seed >>> 0 || 0x9e3779b9;
-  return () => {
-    s ^= s << 13;
-    s >>>= 0;
-    s ^= s >>> 17;
-    s ^= s << 5;
-    s >>>= 0;
-    return s / 4294967296;
-  };
 }
 
 interface Loaded {
@@ -367,6 +363,10 @@ async function generate(
       ? { mode: "greedy" }
       // The MioTTS reference server's own sampling: temperature 0.8, top_p 1.0.
       : { mode: "top-p", temperature: 0.8, topP: 1.0, rng: xorshift32(seed) };
+  // Sampling goes through sampler.ts, not `llm/sampler.js` directly: upstream's
+  // top-p path sorts all 164,480 logits every step, which capped sampled runs
+  // at ~26 tok/s regardless of the GPU (ISSUE #120). Same ids, ~14x faster.
+  const samplerStats = createSamplerStats();
 
   engine.reset();
   report("generating speech tokens");
@@ -385,7 +385,7 @@ async function generate(
 
   const generatedIds: number[] = [];
   for (let step = 0; step < maxNew; step += 1) {
-    const id = sampleNext(logits!, generatedIds, sampler);
+    const id = sampleNextTopK(logits!, generatedIds, sampler, { stats: samplerStats });
     generatedIds.push(id);
     if (EOS_IDS.includes(id)) break;
     if (step + 1 < maxNew) {
@@ -443,6 +443,7 @@ async function generate(
       audioSeconds,
       rtf: totalMs / 1000 / audioSeconds,
       engineStats: { ...engine.stats },
+      samplerFallbacks: samplerStats.fallbacks,
     },
     pcm: waveform,
     sampleRate: fixture.sample_rate,

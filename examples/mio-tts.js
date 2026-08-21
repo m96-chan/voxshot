@@ -1,85 +1,3 @@
-// ../../../web-xpu-ops/llm/sampler.ts
-function applyMask(logits, allowed) {
-  const masked = new Float64Array(logits.length);
-  for (let i = 0; i < logits.length; i += 1) masked[i] = logits[i];
-  if (allowed === null) return masked;
-  for (let i = 0; i < masked.length; i += 1) {
-    if (!allowed.has(i)) masked[i] = -Infinity;
-  }
-  return masked;
-}
-function argmax(logits) {
-  let bestIndex = -1;
-  let bestValue = -Infinity;
-  for (let i = 0; i < logits.length; i += 1) {
-    const v = logits[i];
-    if (v > bestValue) {
-      bestValue = v;
-      bestIndex = i;
-    }
-  }
-  return bestIndex;
-}
-function sampleTopP(logits, temperature, topP, rng) {
-  if (!(temperature > 0)) {
-    throw new Error(`sampleTopP: temperature must be > 0, got ${temperature}`);
-  }
-  if (!(topP > 0) || topP > 1) {
-    throw new Error(`sampleTopP: topP must be in (0, 1], got ${topP}`);
-  }
-  const n = logits.length;
-  const scaled = new Float64Array(n);
-  let maxScaled = -Infinity;
-  for (let i = 0; i < n; i += 1) {
-    const v = logits[i] / temperature;
-    scaled[i] = v;
-    if (v > maxScaled) maxScaled = v;
-  }
-  if (maxScaled === -Infinity) {
-    throw new Error("sampleTopP: no finite logit to choose from");
-  }
-  const probs = new Float64Array(n);
-  let total = 0;
-  for (let i = 0; i < n; i += 1) {
-    const p = Math.exp(scaled[i] - maxScaled);
-    probs[i] = p;
-    total += p;
-  }
-  const order = Array.from({ length: n }, (_, i) => i).filter((i) => probs[i] > 0).sort((a, b) => probs[b] - probs[a]);
-  let cumulative = 0;
-  let cutoff = order.length;
-  for (let k = 0; k < order.length; k += 1) {
-    cumulative += probs[order[k]];
-    if (cumulative / total >= topP) {
-      cutoff = k + 1;
-      break;
-    }
-  }
-  const nucleus = order.slice(0, cutoff);
-  let nucleusTotal = 0;
-  for (const i of nucleus) nucleusTotal += probs[i];
-  const draw = rng() * nucleusTotal;
-  let acc = 0;
-  for (const i of nucleus) {
-    acc += probs[i];
-    if (draw < acc) return i;
-  }
-  return nucleus[nucleus.length - 1];
-}
-function sampleNext(logits, prefixTokens, options, constraint) {
-  const allowed = constraint ? constraint.nextAllowed(prefixTokens) : null;
-  if (allowed !== null && allowed.size === 0) {
-    throw new Error("sampleNext: constraint allows no token to follow this prefix");
-  }
-  const masked = applyMask(logits, allowed);
-  if (options.mode === "greedy") {
-    const choice = argmax(masked);
-    if (choice < 0) throw new Error("sampleNext: no finite logit to choose from");
-    return choice;
-  }
-  return sampleTopP(masked, options.temperature, options.topP, options.rng ?? Math.random);
-}
-
 // ../../../web-xpu-ops/dist/ops/activation/reference.js
 var ACTIVATION = {
   relu2: 0,
@@ -2338,6 +2256,248 @@ ${errors.map((m) => `${m.lineNum}:${m.linePos}: ${m.message}`).join("\n")}`);
   };
 }
 
+// ../../../web-xpu-ops/llm/sampler.ts
+function applyMask(logits, allowed) {
+  const masked = new Float64Array(logits.length);
+  for (let i = 0; i < logits.length; i += 1) masked[i] = logits[i];
+  if (allowed === null) return masked;
+  for (let i = 0; i < masked.length; i += 1) {
+    if (!allowed.has(i)) masked[i] = -Infinity;
+  }
+  return masked;
+}
+function argmax(logits) {
+  let bestIndex = -1;
+  let bestValue = -Infinity;
+  for (let i = 0; i < logits.length; i += 1) {
+    const v = logits[i];
+    if (v > bestValue) {
+      bestValue = v;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
+}
+function sampleTopP(logits, temperature, topP, rng) {
+  if (!(temperature > 0)) {
+    throw new Error(`sampleTopP: temperature must be > 0, got ${temperature}`);
+  }
+  if (!(topP > 0) || topP > 1) {
+    throw new Error(`sampleTopP: topP must be in (0, 1], got ${topP}`);
+  }
+  const n = logits.length;
+  const scaled = new Float64Array(n);
+  let maxScaled = -Infinity;
+  for (let i = 0; i < n; i += 1) {
+    const v = logits[i] / temperature;
+    scaled[i] = v;
+    if (v > maxScaled) maxScaled = v;
+  }
+  if (maxScaled === -Infinity) {
+    throw new Error("sampleTopP: no finite logit to choose from");
+  }
+  const probs = new Float64Array(n);
+  let total = 0;
+  for (let i = 0; i < n; i += 1) {
+    const p = Math.exp(scaled[i] - maxScaled);
+    probs[i] = p;
+    total += p;
+  }
+  const order = Array.from({ length: n }, (_, i) => i).filter((i) => probs[i] > 0).sort((a, b) => probs[b] - probs[a]);
+  let cumulative = 0;
+  let cutoff = order.length;
+  for (let k = 0; k < order.length; k += 1) {
+    cumulative += probs[order[k]];
+    if (cumulative / total >= topP) {
+      cutoff = k + 1;
+      break;
+    }
+  }
+  const nucleus = order.slice(0, cutoff);
+  let nucleusTotal = 0;
+  for (const i of nucleus) nucleusTotal += probs[i];
+  const draw = rng() * nucleusTotal;
+  let acc = 0;
+  for (const i of nucleus) {
+    acc += probs[i];
+    if (draw < acc) return i;
+  }
+  return nucleus[nucleus.length - 1];
+}
+function sampleNext(logits, prefixTokens, options, constraint) {
+  const allowed = constraint ? constraint.nextAllowed(prefixTokens) : null;
+  if (allowed !== null && allowed.size === 0) {
+    throw new Error("sampleNext: constraint allows no token to follow this prefix");
+  }
+  const masked = applyMask(logits, allowed);
+  if (options.mode === "greedy") {
+    const choice = argmax(masked);
+    if (choice < 0) throw new Error("sampleNext: no finite logit to choose from");
+    return choice;
+  }
+  return sampleTopP(masked, options.temperature, options.topP, options.rng ?? Math.random);
+}
+
+// sampler.ts
+var DEFAULT_TOP_K = 2048;
+function createSamplerStats() {
+  return { calls: 0, fallbacks: 0 };
+}
+function xorshift32(seed) {
+  let s = seed >>> 0 || 2654435769;
+  return () => {
+    s ^= s << 13;
+    s >>>= 0;
+    s ^= s >>> 17;
+    s ^= s << 5;
+    s >>>= 0;
+    return s / 4294967296;
+  };
+}
+var TopK = class {
+  constructor(capacity) {
+    this.capacity = capacity;
+    this.probs = new Float64Array(capacity);
+    this.indices = new Int32Array(capacity);
+  }
+  capacity;
+  probs;
+  indices;
+  size = 0;
+  /** Scanned in ascending `index`, so an equal probability arriving later is always worse. */
+  offer(index, prob) {
+    if (this.size < this.capacity) {
+      this.probs[this.size] = prob;
+      this.indices[this.size] = index;
+      this.size += 1;
+      this.siftUp(this.size - 1);
+      return;
+    }
+    if (prob <= this.probs[0]) return;
+    this.probs[0] = prob;
+    this.indices[0] = index;
+    this.siftDown(0);
+  }
+  /** The kept entries in descending order: probability first, index as the tie-break. */
+  drain() {
+    const order = Array.from({ length: this.size }, (_, i) => i).sort((a, b) => {
+      const d = this.probs[b] - this.probs[a];
+      return d !== 0 ? d : this.indices[a] - this.indices[b];
+    });
+    const indices = new Int32Array(this.size);
+    const probs = new Float64Array(this.size);
+    for (let r = 0; r < order.length; r += 1) {
+      indices[r] = this.indices[order[r]];
+      probs[r] = this.probs[order[r]];
+    }
+    return { indices, probs };
+  }
+  /** True when `a` should be closer to the root, i.e. is the worse entry. */
+  worse(a, b) {
+    const pa = this.probs[a];
+    const pb = this.probs[b];
+    return pa !== pb ? pa < pb : this.indices[a] > this.indices[b];
+  }
+  swap(a, b) {
+    const p = this.probs[a];
+    this.probs[a] = this.probs[b];
+    this.probs[b] = p;
+    const i = this.indices[a];
+    this.indices[a] = this.indices[b];
+    this.indices[b] = i;
+  }
+  siftUp(start) {
+    let node = start;
+    while (node > 0) {
+      const parent = node - 1 >> 1;
+      if (!this.worse(node, parent)) break;
+      this.swap(node, parent);
+      node = parent;
+    }
+  }
+  siftDown(start) {
+    let node = start;
+    for (; ; ) {
+      const left = node * 2 + 1;
+      if (left >= this.size) break;
+      const right = left + 1;
+      let worst = this.worse(left, node) ? left : node;
+      if (right < this.size && this.worse(right, worst)) worst = right;
+      if (worst === node) break;
+      this.swap(node, worst);
+      node = worst;
+    }
+  }
+};
+function sampleNextTopK(logits, prefixTokens, options, tuning = {}) {
+  const stats = tuning.stats;
+  if (stats) stats.calls += 1;
+  if (options.mode === "greedy" || tuning.constraint) {
+    return sampleNext(logits, prefixTokens, options, tuning.constraint);
+  }
+  const topK = tuning.topK ?? DEFAULT_TOP_K;
+  if (!Number.isInteger(topK) || topK < 1) {
+    throw new Error(`sampleNextTopK: topK must be a positive integer, got ${topK}`);
+  }
+  const { temperature, topP } = options;
+  if (!(temperature > 0)) {
+    throw new Error(`sampleTopP: temperature must be > 0, got ${temperature}`);
+  }
+  if (!(topP > 0) || topP > 1) {
+    throw new Error(`sampleTopP: topP must be in (0, 1], got ${topP}`);
+  }
+  const n = logits.length;
+  let maxLogit = -Infinity;
+  for (let i = 0; i < n; i += 1) {
+    const v = logits[i];
+    if (v > maxLogit) maxLogit = v;
+  }
+  const maxScaled = maxLogit / temperature;
+  if (maxScaled === -Infinity) {
+    throw new Error("sampleTopP: no finite logit to choose from");
+  }
+  const heap = new TopK(Math.min(topK, n));
+  let total = 0;
+  for (let i = 0; i < n; i += 1) {
+    const p = Math.exp(logits[i] / temperature - maxScaled);
+    total += p;
+    if (p > 0) heap.offer(i, p);
+  }
+  const { indices, probs } = heap.drain();
+  let cumulative = 0;
+  let cutoff = -1;
+  for (let r = 0; r < probs.length; r += 1) {
+    cumulative += probs[r];
+    if (cumulative / total >= topP) {
+      cutoff = r + 1;
+      break;
+    }
+  }
+  const rng = options.rng ?? Math.random;
+  const u = rng();
+  if (cutoff >= 0) {
+    let nucleusTotal = 0;
+    for (let r = 0; r < cutoff; r += 1) nucleusTotal += probs[r];
+    const draw = u * nucleusTotal;
+    let acc = 0;
+    for (let r = 0; r < cutoff; r += 1) {
+      acc += probs[r];
+      if (draw < acc) return indices[r];
+    }
+    return indices[cutoff - 1];
+  }
+  if (topP >= 1) {
+    const draw = u * total;
+    let acc = 0;
+    for (let r = 0; r < probs.length; r += 1) {
+      acc += probs[r];
+      if (draw < acc) return indices[r];
+    }
+  }
+  if (stats) stats.fallbacks += 1;
+  return sampleNext(logits, prefixTokens, { ...options, rng: () => u }, tuning.constraint);
+}
+
 // text.ts
 var REPLACE = [
   [/\t/g, ""],
@@ -2616,17 +2776,6 @@ async function fetchWithProgress(url, label, report) {
   }
   return buffer.buffer;
 }
-function xorshift32(seed) {
-  let s = seed >>> 0 || 2654435769;
-  return () => {
-    s ^= s << 13;
-    s >>>= 0;
-    s ^= s >>> 17;
-    s ^= s << 5;
-    s >>>= 0;
-    return s / 4294967296;
-  };
-}
 async function requestDevice() {
   const gpu = globalThis.navigator?.gpu;
   if (!gpu) throw new Error("WebGPU is unavailable \u2014 this page needs navigator.gpu for the language model");
@@ -2735,6 +2884,7 @@ async function generate(loaded, text, mode, seed, voice, report) {
   }
   const maxNew = maxNewFor(promptIds.length);
   const sampler = mode === "greedy" ? { mode: "greedy" } : { mode: "top-p", temperature: 0.8, topP: 1, rng: xorshift32(seed) };
+  const samplerStats = createSamplerStats();
   engine.reset();
   report("generating speech tokens");
   const lmStart = performance.now();
@@ -2747,7 +2897,7 @@ async function generate(loaded, text, mode, seed, voice, report) {
   const prefillMs = performance.now() - lmStart;
   const generatedIds = [];
   for (let step = 0; step < maxNew; step += 1) {
-    const id = sampleNext(logits, generatedIds, sampler);
+    const id = sampleNextTopK(logits, generatedIds, sampler, { stats: samplerStats });
     generatedIds.push(id);
     if (EOS_IDS.includes(id)) break;
     if (step + 1 < maxNew) {
@@ -2801,7 +2951,8 @@ async function generate(loaded, text, mode, seed, voice, report) {
       totalMs,
       audioSeconds,
       rtf: totalMs / 1e3 / audioSeconds,
-      engineStats: { ...engine.stats }
+      engineStats: { ...engine.stats },
+      samplerFallbacks: samplerStats.fallbacks
     },
     pcm: waveform,
     sampleRate: fixture.sample_rate

@@ -73,10 +73,15 @@ RTX 5090, driver 610.57.04, headed Chromium with `--use-angle=vulkan`
 
 Processing time is ~0.5× the audio's length, and the LM is a rounding error
 next to the codec. Cold start — 583 MB of q8 weights plus the 523 MB codec
-checkpoint over localhost, packing, GPU upload — is ~4 s on top. Sampled mode
-(temperature 0.8, the reference server's default) runs at only ~25 tok/s:
-upstream `llm/sampler.ts` does a full-vocab (164,480) CPU softmax per step.
-Greedy is the validation path, so that cost is left where it is, noted.
+checkpoint over localhost, packing, GPU upload — is ~4 s on top.
+
+Sampled mode (temperature 0.8, the reference server's default) used to run at
+**26 tok/s** against greedy's 210, and the GPU had nothing to do with it:
+upstream `llm/sampler.ts` sorts all 164,480 logits on the CPU every step,
+38 ms a step, a 26 tok/s ceiling before a single matmul. `sampler.ts` now
+serves each draw from a top-2048 window found with a bounded heap and falls
+back to upstream only when the draw lands past it — same id, measured, not
+assumed — which puts sampled mode at **139 tok/s** (ISSUE #120).
 
 ## The int8 decision, and what it costs
 
@@ -115,7 +120,7 @@ permutation disabled and watching exactly the permutation tests fail.
 
 ## Checks, in dependency order
 
-Everything below `check:tts` runs in Vitest (`npm test`, 182 tests; no GPU —
+Everything below `check:tts` runs in Vitest (`npm test`, 199 tests; no GPU —
 Dawn kills Vitest workers, same story as the decoder spike).
 
 | check | oracle | agreement |
@@ -124,6 +129,7 @@ Dawn kills Vitest workers, same story as the decoder spike).
 | `text.test.ts` | reference `normalize_text` outputs | exact strings |
 | `model.test.ts` | torch per-stage golden | ≤2.3e-6 rel; greedy ids exact |
 | `model-q8.test.ts` | f32 golden + graph parity | see bounds above |
+| `sampler.test.ts` | upstream `llm/sampler.ts` | same id, 700 draws/vector; ≥4× faster |
 | `weights-q8.test.ts` | ops/quantize bit-parity, sha256, permutation | exact |
 | `../miocodec/encoder.test.ts` | torch per-stage encoder golden | ≤1e-4/5e-4 rel per stage |
 | `check:tts` (browser) | CPU q8 oracle + Node codec decode | ids exact; WAV 9.9e-5 rel |
@@ -152,7 +158,7 @@ python3 convert_weights.py        # bf16 -> q8 artifacts into q8/     (~6 s)
                 && .venv/bin/python export_encoder_weights.py)
                                   # encoder golden + weights — serve.mjs
                                   # refuses to start without the weights
-npm test                          # 182 tests, ~6 min (the q8 greedy is slow)
+npm test                          # 199 tests, ~6 min (the q8 greedy is slow)
 npm run build                     # browser.ts -> ../../examples/mio-tts.js
 npm run serve                     # port 8082
 # open http://localhost:8082/mio-tts.html in Chromium with the WebGPU flags
@@ -172,7 +178,16 @@ was derived from, so artifacts and weights cannot drift apart unnoticed.
 - **Voice-clone audio is shape-checked, not listened to**: the embedding is
   held to the golden and the ids to the default voice's, but whether the
   cloned voice *sounds like* the reference is for a human and the page.
-- **Sampled-mode throughput** (~25 tok/s) is CPU-sampler-bound, not GPU-bound.
+- **Sampled mode is still ~35% slower than greedy** (139 vs 210 tok/s). What
+  is left is `sampler.ts`' own two passes over the 164,480 logits — the
+  exponentials and the heap scan, ~2.6 ms a step against greedy's 0.33 ms
+  argmax. Taking the top-k on the GPU (option 3 in ISSUE #120, which would
+  also cut the 657 KB logits readback) is the next move if it matters.
+- **A freshly seeded run's first sampled token is effectively greedy.**
+  `xorshift32(seed)` returns `seed × 6.3e-5` on its first call, so for any
+  small seed the first draw lands on the argmax. Pre-existing, unrelated to
+  #120, and it costs one token of variety per run — but a seed sweep over
+  first tokens would measure almost nothing until the generator is warmed.
 - **Sampled audio is shape-checked, not listened to** — the check asserts
   well-formedness; judging how it sounds needs a human and the page.
 - The E2E oracle covers the golden ja text; other inputs exercise the same

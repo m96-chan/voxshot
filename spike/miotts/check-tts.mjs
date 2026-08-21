@@ -364,6 +364,14 @@ if (check(sampled?.status === "done", `sampled run: ${JSON.stringify(sampled)}`)
     `sampled (s=42)  ${sampled.generatedIds.length} ids, ${sampled.speechIndices.length} speech, ` +
       `${sampled.audioSeconds.toFixed(2)} s audio, ${sampled.lmTokensPerSec.toFixed(1)} tok/s`,
   );
+  // The number ISSUE #120 turned on: sampler.ts serves each draw from a
+  // top-2048 window and only falls back to upstream's full-vocabulary sort
+  // (~38 ms) when the draw lands past it. Before the fix EVERY step paid that,
+  // which is why sampled mode ran at ~25 tok/s while greedy ran at ~209. If
+  // this ratio ever climbs back towards 1, the tok/s above will follow it down.
+  console.log(
+    `sampler         ${sampled.samplerFallbacks}/${sampled.generatedIds.length} steps fell back to the full-vocabulary sort`,
+  );
 }
 
 /* -------------------------------------------------------------------------- *
