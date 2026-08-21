@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { sampleNext, type Constraint, type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
-import { loadCase } from "./golden.js";
+import { sampleNext, type Constraint, type SamplerOptions } from "web-xpu-ops/llm/sampler";
+import { loadCase } from "../../../spike/miotts/golden.js";
 import {
   DEFAULT_TOP_K,
   createSamplerStats,
   sampleNextTopK,
   topKMass,
   xorshift32,
-} from "../../src/engine/miotts/lm/sampler.js";
+} from "../../../src/engine/miotts/lm/sampler.js";
 
 /**
  * `sampler.ts` against the upstream `llm/sampler.ts` it stands in front of.

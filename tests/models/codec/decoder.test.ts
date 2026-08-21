@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { decode, MIOCODEC_24K, type Tensor } from "../../src/engine/miotts/codec/decoder.js";
-import { GoldenCase, loadCase, loadIndex, worstDifference } from "./golden.js";
-import { loadWeights } from "./weights-cache.js";
+import { decode, MIOCODEC_24K, type Tensor } from "../../../src/engine/miotts/codec/decoder.js";
+import { GoldenCase, loadCase, loadIndex, worstDifference } from "../../../spike/miocodec/golden.js";
+import { loadWeights } from "../../../spike/miocodec/weights-cache.js";
 
 /**
  * The decoder, stage by stage, against the reference implementation's own

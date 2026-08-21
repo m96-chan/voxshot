@@ -90,10 +90,12 @@ npm run test:models  # check the ported model code against the real weights
 
 `test:models` is the odd one out and CI never runs it. It checks the MioTTS
 port against ~1.1 GB of real weights and golden files dumped from the reference
-implementation, none of which a CI runner can produce. When a fixture is
-missing it fails with the command that rebuilds it — it does not skip, because
-a suite that goes green whether or not it checked anything is worse than one
-that was not run. See [`vitest.models.config.ts`](vitest.models.config.ts).
+implementation, none of which a CI runner can produce — the tokenizer, the q8
+loader, the sampler, and the codec's decoder and encoder, each against the
+reference's own output. It takes about two minutes. When a fixture is missing
+it fails with the command that rebuilds it — it does not skip, because a suite
+that goes green whether or not it checked anything is worse than one that was
+not run. See [`vitest.models.config.ts`](vitest.models.config.ts).
 
 The browser demo is a separate workspace with its own suite:
 
