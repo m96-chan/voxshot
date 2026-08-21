@@ -153,3 +153,7 @@ spike/**/.venv/
 __pycache__/
 .check-gpu.mjs
 .bench.mjs
+
+# check-engine.ts writes audio and an embedding beside itself; both are
+# regenerable outputs of a run, not sources.
+spike/miotts/check-engine-out.*
