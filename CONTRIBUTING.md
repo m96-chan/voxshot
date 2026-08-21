@@ -85,7 +85,15 @@ npm test             # run tests with the 90% coverage thresholds
 npm run test:watch   # watch mode
 npm run typecheck    # type check
 npm run build        # build to dist/
+npm run test:models  # check the ported model code against the real weights
 ```
+
+`test:models` is the odd one out and CI never runs it. It checks the MioTTS
+port against ~1.1 GB of real weights and golden files dumped from the reference
+implementation, none of which a CI runner can produce. When a fixture is
+missing it fails with the command that rebuilds it — it does not skip, because
+a suite that goes green whether or not it checked anything is worse than one
+that was not run. See [`vitest.models.config.ts`](vitest.models.config.ts).
 
 The browser demo is a separate workspace with its own suite:
 
@@ -117,10 +125,14 @@ touches the platform.
 
 ## Releases
 
-1. Bump `version` in `package.json` and move `Unreleased` in `CHANGELOG.md` to
+1. Run `npm run test:models` and check it is green. **This is a gate, not a
+   nicety.** CI has no weights, no goldens and no GPU, so it cannot catch a
+   numerical regression in the ported model code — this suite is the only
+   thing that can. Skipping it makes "CI is green" mean less than it looks.
+2. Bump `version` in `package.json` and move `Unreleased` in `CHANGELOG.md` to
    the new version heading.
-2. Merge that to `main`.
-3. Create a GitHub Release tagged `vX.Y.Z`.
+3. Merge that to `main`.
+4. Create a GitHub Release tagged `vX.Y.Z`.
 
 Publishing is automated: the Release triggers
 [`.github/workflows/publish.yml`](.github/workflows/publish.yml), which verifies
