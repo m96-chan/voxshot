@@ -162,3 +162,5 @@ spike/miotts/check-engine-out.*
 # regenerable — see spike/dacvae/README.md — and the goldens are ~75 MB.
 spike/dacvae/.venv/
 spike/dacvae/golden/
+spike/dacvae/weights/
+spike/dacvae/node_modules/
