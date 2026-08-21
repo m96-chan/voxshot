@@ -29,6 +29,13 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
+          # Both lock files, because there are two installs in this job. Keyed
+          # on the root lock alone, a change to the example's dependencies
+          # leaves the key untouched and npm is handed a cache that predates
+          # it — stale for exactly the packages that just changed.
+          cache-dependency-path: |
+            package-lock.json
+            examples/browser/package-lock.json
 
       - run: npm ci
 
@@ -55,6 +62,16 @@ jobs:
       # (done above) before typechecking the example.
       - name: Test examples/browser
         working-directory: examples/browser
+        env:
+          # onnxruntime-node arrives transitively through
+          # @huggingface/transformers, and its postinstall downloads a CUDA
+          # build from api.nuget.org — not the npm registry, so no npm cache
+          # can cover it and a re-run is the only recourse when it times out.
+          # It failed this step three times on 2026-08-21, each green on a
+          # plain re-run. This is a browser example: the Node binding never
+          # runs here. Skipping leaves the bundled binaries (211 MB against
+          # 513 MB) and the suite passes on them.
+          ONNXRUNTIME_NODE_INSTALL: skip
         run: |
           npm ci
           npm run typecheck
