@@ -1,5 +1,15 @@
 import { type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
-import { fetchCheckpoint, toWav, type Fixture } from "../miocodec/browser.js";
+import { toWav, type Fixture } from "../miocodec/browser.js";
+import {
+  assetModeFromSearch,
+  estimateDownloads,
+  fetchAsset,
+  resolveAssets,
+  type Asset,
+  type AssetPlan,
+  type DownloadEstimate,
+  type Progress,
+} from "./assets.js";
 import { MAX_SEQ_LEN, maxNewFor } from "./constants.js";
 import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "../miocodec/decoder.js";
 import { encodeGlobal } from "../miocodec/encoder.js";
@@ -17,13 +27,16 @@ import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./we
  * turns text into `<|s_n|>` speech tokens, and the MioCodec decoder (imported
  * across spikes from ../miocodec) turns those into 24 kHz PCM.
  *
- * Assets, all same-origin relative URLs (serve.mjs maps them):
- *   ./miotts/tokenizer.json        the HF tokenizer snapshot
- *   ./miotts/q8/manifest.json      convert_weights.py's manifest
- *   ./miotts/q8/weights.*.bin      codes / scales / norms (~580 MiB, streamed)
- *   ./mio-codec-fixture.json       carries the demo global_embedding (speaker)
- *   MioCodec checkpoint            the same HF URL mio-codec.html uses, so the
- *                                  existing route/302-to-local-cache trick works
+ * Assets come from Hugging Face (~1.15 GB for text to speech, +117 MB for the
+ * voice-clone encoder) and are kept in the Cache API so a second visit costs
+ * nothing. assets.ts owns the URL table, the cache and the per-asset sizes;
+ * `?assets=local` swaps every URL for the same-origin paths serve.mjs maps,
+ * which is what check-tts.mjs drives. The only asset that ships with the page
+ * is ./mio-codec-fixture.json (the demo speaker's global_embedding).
+ *
+ * The page discloses the download BEFORE anything starts: how much text to
+ * speech costs, what voice cloning adds, whether it is already cached, and
+ * that WebGPU is required (checked up front rather than failing mid-load).
  *
  * sha256 of the q8 bins is **skipped** in the browser (`loadWeightsQ8`'s
  * hasher is optional and its `Sha256Fn` is synchronous; SubtleCrypto is async
@@ -118,6 +131,13 @@ type VoiceHook =
 declare global {
   interface Window {
     __result: RunResult | { status: "error"; error: string } | null;
+    /**
+     * What the page told the visitor before they clicked: the byte totals, how
+     * much of it the cache already holds, and whether WebGPU is there. Set on
+     * load and refreshed after each load finishes, so a driver can assert that
+     * a second visit downloads nothing.
+     */
+    __preflight: (DownloadEstimate & { webgpu: boolean }) | null;
     /** Voice-clone E2E hook — see the module doc. */
     __voice: VoiceHook | null;
     /** The browser-resampled 24 kHz mono input of the current voice, for the check's same-input oracle. */
@@ -125,35 +145,8 @@ declare global {
   }
 }
 
-type Progress = (stage: string, detail?: { loaded?: number; total?: number }) => void;
-
-/** Streamed fetch with progress — the same shape as ../miocodec's fetchCheckpoint, for arbitrary URLs. */
-async function fetchWithProgress(url: string, label: string, report: Progress): Promise<ArrayBuffer> {
-  report(label);
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  const header = response.headers.get("content-length");
-  const total = header ? Number(header) : undefined;
-  const reader = response.body?.getReader();
-  if (!reader) return await response.arrayBuffer();
-
-  const chunks: Uint8Array[] = [];
-  let loaded = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    loaded += value.byteLength;
-    report(label, { loaded, total });
-  }
-  const buffer = new Uint8Array(loaded);
-  let offset = 0;
-  for (const chunk of chunks) {
-    buffer.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return buffer.buffer;
-}
+/** Everything the page fetches goes through assets.ts, which caches it. */
+const cacheStorage = (): CacheStorage | undefined => (globalThis as { caches?: CacheStorage }).caches;
 
 interface Loaded {
   adapter: string;
@@ -190,17 +183,19 @@ async function requestDevice(): Promise<{ device: GPUDevice; adapter: string }> 
   return { device, adapter: info };
 }
 
-async function loadEverything(report: Progress): Promise<Loaded> {
+/** JSON off an asset, through the same cache as the bins (the tokenizer alone is 13.8 MB). */
+async function fetchJson<T>(asset: Asset, label: string, report: Progress): Promise<T> {
+  const buffer = await fetchAsset(asset, label, report, { cacheStorage: cacheStorage() });
+  return JSON.parse(new TextDecoder().decode(buffer)) as T;
+}
+
+async function loadEverything(plan: AssetPlan, report: Progress): Promise<Loaded> {
   const { device, adapter } = await requestDevice();
 
-  report("loading tokenizer.json");
-  const tokenizerJson = (await (await fetch("./miotts/tokenizer.json")).json()) as TokenizerJson;
+  const tokenizerJson = await fetchJson<TokenizerJson>(plan.tokenizer, "tokenizer.json", report);
   const tokenizer = await loadTokenizer(tokenizerJson);
 
-  report("loading the q8 manifest");
-  const manifestResponse = await fetch("./miotts/q8/manifest.json");
-  if (!manifestResponse.ok) throw new Error(`q8 manifest: HTTP ${manifestResponse.status}`);
-  const manifest = (await manifestResponse.json()) as WeightsQ8Manifest;
+  const manifest = await fetchJson<WeightsQ8Manifest>(plan.q8Manifest, "the q8 manifest", report);
 
   // The three bins in parallel (they are independent streams off the same
   // server); progress is aggregated under one label so the bar stays coherent.
@@ -214,20 +209,28 @@ async function loadEverything(report: Progress): Promise<Loaded> {
       : undefined;
     report("LM weights (q8)", { loaded, total });
   };
+  const bin = (name: string, index: number) =>
+    fetchAsset(plan.q8Bin(name), "LM weights (q8)", partReport(index), { cacheStorage: cacheStorage() });
   const [codes, scales, norms] = await Promise.all([
-    fetchWithProgress(`./miotts/q8/${manifest.files.codes.name}`, "LM weights (q8)", partReport(0)),
-    fetchWithProgress(`./miotts/q8/${manifest.files.scales.name}`, "LM weights (q8)", partReport(1)),
-    fetchWithProgress(`./miotts/q8/${manifest.files.norms.name}`, "LM weights (q8)", partReport(2)),
+    bin(manifest.files.codes.name, 0),
+    bin(manifest.files.scales.name, 1),
+    bin(manifest.files.norms.name, 2),
   ]);
 
-  // MioCodec: the same checkpoint URL and streaming loader as mio-codec.html.
-  // STARTED here, before the ~1s q8 unpack and the GPU upload, so its network
-  // time overlaps that CPU/GPU work; progress stays silent until we actually
-  // wait on it (two writers on one status line would just flicker).
+  // MioCodec: the same checkpoint URL mio-codec.html uses (assets.ts keeps it
+  // on huggingface.co in local mode too, so check-tts.mjs's 302 route still
+  // catches it). STARTED here, before the ~1s q8 unpack and the GPU upload, so
+  // its network time overlaps that CPU/GPU work; progress stays silent until we
+  // actually wait on it (two writers on one status line would just flicker).
   let checkpointVisible = false;
-  const checkpointPromise = fetchCheckpoint((stage, detail) => {
-    if (checkpointVisible) report(stage, detail);
-  });
+  const checkpointPromise = fetchAsset(
+    plan.codecCheckpoint,
+    "MioCodec checkpoint",
+    (stage, detail) => {
+      if (checkpointVisible) report(stage, detail);
+    },
+    { cacheStorage: cacheStorage() },
+  );
   checkpointPromise.catch(() => {}); // surfaced at the await below, not as an unhandled rejection
 
   report("unpacking the q8 weights");
@@ -238,15 +241,12 @@ async function loadEverything(report: Progress): Promise<Loaded> {
   const engine = await createGpuEngine(device, weights, { maxSeqLen: MAX_SEQ_LEN });
 
   checkpointVisible = true;
-  report("downloading the checkpoint");
+  report("MioCodec checkpoint");
   const checkpoint = await checkpointPromise;
   report("parsing the codec checkpoint");
   const codecWeights = new Weights(Safetensors.parse(checkpoint));
 
-  report("loading the speaker fixture");
-  const fixtureResponse = await fetch("./mio-codec-fixture.json");
-  if (!fixtureResponse.ok) throw new Error(`mio-codec-fixture.json: HTTP ${fixtureResponse.status}`);
-  const fixture = (await fixtureResponse.json()) as Fixture;
+  const fixture = await fetchJson<Fixture>(plan.fixture, "the speaker fixture", report);
   if (fixture.sample_rate !== SAMPLE_RATE_EXPECTED) {
     throw new Error(`fixture sample_rate ${fixture.sample_rate}, expected ${SAMPLE_RATE_EXPECTED}`);
   }
@@ -267,21 +267,19 @@ async function loadEverything(report: Progress): Promise<Loaded> {
  * -------------------------------------------------------------------------- */
 
 /**
- * The encoder weights (117 MB, `export_encoder_weights.py`'s artifact, served
- * by serve.mjs), fetched lazily on the FIRST reference-voice encode: the
- * default voice never pays for them. One promise, kept across files and runs
- * — like the LM/codec loads, a failure drops the cache so the next attempt
- * retries instead of re-awaiting a forever-rejected promise.
+ * The encoder weights (117 MB, `export_encoder_weights.py`'s artifact), fetched
+ * lazily on the FIRST reference-voice encode: the default voice never pays for
+ * them, which is why the pre-flight quotes them separately. One promise, kept
+ * across files and runs — like the LM/codec loads, a failure drops the cache so
+ * the next attempt retries instead of re-awaiting a forever-rejected promise.
  */
 let encoderWeightsPromise: Promise<Weights> | null = null;
 
-function loadEncoderWeights(report: Progress): Promise<Weights> {
+function loadEncoderWeights(plan: AssetPlan, report: Progress): Promise<Weights> {
   encoderWeightsPromise ??= (async () => {
-    const buffer = await fetchWithProgress(
-      "./miotts/encoder-weights.safetensors",
-      "encoder weights",
-      report,
-    );
+    const buffer = await fetchAsset(plan.encoderWeights, "encoder weights", report, {
+      cacheStorage: cacheStorage(),
+    });
     report("parsing the encoder weights");
     return new Weights(Safetensors.parse(buffer));
   })().catch((error: unknown) => {
@@ -471,11 +469,82 @@ function main(): void {
   const status = element<HTMLParagraphElement>("status");
   const player = element<HTMLAudioElement>("player");
   const metrics = element<HTMLDListElement>("metrics");
+  const preflight = element<HTMLParagraphElement>("preflight");
+  const gpuStatus = element<HTMLParagraphElement>("gpu-status");
 
   window.__result = null;
   window.__voice = null;
   window.__voiceWave = null;
+  window.__preflight = null;
   let loadedPromise: Promise<Loaded> | null = null;
+
+  // Which asset table this page runs against, decided once and up front:
+  // both the disclosure below and every loader need it. A ?assets= value
+  // nobody recognises stops here rather than quietly falling back to the CDN.
+  let plan: AssetPlan;
+  try {
+    plan = resolveAssets(assetModeFromSearch(window.location.search));
+  } catch (error) {
+    button.disabled = true;
+    const message = error instanceof Error ? error.message : String(error);
+    preflight.textContent = message;
+    status.textContent = `失敗: ${message}`;
+    return;
+  }
+
+  // WebGPU, checked before anything is downloaded rather than after 1.15 GB
+  // has landed: there is deliberately no CPU fallback for the LM, so a browser
+  // without navigator.gpu can only fail — and it should say so while it still
+  // costs nothing.
+  const webgpu = Boolean((globalThis.navigator as Navigator | undefined)?.gpu);
+  if (!webgpu) {
+    button.disabled = true;
+    gpuStatus.textContent =
+      "このブラウザでは WebGPU (navigator.gpu) が見つかりません。ダウンロードは始めません — " +
+      "Chrome / Edge 113+ か、WebGPU を有効にした Firefox / Safari で開いてください。";
+    gpuStatus.classList.remove("hidden");
+  }
+
+  /** Decimal MB/GB, the unit the model repos publish their sizes in. */
+  const formatSize = (bytes: number) =>
+    bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${(bytes / 1e6).toFixed(0)} MB`;
+
+  /**
+   * The sentence the visitor reads BEFORE clicking: what a run will fetch,
+   * what cloning adds, and what is already on their disk.
+   */
+  function describePreflight(estimate: DownloadEstimate): string {
+    const speech = formatSize(estimate.speechBytes);
+    const cloning = formatSize(estimate.cloningBytes);
+    if (estimate.mode === "local") {
+      return `?assets=local — モデル（${speech}、声クローンで +${cloning}）は serve.mjs から取得します。ブラウザキャッシュは使いません。`;
+    }
+    if (!estimate.cacheAvailable) {
+      return (
+        `テキスト→音声に ${speech} をダウンロードします（LM int8 + MioCodec + tokenizer）。声クローンを選ぶとさらに +${cloning}。` +
+        "このブラウザでは Cache API が使えないため、訪問のたびに再ダウンロードになります。"
+      );
+    }
+    if (estimate.speechPending === 0 && estimate.cloningPending === 0) {
+      return `モデル（${speech} + 声クローン ${cloning}）はこのブラウザにキャッシュ済みです。ダウンロードはありません。`;
+    }
+    if (estimate.speechPending === 0) {
+      return `テキスト→音声のモデル（${speech}）はキャッシュ済み、ダウンロードはありません。声クローンを選ぶと +${formatSize(estimate.cloningPending)} をダウンロードします。`;
+    }
+    const pending =
+      estimate.speechPending === estimate.speechBytes
+        ? `テキスト→音声に ${speech} をダウンロードします（LM int8 + MioCodec + tokenizer）`
+        : `テキスト→音声の残り ${formatSize(estimate.speechPending)} をダウンロードします（合計 ${speech}、うちキャッシュ済みを除く）`;
+    return `${pending}。声クローンを選ぶとさらに +${formatSize(estimate.cloningPending)}。ダウンロードした重みはブラウザ（Cache API）に保存され、次の訪問では再ダウンロードしません。`;
+  }
+
+  /** Read the cache and restate the disclosure. Never fetches. */
+  async function refreshPreflight(): Promise<void> {
+    const estimate = await estimateDownloads(plan, cacheStorage(), (message) => console.warn(message));
+    window.__preflight = { ...estimate, webgpu };
+    preflight.textContent = describePreflight(estimate);
+  }
+  void refreshPreflight();
 
   // Embeddings are cached per file (name + size + lastModified — enough to
   // tell one chosen file from another without hashing 5 MB of WAV; the mtime
@@ -552,12 +621,13 @@ function main(): void {
         // everything else — so choosing a file is also what triggers the
         // model loads if no run has yet. Same cache and retry story as the
         // run button's.
-        loadedPromise ??= loadEverything(report).catch((error: unknown) => {
+        loadedPromise ??= loadEverything(plan, report).catch((error: unknown) => {
           loadedPromise = null;
           throw error;
         });
         const loaded = await loadedPromise;
-        const weights = await loadEncoderWeights(report);
+        const weights = await loadEncoderWeights(plan, report);
+        void refreshPreflight(); // the encoder is now cached — say so
 
         report("decoding + resampling the reference audio");
         const decoded = await toMono24k(await file.arrayBuffer());
@@ -625,11 +695,12 @@ function main(): void {
       // a second click only pays the generation itself. On failure the cached
       // promise is dropped so the next click retries the load instead of
       // re-awaiting a forever-rejected promise.
-      loadedPromise ??= loadEverything(report).catch((error: unknown) => {
+      loadedPromise ??= loadEverything(plan, report).catch((error: unknown) => {
         loadedPromise = null;
         throw error;
       });
       const loaded = await loadedPromise;
+      void refreshPreflight(); // everything just loaded is cached now — restate it
 
       const mode = modeSelect.value === "sample" ? "sample" : "greedy";
       // The input's value when it parses to a finite number (0 is a valid

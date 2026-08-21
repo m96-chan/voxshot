@@ -158,11 +158,13 @@ python3 convert_weights.py        # bf16 -> q8 artifacts into q8/     (~6 s)
                 && .venv/bin/python export_encoder_weights.py)
                                   # encoder golden + weights — serve.mjs
                                   # refuses to start without the weights
-npm test                          # 199 tests, ~6 min (the q8 greedy is slow)
+npm test                          # 227 tests, ~6 min (the q8 greedy is slow)
 npm run build                     # browser.ts -> ../../examples/mio-tts.js
 npm run serve                     # port 8082
-# open http://localhost:8082/mio-tts.html in Chromium with the WebGPU flags
-DISPLAY=:1 npm run check:tts      # the end-to-end check
+# open http://localhost:8082/mio-tts.html?assets=local in Chromium with the
+# WebGPU flags — WITHOUT ?assets=local the page fetches 1.15 GB from Hugging
+# Face instead (that is what the hosted copy does; see assets.ts)
+DISPLAY=:1 npm run check:tts      # the end-to-end check (drives ?assets=local)
 ```
 
 Requires [web-xpu-ops](https://github.com/m96-chan/web-xpu-ops) checked out
@@ -175,6 +177,15 @@ was derived from, so artifacts and weights cannot drift apart unnoticed.
 
 ## Known gaps
 
+- **greedy can run away — and so does the reference.** The page defaults to
+  sampling (T=0.8, top-p=1.0), which is the reference server's own default;
+  greedy is kept as the deterministic mode this spike's oracle needs and is
+  labelled debug-only in the page. On some inputs (`あー` is the reported one)
+  greedy never reaches eos and cycles to the 700-token cap — measured on the
+  **reference implementation** (torch, f32) too, so it is a property of argmax
+  decoding on this model, not of the port. `check:tts` therefore selects greedy
+  explicitly rather than inheriting the page's default.
+  ([#130](https://github.com/m96-chan/voxshot/issues/130))
 - **Voice-clone audio is shape-checked, not listened to**: the embedding is
   held to the golden and the ids to the default voice's, but whether the
   cloned voice *sounds like* the reference is for a human and the page.
@@ -193,5 +204,8 @@ was derived from, so artifacts and weights cannot drift apart unnoticed.
 - The E2E oracle covers the golden ja text; other inputs exercise the same
   code paths but have no committed expectation (`expected-tokens.ts` computes
   one for any text if wanted).
-- `mio-tts.html` serves weights from localhost; there is no hosted-CDN story
-  for the q8 artifacts yet.
+- **The hosted page's assets are pinned to `main` of four HF repos** (the URL
+  table in `assets.ts`). A force-push there changes what visitors download
+  without anything here noticing; the browser skips the q8 sha256 check for
+  cost reasons, so the byte-length checks in `loadWeightsQ8` are all that
+  stands between a moved file and a confusing failure.

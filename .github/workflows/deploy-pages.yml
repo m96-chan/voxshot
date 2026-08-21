@@ -49,10 +49,42 @@ jobs:
           npm ci
           npm run build
 
+      # Assemble the site: the Chatterbox demo stays at the root (its URLs and
+      # its CNAME must not move — #126 is about ADDING a page, not replacing
+      # one), and the MioTTS/MioCodec demo goes under /mio/.
+      #
+      # The mio bundles are **committed build outputs**, copied as-is rather
+      # than rebuilt here, because they cannot be rebuilt here: spike/miotts and
+      # spike/miocodec depend on `file:../../../web-xpu-ops`, a sibling checkout
+      # that does not exist on a CI runner. Freshness is a local gate instead —
+      # `npm run build` in both spikes plus `DISPLAY=:1 npm run check:tts`
+      # before committing. The grep below is the one thing CI *can* assert: that
+      # the bundle being published knows about the Hugging Face asset table, so
+      # a bundle still wired to localhost never reaches the public URL.
+      - name: Assemble the Pages artifact
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site/mio
+          cp -R examples/browser/dist/. _site/
+          test -s _site/index.html   # the existing demo is still the site index
+          test -s _site/CNAME        # the custom domain (examples/browser/public/CNAME)
+          cp examples/mio-tts.html examples/mio-tts.js \
+             examples/mio-codec.html examples/mio-codec.js \
+             examples/mio-codec-fixture.json _site/mio/
+          # /mio/ should open the TTS demo, not a 404
+          cp examples/mio-tts.html _site/mio/index.html
+          grep -q "huggingface.co/m96-chan/MioTTS-0.6B-q8-webgpu" _site/mio/mio-tts.js || {
+            echo "examples/mio-tts.js does not reference the Hugging Face q8 repo — it is a stale"
+            echo "bundle (rebuild it: cd spike/miotts && npm run build)."
+            exit 1
+          }
+          find _site -type f | sort
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: examples/browser/dist
+          path: _site
 
   deploy:
     runs-on: ubuntu-latest

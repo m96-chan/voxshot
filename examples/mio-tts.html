@@ -113,6 +113,18 @@
         font-size: 0.86em;
         line-height: 1.5;
       }
+      .note-inline {
+        margin: 0.85rem 0 0;
+        padding: 0.55rem 0.7rem;
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--warn-line);
+        border-radius: 6px;
+        background: var(--warn-bg);
+        color: var(--muted);
+        font-size: 0.88em;
+        line-height: 1.55;
+      }
+      .note-inline strong { color: var(--fg); }
       h2 { font-size: 1rem; margin: 0 0 0.5rem; }
       a { color: var(--accent); }
       .hidden { display: none; }
@@ -131,8 +143,22 @@
       </p>
 
       <section class="panel notice">
-        <h2>WebGPU が必須です</h2>
+        <h2>押す前に — ダウンロード量と WebGPU</h2>
+        <!-- 事前開示。JS が Cache API を見て「キャッシュ済み / 残り何 MB」に書き換えます。
+             ここに書いてあるのは JS が動かなかったときにも読める最悪ケースの数字。 -->
+        <p id="preflight" style="margin: 0 0 0.7rem">
+          テキスト→音声に 1.15 GB をダウンロードします（LM int8 + MioCodec + tokenizer）。
+          声クローンを選ぶとさらに +117 MB。ダウンロードした重みはブラウザ（Cache API）に
+          保存され、次の訪問では再ダウンロードしません。
+        </p>
+        <p id="gpu-status" class="hidden" style="margin: 0 0 0.7rem; font-weight: 600"></p>
         <p style="margin: 0">
+          内訳は
+          <a href="https://huggingface.co/m96-chan/MioTTS-0.6B-q8-webgpu">LM int8 611 MB</a>、
+          <a href="https://huggingface.co/Aratako/MioCodec-25Hz-24kHz">MioCodec 523 MB</a>、
+          <a href="https://huggingface.co/Aratako/MioTTS-0.6B">tokenizer 14 MB</a>、
+          声クローンの
+          <a href="https://huggingface.co/m96-chan/MioCodec-encoder-webgpu">encoder 117 MB</a>。
           言語モデルは WebGPU 常駐エンジン（1 トークン = 1 submit、読み戻しは logits のみ）で
           走ります。CPU フォールバックは意図的にありません（参照実装はテストのオラクル専用）。
           話者は同梱フィクスチャの global embedding か、参照音声から MioCodec エンコーダ
@@ -145,8 +171,8 @@
         <div class="controls">
           <label for="mode">サンプリング</label>
           <select id="mode">
-            <option value="greedy" selected>greedy</option>
-            <option value="sample">sample (T=0.8, top-p=1.0)</option>
+            <option value="sample" selected>sample (T=0.8, top-p=1.0)</option>
+            <option value="greedy">greedy（デバッグ用）</option>
           </select>
           <label for="seed">seed</label>
           <input id="seed" type="number" value="42" />
@@ -161,10 +187,19 @@
           <input id="refaudio" type="file" accept="audio/*" class="hidden" />
           <span id="voice-status" class="mono" style="color: var(--muted)"></span>
         </div>
+        <!-- greedy は残すが、通常の利用者が何気なく選ぶものではないと分かるようにする。
+             既定 (sample) は参照サーバ Aratako/MioTTS-Inference と同じ設定。 -->
+        <p class="note-inline">
+          <strong>greedy はデバッグ用です。</strong>
+          決定的なので GPU の出力を CPU オラクルと bit 一致で突き合わせるのに使いますが、
+          「あー」のような入力では EOS に到達せず上限 700 トークンまで循環します
+          （参照実装 (torch, f32) でも同じ挙動で、移植のバグではありません）。
+          音を聞くなら既定の sample を使ってください。
+        </p>
         <progress id="bar" class="hidden" max="1" value="0"></progress>
         <p id="status">
-          初回は LM の int8 重み（約 583 MB）と MioCodec のチェックポイント（523 MB）を
-          ダウンロードします。2 回目以降のクリックは生成だけが走ります。
+          「生成する」を押すとモデルの読み込みが始まります（量は上の注記のとおり）。
+          2 回目以降のクリックは生成だけが走ります。
         </p>
         <audio id="player" controls class="hidden"></audio>
         <dl class="metrics hidden" id="metrics">

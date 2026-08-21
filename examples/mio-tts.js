@@ -1237,32 +1237,6 @@ var Safetensors = class _Safetensors {
 };
 
 // ../miocodec/browser.ts
-var CHECKPOINT = "https://huggingface.co/Aratako/MioCodec-25Hz-24kHz/resolve/main/model.safetensors";
-async function fetchCheckpoint(report) {
-  report("downloading the checkpoint");
-  const response = await fetch(CHECKPOINT);
-  if (!response.ok) throw new Error(`checkpoint: HTTP ${response.status}`);
-  const header = response.headers.get("content-length");
-  const total = header ? Number(header) : void 0;
-  const reader = response.body?.getReader();
-  if (!reader) return await response.arrayBuffer();
-  const chunks = [];
-  let loaded = 0;
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    loaded += value.byteLength;
-    report("downloading the checkpoint", { loaded, total });
-  }
-  const buffer = new Uint8Array(loaded);
-  let offset = 0;
-  for (const chunk of chunks) {
-    buffer.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return buffer.buffer;
-}
 function toWav(pcm, sampleRate) {
   const buffer = new ArrayBuffer(44 + pcm.length * 2);
   const view = new DataView(buffer);
@@ -1286,6 +1260,179 @@ function toWav(pcm, sampleRate) {
     view.setInt16(44 + i * 2, sample < 0 ? sample * 32768 : sample * 32767, true);
   }
   return new Blob([buffer], { type: "audio/wav" });
+}
+
+// assets.ts
+var ASSET_CACHE_NAME = "miotts-assets-v1";
+var BYTES = {
+  q8Manifest: 68159,
+  q8Codes: 608829440,
+  q8Scales: 2034176,
+  q8Norms: 290816,
+  tokenizer: 13817944,
+  codecCheckpoint: 523087956,
+  encoderWeights: 117303232
+};
+var Q8_BINS = {
+  codes: { name: "weights.codes.bin", bytes: BYTES.q8Codes },
+  scales: { name: "weights.scales.bin", bytes: BYTES.q8Scales },
+  norms: { name: "weights.norms.bin", bytes: BYTES.q8Norms }
+};
+var HF = {
+  /** Derived from this repo's convert_weights.py — see the table above. */
+  q8: "https://huggingface.co/m96-chan/MioTTS-0.6B-q8-webgpu/resolve/main/",
+  /** Derived from this repo's ../miocodec/export_encoder_weights.py. */
+  encoder: "https://huggingface.co/m96-chan/MioCodec-encoder-webgpu/resolve/main/",
+  /** Upstream, verbatim. */
+  miotts: "https://huggingface.co/Aratako/MioTTS-0.6B/resolve/main/",
+  /** Upstream, verbatim. Also what mio-codec.html fetches. */
+  miocodec: "https://huggingface.co/Aratako/MioCodec-25Hz-24kHz/resolve/main/"
+};
+var CODEC_CHECKPOINT_URL = `${HF.miocodec}model.safetensors`;
+function resolveAssets(mode) {
+  const hf = mode === "hf";
+  const cache = hf;
+  const asset = (url, bytes) => ({ url, bytes, cache });
+  const q8Base = hf ? HF.q8 : "./miotts/q8/";
+  const tokenizer = asset(hf ? `${HF.miotts}tokenizer.json` : "./miotts/tokenizer.json", BYTES.tokenizer);
+  const q8Manifest = asset(`${q8Base}manifest.json`, BYTES.q8Manifest);
+  const q8Bin = (name) => asset(`${q8Base}${name}`, Object.values(Q8_BINS).find((bin) => bin.name === name)?.bytes);
+  const codecCheckpoint = asset(CODEC_CHECKPOINT_URL, BYTES.codecCheckpoint);
+  const encoderWeights = asset(
+    hf ? `${HF.encoder}encoder-weights.safetensors` : "./miotts/encoder-weights.safetensors",
+    BYTES.encoderWeights
+  );
+  return {
+    mode,
+    tokenizer,
+    q8Manifest,
+    q8Bin,
+    codecCheckpoint,
+    encoderWeights,
+    fixture: { url: "./mio-codec-fixture.json", cache: false },
+    preflight: {
+      speech: [
+        tokenizer,
+        q8Manifest,
+        q8Bin(Q8_BINS.codes.name),
+        q8Bin(Q8_BINS.scales.name),
+        q8Bin(Q8_BINS.norms.name),
+        codecCheckpoint
+      ],
+      cloning: [encoderWeights]
+    }
+  };
+}
+function assetModeFromSearch(search) {
+  const value = new URLSearchParams(search).get("assets");
+  if (value === null || value === "hf") return "hf";
+  if (value === "local") return "local";
+  throw new Error(`unknown ?assets=${value} \u2014 use "hf" (default, Hugging Face) or "local" (serve.mjs)`);
+}
+async function estimateDownloads(plan, cacheStorage2, warn = () => {
+}) {
+  const sum = (assets) => assets.reduce((total, a) => total + (a.bytes ?? 0), 0);
+  const speechBytes = sum(plan.preflight.speech);
+  const cloningBytes = sum(plan.preflight.cloning);
+  const worstCase = {
+    mode: plan.mode,
+    speechBytes,
+    speechPending: speechBytes,
+    cloningBytes,
+    cloningPending: cloningBytes,
+    cacheAvailable: false
+  };
+  const cachedAssets = [...plan.preflight.speech, ...plan.preflight.cloning].filter((a) => a.cache);
+  if (cachedAssets.length === 0) return worstCase;
+  const cache = await openAssetCache(cacheStorage2, warn);
+  if (!cache) return worstCase;
+  const pending = async (assets) => {
+    let total = 0;
+    for (const a of assets) {
+      if (a.cache && await matchSafely(cache, a.url)) continue;
+      total += a.bytes ?? 0;
+    }
+    return total;
+  };
+  return {
+    ...worstCase,
+    speechPending: await pending(plan.preflight.speech),
+    cloningPending: await pending(plan.preflight.cloning),
+    cacheAvailable: true
+  };
+}
+async function fetchAsset(asset, label, report, deps = {}) {
+  const fetchFn = deps.fetchFn ?? fetch;
+  const warn = deps.warn ?? ((message) => console.warn(message));
+  const cache = asset.cache ? await openAssetCache(deps.cacheStorage, warn) : void 0;
+  if (cache) {
+    const hit = await matchSafely(cache, asset.url);
+    if (hit) return await drain(hit, label, report);
+  }
+  report(label);
+  const response = await fetchFn(asset.url, cache ? { cache: "no-store" } : void 0);
+  if (!response.ok) throw new Error(`${asset.url}: HTTP ${response.status}`);
+  const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+  const buffer = await drain(response, label, report);
+  if (cache) {
+    try {
+      await cache.put(
+        asset.url,
+        new Response(buffer, {
+          headers: { "content-type": contentType, "content-length": String(buffer.byteLength) }
+        })
+      );
+    } catch (cause) {
+      warn(
+        `miotts: storing ${asset.url} in the browser cache failed (${describe(cause)}). Continuing \u2014 this asset will be downloaded again on the next visit.`
+      );
+    }
+  }
+  return buffer;
+}
+async function drain(response, label, report) {
+  report(label);
+  const header = response.headers.get("content-length");
+  const total = header ? Number(header) : void 0;
+  const reader = response.body?.getReader();
+  if (!reader) return await response.arrayBuffer();
+  const chunks = [];
+  let loaded = 0;
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    report(label, { loaded, total });
+  }
+  const buffer = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return buffer.buffer;
+}
+async function openAssetCache(cacheStorage2, warn) {
+  if (!cacheStorage2) return void 0;
+  try {
+    return await cacheStorage2.open(ASSET_CACHE_NAME);
+  } catch (cause) {
+    warn(
+      `miotts: opening the browser cache failed (${describe(cause)}). Continuing without it \u2014 the model will stream directly and be re-downloaded on the next visit.`
+    );
+    return void 0;
+  }
+}
+async function matchSafely(cache, url) {
+  try {
+    return await cache.match(url);
+  } catch {
+    return void 0;
+  }
+}
+function describe(cause) {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 // constants.ts
@@ -2751,31 +2898,7 @@ async function loadTokenizer(json) {
 var EOS_IDS = [151645, 151643];
 var SAMPLE_RATE_EXPECTED = 24e3;
 var MAX_REFERENCE_SECONDS = 20;
-async function fetchWithProgress(url, label, report) {
-  report(label);
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  const header = response.headers.get("content-length");
-  const total = header ? Number(header) : void 0;
-  const reader = response.body?.getReader();
-  if (!reader) return await response.arrayBuffer();
-  const chunks = [];
-  let loaded = 0;
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    loaded += value.byteLength;
-    report(label, { loaded, total });
-  }
-  const buffer = new Uint8Array(loaded);
-  let offset = 0;
-  for (const chunk of chunks) {
-    buffer.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return buffer.buffer;
-}
+var cacheStorage = () => globalThis.caches;
 async function requestDevice() {
   const gpu = globalThis.navigator?.gpu;
   if (!gpu) throw new Error("WebGPU is unavailable \u2014 this page needs navigator.gpu for the language model");
@@ -2790,15 +2913,15 @@ async function requestDevice() {
   const info = adapter.info ? [adapter.info.vendor, adapter.info.architecture, adapter.info.description].filter(Boolean).join(" ") || "unknown adapter" : "unknown adapter";
   return { device, adapter: info };
 }
-async function loadEverything(report) {
+async function fetchJson(asset, label, report) {
+  const buffer = await fetchAsset(asset, label, report, { cacheStorage: cacheStorage() });
+  return JSON.parse(new TextDecoder().decode(buffer));
+}
+async function loadEverything(plan, report) {
   const { device, adapter } = await requestDevice();
-  report("loading tokenizer.json");
-  const tokenizerJson = await (await fetch("./miotts/tokenizer.json")).json();
+  const tokenizerJson = await fetchJson(plan.tokenizer, "tokenizer.json", report);
   const tokenizer = await loadTokenizer(tokenizerJson);
-  report("loading the q8 manifest");
-  const manifestResponse = await fetch("./miotts/q8/manifest.json");
-  if (!manifestResponse.ok) throw new Error(`q8 manifest: HTTP ${manifestResponse.status}`);
-  const manifest = await manifestResponse.json();
+  const manifest = await fetchJson(plan.q8Manifest, "the q8 manifest", report);
   const parts = [{ loaded: 0 }, { loaded: 0 }, { loaded: 0 }];
   const partReport = (index) => (_stage, detail) => {
     if (detail?.loaded === void 0) return;
@@ -2807,15 +2930,21 @@ async function loadEverything(report) {
     const total = parts.every((p) => p.total !== void 0) ? parts.reduce((sum, p) => sum + (p.total ?? 0), 0) : void 0;
     report("LM weights (q8)", { loaded, total });
   };
+  const bin = (name, index) => fetchAsset(plan.q8Bin(name), "LM weights (q8)", partReport(index), { cacheStorage: cacheStorage() });
   const [codes, scales, norms] = await Promise.all([
-    fetchWithProgress(`./miotts/q8/${manifest.files.codes.name}`, "LM weights (q8)", partReport(0)),
-    fetchWithProgress(`./miotts/q8/${manifest.files.scales.name}`, "LM weights (q8)", partReport(1)),
-    fetchWithProgress(`./miotts/q8/${manifest.files.norms.name}`, "LM weights (q8)", partReport(2))
+    bin(manifest.files.codes.name, 0),
+    bin(manifest.files.scales.name, 1),
+    bin(manifest.files.norms.name, 2)
   ]);
   let checkpointVisible = false;
-  const checkpointPromise = fetchCheckpoint((stage, detail) => {
-    if (checkpointVisible) report(stage, detail);
-  });
+  const checkpointPromise = fetchAsset(
+    plan.codecCheckpoint,
+    "MioCodec checkpoint",
+    (stage, detail) => {
+      if (checkpointVisible) report(stage, detail);
+    },
+    { cacheStorage: cacheStorage() }
+  );
   checkpointPromise.catch(() => {
   });
   report("unpacking the q8 weights");
@@ -2824,14 +2953,11 @@ async function loadEverything(report) {
   report("uploading the LM to the GPU");
   const engine = await createGpuEngine(device, weights, { maxSeqLen: MAX_SEQ_LEN });
   checkpointVisible = true;
-  report("downloading the checkpoint");
+  report("MioCodec checkpoint");
   const checkpoint = await checkpointPromise;
   report("parsing the codec checkpoint");
   const codecWeights = new Weights(Safetensors.parse(checkpoint));
-  report("loading the speaker fixture");
-  const fixtureResponse = await fetch("./mio-codec-fixture.json");
-  if (!fixtureResponse.ok) throw new Error(`mio-codec-fixture.json: HTTP ${fixtureResponse.status}`);
-  const fixture = await fixtureResponse.json();
+  const fixture = await fetchJson(plan.fixture, "the speaker fixture", report);
   if (fixture.sample_rate !== SAMPLE_RATE_EXPECTED) {
     throw new Error(`fixture sample_rate ${fixture.sample_rate}, expected ${SAMPLE_RATE_EXPECTED}`);
   }
@@ -2839,13 +2965,11 @@ async function loadEverything(report) {
   return { adapter, engine, tokenizer, normalize: normalizeText, codecWeights, codecBackend, fixture };
 }
 var encoderWeightsPromise = null;
-function loadEncoderWeights(report) {
+function loadEncoderWeights(plan, report) {
   encoderWeightsPromise ??= (async () => {
-    const buffer = await fetchWithProgress(
-      "./miotts/encoder-weights.safetensors",
-      "encoder weights",
-      report
-    );
+    const buffer = await fetchAsset(plan.encoderWeights, "encoder weights", report, {
+      cacheStorage: cacheStorage()
+    });
     report("parsing the encoder weights");
     return new Weights(Safetensors.parse(buffer));
   })().catch((error) => {
@@ -2975,10 +3099,54 @@ function main() {
   const status = element("status");
   const player = element("player");
   const metrics = element("metrics");
+  const preflight = element("preflight");
+  const gpuStatus = element("gpu-status");
   window.__result = null;
   window.__voice = null;
   window.__voiceWave = null;
+  window.__preflight = null;
   let loadedPromise = null;
+  let plan;
+  try {
+    plan = resolveAssets(assetModeFromSearch(window.location.search));
+  } catch (error) {
+    button.disabled = true;
+    const message = error instanceof Error ? error.message : String(error);
+    preflight.textContent = message;
+    status.textContent = `\u5931\u6557: ${message}`;
+    return;
+  }
+  const webgpu = Boolean(globalThis.navigator?.gpu);
+  if (!webgpu) {
+    button.disabled = true;
+    gpuStatus.textContent = "\u3053\u306E\u30D6\u30E9\u30A6\u30B6\u3067\u306F WebGPU (navigator.gpu) \u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u306F\u59CB\u3081\u307E\u305B\u3093 \u2014 Chrome / Edge 113+ \u304B\u3001WebGPU \u3092\u6709\u52B9\u306B\u3057\u305F Firefox / Safari \u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002";
+    gpuStatus.classList.remove("hidden");
+  }
+  const formatSize = (bytes) => bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${(bytes / 1e6).toFixed(0)} MB`;
+  function describePreflight(estimate) {
+    const speech = formatSize(estimate.speechBytes);
+    const cloning = formatSize(estimate.cloningBytes);
+    if (estimate.mode === "local") {
+      return `?assets=local \u2014 \u30E2\u30C7\u30EB\uFF08${speech}\u3001\u58F0\u30AF\u30ED\u30FC\u30F3\u3067 +${cloning}\uFF09\u306F serve.mjs \u304B\u3089\u53D6\u5F97\u3057\u307E\u3059\u3002\u30D6\u30E9\u30A6\u30B6\u30AD\u30E3\u30C3\u30B7\u30E5\u306F\u4F7F\u3044\u307E\u305B\u3093\u3002`;
+    }
+    if (!estimate.cacheAvailable) {
+      return `\u30C6\u30AD\u30B9\u30C8\u2192\u97F3\u58F0\u306B ${speech} \u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u3057\u307E\u3059\uFF08LM int8 + MioCodec + tokenizer\uFF09\u3002\u58F0\u30AF\u30ED\u30FC\u30F3\u3092\u9078\u3076\u3068\u3055\u3089\u306B +${cloning}\u3002\u3053\u306E\u30D6\u30E9\u30A6\u30B6\u3067\u306F Cache API \u304C\u4F7F\u3048\u306A\u3044\u305F\u3081\u3001\u8A2A\u554F\u306E\u305F\u3073\u306B\u518D\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u306B\u306A\u308A\u307E\u3059\u3002`;
+    }
+    if (estimate.speechPending === 0 && estimate.cloningPending === 0) {
+      return `\u30E2\u30C7\u30EB\uFF08${speech} + \u58F0\u30AF\u30ED\u30FC\u30F3 ${cloning}\uFF09\u306F\u3053\u306E\u30D6\u30E9\u30A6\u30B6\u306B\u30AD\u30E3\u30C3\u30B7\u30E5\u6E08\u307F\u3067\u3059\u3002\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u306F\u3042\u308A\u307E\u305B\u3093\u3002`;
+    }
+    if (estimate.speechPending === 0) {
+      return `\u30C6\u30AD\u30B9\u30C8\u2192\u97F3\u58F0\u306E\u30E2\u30C7\u30EB\uFF08${speech}\uFF09\u306F\u30AD\u30E3\u30C3\u30B7\u30E5\u6E08\u307F\u3001\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u306F\u3042\u308A\u307E\u305B\u3093\u3002\u58F0\u30AF\u30ED\u30FC\u30F3\u3092\u9078\u3076\u3068 +${formatSize(estimate.cloningPending)} \u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u3057\u307E\u3059\u3002`;
+    }
+    const pending = estimate.speechPending === estimate.speechBytes ? `\u30C6\u30AD\u30B9\u30C8\u2192\u97F3\u58F0\u306B ${speech} \u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u3057\u307E\u3059\uFF08LM int8 + MioCodec + tokenizer\uFF09` : `\u30C6\u30AD\u30B9\u30C8\u2192\u97F3\u58F0\u306E\u6B8B\u308A ${formatSize(estimate.speechPending)} \u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u3057\u307E\u3059\uFF08\u5408\u8A08 ${speech}\u3001\u3046\u3061\u30AD\u30E3\u30C3\u30B7\u30E5\u6E08\u307F\u3092\u9664\u304F\uFF09`;
+    return `${pending}\u3002\u58F0\u30AF\u30ED\u30FC\u30F3\u3092\u9078\u3076\u3068\u3055\u3089\u306B +${formatSize(estimate.cloningPending)}\u3002\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u3057\u305F\u91CD\u307F\u306F\u30D6\u30E9\u30A6\u30B6\uFF08Cache API\uFF09\u306B\u4FDD\u5B58\u3055\u308C\u3001\u6B21\u306E\u8A2A\u554F\u3067\u306F\u518D\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u3057\u307E\u305B\u3093\u3002`;
+  }
+  async function refreshPreflight() {
+    const estimate = await estimateDownloads(plan, cacheStorage(), (message) => console.warn(message));
+    window.__preflight = { ...estimate, webgpu };
+    preflight.textContent = describePreflight(estimate);
+  }
+  void refreshPreflight();
   const voiceCache = /* @__PURE__ */ new Map();
   let activeVoice = null;
   let voicePromise = null;
@@ -3025,12 +3193,13 @@ function main() {
       voiceStatus.textContent = `${file.name}: encoding\u2026`;
       bar.classList.remove("hidden");
       try {
-        loadedPromise ??= loadEverything(report).catch((error) => {
+        loadedPromise ??= loadEverything(plan, report).catch((error) => {
           loadedPromise = null;
           throw error;
         });
         const loaded = await loadedPromise;
-        const weights = await loadEncoderWeights(report);
+        const weights = await loadEncoderWeights(plan, report);
+        void refreshPreflight();
         report("decoding + resampling the reference audio");
         const decoded = await toMono24k(await file.arrayBuffer());
         const limit = MAX_REFERENCE_SECONDS * SAMPLE_RATE_EXPECTED;
@@ -3074,11 +3243,12 @@ function main() {
     metrics.classList.add("hidden");
     window.__result = null;
     try {
-      loadedPromise ??= loadEverything(report).catch((error) => {
+      loadedPromise ??= loadEverything(plan, report).catch((error) => {
         loadedPromise = null;
         throw error;
       });
       const loaded = await loadedPromise;
+      void refreshPreflight();
       const mode = modeSelect.value === "sample" ? "sample" : "greedy";
       const seedText = seedInput.value.trim();
       const parsedSeed = Number(seedText);
