@@ -7,7 +7,7 @@ import {
   sampleNextTopK,
   topKMass,
   xorshift32,
-} from "./sampler.js";
+} from "../../src/engine/miotts/lm/sampler.js";
 
 /**
  * `sampler.ts` against the upstream `llm/sampler.ts` it stands in front of.

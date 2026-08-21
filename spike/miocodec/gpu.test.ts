@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Gpu } from "./gpu.js";
+import { Gpu } from "../../src/engine/miotts/codec/gpu.js";
 
 /**
  * The GPU seam's *validation* only — no device, no Dawn (which kills a Vitest

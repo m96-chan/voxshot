@@ -15,7 +15,7 @@ import {
   type Q8TensorEntry,
   type Qwen3WeightsQ8,
   type WeightsQ8Manifest,
-} from "./weights-q8.js";
+} from "../../src/engine/miotts/lm/weights-q8.js";
 import { loadWeightsQ8FromDir, sha256Hex } from "./weights-q8-node.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));

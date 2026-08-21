@@ -1,4 +1,4 @@
-import { sampleNext, type Constraint, type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
+import { sampleNext, type Constraint, type SamplerOptions } from "web-xpu-ops/llm/sampler";
 
 /**
  * A fast front end for web-xpu-ops' `llm/sampler.ts#sampleNext`, for the one

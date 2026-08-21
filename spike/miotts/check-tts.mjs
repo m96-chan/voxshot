@@ -51,8 +51,8 @@ import { promisify } from "node:util";
 
 import { chromium } from "playwright";
 
-import { cpuBackend, decode, MIOCODEC_24K } from "../miocodec/decoder.js";
-import { encodeGlobal } from "../miocodec/encoder.js";
+import { cpuBackend, decode, MIOCODEC_24K } from "../../src/engine/miotts/codec/decoder.js";
+import { encodeGlobal } from "../../src/engine/miotts/codec/encoder.js";
 import { GoldenCase, worstDifference } from "../miocodec/golden.js";
 import { loadEncoderWeights, loadWeights } from "../miocodec/weights-cache.js";
 

@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Weights } from "./decoder.js";
-import { Safetensors } from "./safetensors.js";
+import { Weights } from "../../src/engine/miotts/codec/decoder.js";
+import { Safetensors } from "../../src/engine/miotts/codec/safetensors.js";
 
 /**
  * The checkpoint, from wherever `huggingface_hub` put it.

@@ -52,13 +52,17 @@
   "license": "MIT",
   "peerDependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "@webgpu/types": "^0.1.71"
+    "@webgpu/types": "^0.1.71",
+    "web-xpu-ops": "^0.2.0"
   },
   "peerDependenciesMeta": {
     "@huggingface/transformers": {
       "optional": true
     },
     "@webgpu/types": {
+      "optional": true
+    },
+    "web-xpu-ops": {
       "optional": true
     }
   },
@@ -68,7 +72,8 @@
     "@webgpu/types": "^0.1.72",
     "fake-indexeddb": "^6.0.0",
     "typescript": "^5.7.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "web-xpu-ops": "^0.2.0"
   },
   "engines": {
     "node": ">=18"

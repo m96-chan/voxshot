@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { decode, MIOCODEC_24K, Weights } from "./decoder.js";
-import { Safetensors } from "./safetensors.js";
+import { decode, MIOCODEC_24K, Weights } from "../../src/engine/miotts/codec/decoder.js";
+import { Safetensors } from "../../src/engine/miotts/codec/safetensors.js";
 
 const fixture = JSON.parse(readFileSync("../../examples/mio-codec-fixture.json", "utf8"));
 const hub = join(homedir(), ".cache", "huggingface", "hub", "models--Aratako--MioCodec-25Hz-24kHz");
