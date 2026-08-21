@@ -42,6 +42,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -52,6 +53,7 @@ import { chromium } from "playwright";
 
 import { cpuBackend, decode, MIOCODEC_24K } from "../miocodec/decoder.js";
 import { encodeGlobal } from "../miocodec/encoder.js";
+import { GoldenCase, worstDifference } from "../miocodec/golden.js";
 import { loadEncoderWeights, loadWeights } from "../miocodec/weights-cache.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -210,6 +212,36 @@ const refWavPath = (() => {
   return join(root, "snapshots", revision, "samples", "jp_ref1.wav");
 })();
 
+// That path goes through a MUTABLE `refs/main`, so the file it lands on can
+// change without anything here saying so — and every embedding comparison
+// below would then fail as a phantom kernel or resampler bug. The golden
+// records the sha256 of the wav it was actually built from; hash the one being
+// fed to the page and stop right here if they differ, with the cause named.
+const GOLDEN_ENCODER = join(HERE, "../miocodec/golden-encoder");
+const encoderIndex = JSON.parse(readFileSync(join(GOLDEN_ENCODER, "index.json"), "utf8"));
+{
+  const recorded = encoderIndex.cases?.jp_ref1?.source_sha256;
+  const actual = createHash("sha256").update(readFileSync(refWavPath)).digest("hex");
+  if (!recorded) {
+    throw new Error(
+      `golden-encoder/index.json records no source_sha256 for jp_ref1 — the golden predates the ` +
+        `pin. Regenerate it:\n  cd spike/miocodec && .venv/bin/python dump_encoder_golden.py`,
+    );
+  }
+  if (actual !== recorded) {
+    throw new Error(
+      `THE REFERENCE WAV DRIFTED — not a kernel or resampler problem.\n` +
+        `  ${refWavPath}\n` +
+        `  hashes to ${actual.slice(0, 12)}, but golden-encoder/ was dumped from ` +
+        `${recorded.slice(0, 12)}.\n` +
+        `refs/main moved under us, so the embedding comparisons below would be measuring two ` +
+        `different clips against each other. Regenerate the golden from the new file:\n` +
+        `  cd spike/miocodec && .venv/bin/python dump_encoder_golden.py`,
+    );
+  }
+  console.log(`ref wav         jp_ref1.wav sha256 ${actual.slice(0, 12)} matches the golden's`);
+}
+
 await page.selectOption("#voice", "reference");
 await page.setInputFiles("#refaudio", refWavPath);
 await page.waitForFunction(() => window.__voice !== null && window.__voice.status !== "encoding", {
@@ -357,24 +389,32 @@ if (check(sampled?.status === "done", `sampled run: ${JSON.stringify(sampled)}`)
 const EMBED_GOLDEN_BOUND = 3e-3;
 const EMBED_SAME_INPUT_BOUND = 5e-6;
 
+/**
+ * Worst relative disagreement, via ../miocodec/golden.js's `worstDifference`
+ * (one metric, one definition of "relative to the signal's own peak", shared
+ * with the encoder suite). That one throws on a length mismatch; here a
+ * mismatch is a reportable outcome rather than a crash, so it becomes Infinity
+ * and the caller prints the two lengths.
+ */
 const worstRelOf = (actual, expected) => {
   if (actual.length !== expected.length) return Infinity;
-  let scale = 0;
-  for (const v of expected) scale = Math.max(scale, Math.abs(v));
-  let worstAbs = 0;
-  for (let i = 0; i < expected.length; i += 1) {
-    worstAbs = Math.max(worstAbs, Math.abs(actual[i] - expected[i]));
-  }
-  return worstAbs / scale;
+  return worstDifference(actual, expected).rel;
 };
 
-const readF32 = (path) => {
-  const bytes = readFileSync(path);
-  return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-};
+// The golden's tensors through `GoldenCase`, so every read is sha256-checked
+// against the manifest exactly as the encoder suite's are — a truncated or
+// half-written dump reads back as plausible floats otherwise, and the port is
+// the first thing anyone would blame. The per-case manifest lives in
+// index.json (read above for the wav pin) and the layout is the decoder
+// golden's, so no adaptation beyond pointing it at golden-encoder/jp_ref1.
+const jpRef1 = new GoldenCase(encoderIndex.cases.jp_ref1, join(GOLDEN_ENCODER, "jp_ref1"));
 
-if (voice?.status === "ready" && cloned?.status === "done" && clonedWav) {
-  const goldenDir = join(HERE, "../miocodec/golden-encoder/jp_ref1");
+// The embedding accuracy checks depend ONLY on the captured voice and
+// voiceWave, so they run whenever the encode reached "ready" — a failed
+// cloned-voice SYNTHESIS still fails the script (checked at the run above)
+// but must not hide the encoder's numbers, which are what these bounds exist
+// to watch.
+if (voice?.status === "ready") {
   console.log(`\nvoice encode    ${voice.encodeMs.toFixed(0)} ms (GPU, jp_ref1.wav — paid once per file)`);
 
   check(voice.embedding.length === 128, `embedding has ${voice.embedding.length} dims, expected 128`);
@@ -382,7 +422,7 @@ if (voice?.status === "ready" && cloned?.status === "done" && clonedWav) {
   // The input skew, named before the embedding is judged: the page resampled
   // 44.1 kHz -> 24 kHz with Chrome's WebAudio resampler, the golden's input
   // came through torchaudio's polyphase. Same length, different arithmetic.
-  const goldenWave = readF32(join(goldenDir, "waveform_24k.f32"));
+  const goldenWave = jpRef1.tensor("waveform_24k").data;
   const waveRel = worstRelOf(voiceWave, goldenWave);
   console.log(
     `resample skew   browser wave vs golden wave: worst rel ${waveRel === Infinity ? `length ${voiceWave.length} vs ${goldenWave.length}` : waveRel.toExponential(2)}`,
@@ -391,7 +431,7 @@ if (voice?.status === "ready" && cloned?.status === "done" && clonedWav) {
   // End to end: page GPU embedding vs the torch golden — kernels AND
   // resampler together, at the looser bound (see the block above for why,
   // and which of the two comparisons is authoritative).
-  const goldenEmbedding = readF32(join(goldenDir, "global_embedding.f32"));
+  const goldenEmbedding = jpRef1.tensor("global_embedding").data;
   const embedRelGolden = worstRelOf(voice.embedding, goldenEmbedding);
   console.log(`embedding       page GPU vs golden: worst rel ${embedRelGolden.toExponential(2)}  (bound ${EMBED_GOLDEN_BOUND.toExponential(0)})`);
   check(
@@ -413,7 +453,9 @@ if (voice?.status === "ready" && cloned?.status === "done" && clonedWav) {
     embedRelSame < EMBED_SAME_INPUT_BOUND,
     `page embedding vs same-input reference: worst rel ${embedRelSame.toExponential(2)} >= ${EMBED_SAME_INPUT_BOUND}`,
   );
+}
 
+if (voice?.status === "ready" && cloned?.status === "done" && clonedWav) {
   // The cloned synthesis. The LM never sees the voice — identity enters only
   // at the decoder — so greedy ids must EQUAL the default-voice greedy ids.
   check(cloned.voice === "reference", `cloned run reports voice "${cloned.voice}", expected "reference"`);

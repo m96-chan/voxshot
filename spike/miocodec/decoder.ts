@@ -154,7 +154,8 @@ export const MIOCODEC_24K: DecoderConfig = {
  */
 const transposed = new WeakMap<Float32Array, Float32Array>();
 
-async function linear(
+/** Exported for `encoder.ts`, which shares the helper (and this cache) instead of carrying a drifting copy. */
+export async function linear(
   x: Tensor,
   weight: Tensor,
   bias: Tensor | null,
@@ -199,7 +200,7 @@ function addInPlace(a: Float32Array, b: Float32Array): Float32Array {
 }
 
 /** `[L, C]` to `[C, L]`, the axis swap that separates conv stages from attention ones. */
-function transpose2d(data: Float32Array, rows: number, cols: number): Float32Array {
+export function transpose2d(data: Float32Array, rows: number, cols: number): Float32Array {
   const out = new Float32Array(data.length);
   for (let r = 0; r < rows; r += 1) {
     for (let c = 0; c < cols; c += 1) out[c * rows + r] = data[r * cols + c]!;
@@ -328,8 +329,14 @@ export async function fsqDecode(
   );
 }
 
-/** `LayerNorm(dim)` with learned scale and shift, over the last axis. */
-function layerNorm(x: Tensor, weight: Tensor, bias: Tensor, dim: number): Tensor {
+/**
+ * `LayerNorm(dim)` with learned scale and shift, over the last axis.
+ *
+ * Exported for `encoder.ts`, whose ConvNeXt norms pass eps 1e-6 explicitly —
+ * hence the parameter, defaulting to the decoder's own NORM_EPS so every
+ * existing call here is byte-for-byte unchanged.
+ */
+export function layerNorm(x: Tensor, weight: Tensor, bias: Tensor, dim: number, eps = NORM_EPS): Tensor {
   return {
     data: layernorm({
       input: x.data,
@@ -337,7 +344,7 @@ function layerNorm(x: Tensor, weight: Tensor, bias: Tensor, dim: number): Tensor
       bias: bias.data,
       N: x.data.length / dim,
       D: dim,
-      eps: NORM_EPS,
+      eps,
     }),
     shape: [...x.shape],
   };

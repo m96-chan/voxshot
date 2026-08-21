@@ -148,6 +148,13 @@ def load_case_waveform(model, case: dict) -> tuple[torch.Tensor, dict]:
     return waveform, {
         "source": f"{SAMPLES_REPO}/{case['wav']}",
         "source_rate": int(source_rate),
+        # The source file's own digest. `hf_hub_download` resolves through a
+        # mutable `refs/main`, so the clip a consumer feeds a port can differ
+        # from the one this golden was built from with nothing to say so —
+        # and the failure would look like a kernel or resampler bug. Recorded
+        # here so `check-tts.mjs` can hash the wav it feeds the page and name
+        # "the wav drifted" instead.
+        "source_sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
     }
 
 

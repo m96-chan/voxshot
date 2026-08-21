@@ -3,9 +3,16 @@ import { attention } from "web-xpu-ops/ops/attention";
 import { conv1d, conv1dOutputLength } from "web-xpu-ops/ops/conv";
 import { gather } from "web-xpu-ops/ops/gather";
 import { groupNorm } from "web-xpu-ops/ops/group_norm";
-import { layernorm } from "web-xpu-ops/ops/layernorm";
 import { softmax } from "web-xpu-ops/ops/softmax";
-import { cpuBackend, type Backend, type Tensor, type Weights } from "./decoder.js";
+import {
+  cpuBackend,
+  layerNorm as layerNormTensor,
+  linear as linearTensor,
+  transpose2d,
+  type Backend,
+  type Tensor,
+  type Weights,
+} from "./decoder.js";
 
 /**
  * MioCodec's encoder, global path only — reference audio to the 128-dim
@@ -80,6 +87,17 @@ const NUM_BUCKETS = 320;
 const MAX_DISTANCE = 800;
 
 const BACKBONE_DIM = 384;
+
+/**
+ * Hard cap on the input, enforced in {@link encodeGlobal} itself so no caller
+ * can OOM it silently: WavLM attention is O(T²) — at 50 SSL frames per second
+ * a 3-minute clip means T≈9000 and ~12·T² f32s of mask/bias/score scratch,
+ * ~3.9 GB, a dead tab. 30 s (T≈1500, ~27 MB per T² array) is well past any
+ * sane reference clip — the MioTTS server itself trims references to 20 s —
+ * so anything longer is a caller bug, not a use case.
+ */
+const MAX_INPUT_SECONDS = 30;
+
 const NORM_EPS = 1e-5;
 /** ConvNeXt passes this explicitly; it is **not** torch's 1e-5 default. */
 const CONVNEXT_EPS = 1e-6;
@@ -89,12 +107,10 @@ const CONVNEXT_EPS = 1e-6;
  * -------------------------------------------------------------------------- */
 
 /**
- * `y = x @ W^T + b`, the shape `nn.Linear` stores its weight in — the same
- * turn-once-per-weight arrangement as `decoder.ts`, keyed on the array's
- * identity, which `Weights` keeps stable.
+ * `y = x @ W^T + b` over flat arrays — `decoder.ts`'s exported `linear` (one
+ * implementation, one turn-once-per-weight cache), minus the Tensor wrapping
+ * this file's call sites never wanted.
  */
-const transposed = new WeakMap<Float32Array, Float32Array>();
-
 async function linear(
   x: Float32Array,
   rows: number,
@@ -102,26 +118,8 @@ async function linear(
   bias: Tensor | null,
   backend: Backend,
 ): Promise<Float32Array> {
-  const [outFeatures, inFeatures] = weight.shape as [number, number];
-  let b = transposed.get(weight.data);
-  if (!b) {
-    b = new Float32Array(inFeatures * outFeatures);
-    for (let o = 0; o < outFeatures; o += 1) {
-      for (let i = 0; i < inFeatures; i += 1) {
-        b[i * outFeatures + o] = weight.data[o * inFeatures + i]!;
-      }
-    }
-    transposed.set(weight.data, b);
-  }
-  const out = await backend.matmul(x, b, rows, outFeatures, inFeatures);
-  if (bias) {
-    for (let r = 0; r < rows; r += 1) {
-      for (let o = 0; o < outFeatures; o += 1) {
-        out[r * outFeatures + o] = out[r * outFeatures + o]! + bias.data[o]!;
-      }
-    }
-  }
-  return out;
+  const inFeatures = weight.shape[1]!;
+  return (await linearTensor({ data: x, shape: [rows, inFeatures] }, weight, bias, backend)).data;
 }
 
 /** Exact-erf GELU — `nn.GELU()`'s default, which is what WavLM and ConvNeXt use. */
@@ -129,25 +127,9 @@ function gelu(x: Float32Array): Float32Array {
   return activation({ input: x, kind: ACTIVATION.gelu });
 }
 
-/** `[rows, cols]` to `[cols, rows]` — the swap between conv and attention layouts. */
-function transpose2d(data: Float32Array, rows: number, cols: number): Float32Array {
-  const out = new Float32Array(data.length);
-  for (let r = 0; r < rows; r += 1) {
-    for (let c = 0; c < cols; c += 1) out[c * rows + r] = data[r * cols + c]!;
-  }
-  return out;
-}
-
-/** LayerNorm over the last axis with learned affine. */
+/** LayerNorm over the last axis with learned affine — `decoder.ts`'s, flat-array shaped. */
 function layerNorm(x: Float32Array, weight: Tensor, bias: Tensor, dim: number, eps: number): Float32Array {
-  return layernorm({
-    input: x,
-    weight: weight.data,
-    bias: bias.data,
-    N: x.length / dim,
-    D: dim,
-    eps,
-  });
+  return layerNormTensor({ data: x, shape: [x.length / dim, dim] }, weight, bias, dim, eps).data;
 }
 
 function sigmoid(x: number): number {
@@ -609,6 +591,15 @@ export async function encodeGlobal(
 ): Promise<Float32Array> {
   const backend = opts?.backend ?? cpuBackend;
   const trace = opts?.trace;
+
+  if (waveform24k.length > MAX_INPUT_SECONDS * SAMPLE_RATE) {
+    throw new Error(
+      `encodeGlobal: ${(waveform24k.length / SAMPLE_RATE).toFixed(1)} s of audio is over the ` +
+        `${MAX_INPUT_SECONDS} s cap — WavLM attention is O(T²) and a long clip allocates ` +
+        `gigabytes of scratch. Trim the reference before encoding.`,
+    );
+  }
+
   trace?.("waveform_24k", waveform24k.slice());
 
   // -- pad + resample. The pad is at 24 kHz, before the rate change, which is

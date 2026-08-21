@@ -62,6 +62,16 @@ import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./we
 
 const EOS_IDS = [151645, 151643];
 const SAMPLE_RATE_EXPECTED = 24000;
+/**
+ * The reference clip is trimmed to this many seconds before it reaches the
+ * encoder — the MioTTS reference server's own `max_reference_seconds = 20.0`.
+ *
+ * Not a nicety: WavLM's attention is O(T²), so a 3-minute clip means T≈9000
+ * and 12·T² f32 scratch arrays, ~3.9 GB, which is a dead tab rather than a
+ * slow one. `encodeGlobal` carries its own hard cap for any other caller; this
+ * is the page matching the server it is a port of.
+ */
+const MAX_REFERENCE_SECONDS = 20;
 
 interface RunResult {
   status: "done";
@@ -466,13 +476,26 @@ function main(): void {
   window.__voiceWave = null;
   let loadedPromise: Promise<Loaded> | null = null;
 
-  // Embeddings are cached per file (name + size — enough to tell one chosen
-  // file from another without hashing 5 MB of WAV), so re-picking the same
-  // clip, or re-running with it, never re-encodes.
+  // Embeddings are cached per file (name + size + lastModified — enough to
+  // tell one chosen file from another without hashing 5 MB of WAV; the mtime
+  // is what separates a re-recorded take from the identically-named,
+  // identically-sized one it replaced), so re-picking the same clip, or
+  // re-running with it, never re-encodes.
   const voiceCache = new Map<string, VoiceEntry>();
   let activeVoice: VoiceEntry | null = null;
   /** The in-flight encode; a run with #voice=reference awaits it first. */
   let voicePromise: Promise<void> | null = null;
+  /**
+   * Bumped on every file choice, captured by that choice's encode.
+   *
+   * Encodes are slow (seconds) and a user can pick a second file while the
+   * first is still running. Without this, a superseded encode would finish
+   * later and overwrite `activeVoice` / `__voice` with ITS result — the page
+   * would then synthesise in a voice the user had already replaced, and a late
+   * failure would clobber a newer "ready". Every commit below checks that the
+   * counter has not moved and bails if it has.
+   */
+  let voiceGeneration = 0;
 
   const formatMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   const report: Progress = (stage, detail) => {
@@ -495,11 +518,18 @@ function main(): void {
   refAudio.addEventListener("change", () => {
     const file = refAudio.files?.[0];
     if (!file) return;
-    const key = `${file.name}:${file.size}`;
+    const key = `${file.name}:${file.size}:${file.lastModified}`;
+    const generation = (voiceGeneration += 1);
+    /** This encode is still the current selection — see `voiceGeneration`. */
+    const current = () => generation === voiceGeneration;
 
     voicePromise = (async () => {
       const cached = voiceCache.get(key);
       if (cached) {
+        // Reached synchronously (no await above), so nothing can have
+        // superseded this choice yet — the guard is here anyway so that an
+        // `await` creeping in above cannot silently reintroduce the race.
+        if (!current()) return;
         activeVoice = cached;
         window.__voiceWave = () => Array.from(cached.wave);
         window.__voice = {
@@ -529,29 +559,56 @@ function main(): void {
         const weights = await loadEncoderWeights(report);
 
         report("decoding + resampling the reference audio");
-        const wave = await toMono24k(await file.arrayBuffer());
+        const decoded = await toMono24k(await file.arrayBuffer());
 
-        report(`encoding the voice on ${loaded.codecBackend.name}`);
+        // Trim to the reference server's own `max_reference_seconds = 20.0`
+        // before anything expensive touches it — see MAX_REFERENCE_SECONDS.
+        // The note is visible rather than silent: the embedding a user gets
+        // from a 3-minute clip is the first 20 s of it, and that is something
+        // they should be told, not left to infer from the voice.
+        const limit = MAX_REFERENCE_SECONDS * SAMPLE_RATE_EXPECTED;
+        const trimmed = decoded.length > limit;
+        const wave = trimmed ? decoded.slice(0, limit) : decoded;
+        const trimNote = trimmed ? ` (reference trimmed to ${MAX_REFERENCE_SECONDS} s)` : "";
+        if (trimmed) {
+          voiceStatus.textContent = `${file.name}: encoding…${trimNote}`;
+        }
+
+        report(`encoding the voice on ${loaded.codecBackend.name}${trimNote}`);
         await new Promise((resolve) => setTimeout(resolve, 0)); // let the status paint
         const started = performance.now();
         const embedding = await encodeGlobal(wave, weights, { backend: loaded.codecBackend });
         const encodeMs = performance.now() - started;
 
         const entry: VoiceEntry = { embedding, encodeMs, wave };
+        // Cached under this file's own key whether or not it is still the
+        // current choice — the work is done and correct for that file, and a
+        // later re-pick should not repay for it.
         voiceCache.set(key, entry);
+        // Everything past here is a COMMIT to the shared "current voice"
+        // state, so a superseded encode stops at this line rather than
+        // overwriting a newer selection.
+        if (!current()) return;
         activeVoice = entry;
         window.__voiceWave = () => Array.from(wave);
         window.__voice = { status: "ready", key, encodeMs, embedding: Array.from(embedding) };
-        voiceStatus.textContent = `${file.name}: encoded in ${encodeMs.toFixed(0)} ms`;
-        status.textContent = "話者エンコード完了";
+        voiceStatus.textContent = `${file.name}: encoded in ${encodeMs.toFixed(0)} ms${trimNote}`;
+        status.textContent = `話者エンコード完了${trimNote}`;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        window.__voice = { status: "error", error: message };
-        voiceStatus.textContent = `${file.name}: 失敗`;
-        status.textContent = `話者エンコード失敗: ${message}`;
+        // Same rule on the failure path: a stale encode's error must not
+        // clobber a newer selection's "ready" (or its own in-flight status).
+        // Still rethrown, so the promise a run awaits stays rejected.
+        if (current()) {
+          const message = error instanceof Error ? error.message : String(error);
+          window.__voice = { status: "error", error: message };
+          voiceStatus.textContent = `${file.name}: 失敗`;
+          status.textContent = `話者エンコード失敗: ${message}`;
+        }
         throw error;
       } finally {
-        bar.classList.add("hidden");
+        // The bar belongs to whatever is running NOW; a superseded encode
+        // finishing must not hide the bar its successor is still using.
+        if (current()) bar.classList.add("hidden");
       }
     })();
     voicePromise.catch(() => {}); // surfaced via __voice and at the next run's await

@@ -211,6 +211,12 @@ export class Gpu {
     stride = 1,
     groups = 1,
   ): Promise<Float32Array> {
+    // The uniform below is a Uint32Array: a fractional Cin/groups would be
+    // ToUint32-truncated silently where the reference conv1d throws. Same
+    // check, same message style, at this seam too.
+    if (Cin % groups !== 0 || Cout % groups !== 0) {
+      throw new Error(`conv1d(): Cin=${Cin} and Cout=${Cout} must both be divisible by groups=${groups}`);
+    }
     // torch's formula at dilation 1: floor((L + 2p - (K-1) - 1) / stride) + 1.
     const outLength = Math.floor((L + 2 * padding - (K - 1) - 1) / stride) + 1;
     const inputBuffer = this.upload(input);

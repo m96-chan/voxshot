@@ -694,7 +694,7 @@ async function fsqDecode(tokens, levels, weights, backend) {
     backend
   );
 }
-function layerNorm(x, weight, bias, dim) {
+function layerNorm(x, weight, bias, dim, eps = NORM_EPS) {
   return {
     data: layernorm({
       input: x.data,
@@ -702,7 +702,7 @@ function layerNorm(x, weight, bias, dim) {
       bias: bias.data,
       N: x.data.length / dim,
       D: dim,
-      eps: NORM_EPS
+      eps
     }),
     shape: [...x.shape]
   };
@@ -1190,6 +1190,9 @@ var Gpu = class _Gpu {
    * pos_conv, and ConvNeXt's depthwise g384 — each still one dispatch.
    */
   async conv1d(input, weight, bias, Cin, Cout, L, K, padding2, stride = 1, groups = 1) {
+    if (Cin % groups !== 0 || Cout % groups !== 0) {
+      throw new Error(`conv1d(): Cin=${Cin} and Cout=${Cout} must both be divisible by groups=${groups}`);
+    }
     const outLength = Math.floor((L + 2 * padding2 - (K - 1) - 1) / stride) + 1;
     const inputBuffer = this.upload(input);
     const weightBuffer = this.residentBuffer(weight);
@@ -1428,50 +1431,18 @@ var HEAD_DIM = EMBED_DIM / NUM_HEADS;
 var NUM_BUCKETS = 320;
 var MAX_DISTANCE = 800;
 var BACKBONE_DIM = 384;
+var MAX_INPUT_SECONDS = 30;
 var NORM_EPS2 = 1e-5;
 var CONVNEXT_EPS = 1e-6;
-var transposed2 = /* @__PURE__ */ new WeakMap();
 async function linear2(x, rows, weight, bias, backend) {
-  const [outFeatures, inFeatures] = weight.shape;
-  let b = transposed2.get(weight.data);
-  if (!b) {
-    b = new Float32Array(inFeatures * outFeatures);
-    for (let o = 0; o < outFeatures; o += 1) {
-      for (let i = 0; i < inFeatures; i += 1) {
-        b[i * outFeatures + o] = weight.data[o * inFeatures + i];
-      }
-    }
-    transposed2.set(weight.data, b);
-  }
-  const out = await backend.matmul(x, b, rows, outFeatures, inFeatures);
-  if (bias) {
-    for (let r = 0; r < rows; r += 1) {
-      for (let o = 0; o < outFeatures; o += 1) {
-        out[r * outFeatures + o] = out[r * outFeatures + o] + bias.data[o];
-      }
-    }
-  }
-  return out;
+  const inFeatures = weight.shape[1];
+  return (await linear({ data: x, shape: [rows, inFeatures] }, weight, bias, backend)).data;
 }
 function gelu(x) {
   return activation({ input: x, kind: ACTIVATION.gelu });
 }
-function transpose2d2(data, rows, cols) {
-  const out = new Float32Array(data.length);
-  for (let r = 0; r < rows; r += 1) {
-    for (let c = 0; c < cols; c += 1) out[c * rows + r] = data[r * cols + c];
-  }
-  return out;
-}
 function layerNorm2(x, weight, bias, dim, eps) {
-  return layernorm({
-    input: x,
-    weight: weight.data,
-    bias: bias.data,
-    N: x.length / dim,
-    D: dim,
-    eps
-  });
+  return layerNorm({ data: x, shape: [x.length / dim, dim] }, weight, bias, dim, eps).data;
 }
 function sigmoid(x) {
   return 1 / (1 + Math.exp(-x));
@@ -1543,13 +1514,13 @@ async function featureExtractor(wave16, weights, backend) {
     x = gelu(x);
     cin = FRONTEND_DIM;
   }
-  return transpose2d2(x, FRONTEND_DIM, length);
+  return transpose2d(x, FRONTEND_DIM, length);
 }
 async function posConv(x, T, weights, backend) {
   const weight = weights.get("wavlm.encoder.transformer.pos_conv_embed.conv.weight");
   const K = weight.shape[2];
   const convOut = await backend.conv1d(
-    transpose2d2(x, T, EMBED_DIM),
+    transpose2d(x, T, EMBED_DIM),
     weight.data,
     weights.get("wavlm.encoder.transformer.pos_conv_embed.conv.bias").data,
     EMBED_DIM,
@@ -1564,7 +1535,7 @@ async function posConv(x, T, weights, backend) {
   for (let c = 0; c < EMBED_DIM; c += 1) {
     cropped.set(convOut.subarray(c * (T + 1), c * (T + 1) + T), c * T);
   }
-  return transpose2d2(gelu(cropped), EMBED_DIM, T);
+  return transpose2d(gelu(cropped), EMBED_DIM, T);
 }
 function relativePositionBucket(relativePosition) {
   const halfBuckets = NUM_BUCKETS / 2;
@@ -1709,7 +1680,7 @@ async function wavlmLayer(x, T, layer, bias, weights, backend) {
 }
 async function backbone(x, T, weights, backend, trace) {
   let c = await backend.conv1d(
-    transpose2d2(x, T, EMBED_DIM),
+    transpose2d(x, T, EMBED_DIM),
     weights.get("global_encoder.backbone.embed.weight").data,
     weights.get("global_encoder.backbone.embed.bias").data,
     EMBED_DIM,
@@ -1718,9 +1689,9 @@ async function backbone(x, T, weights, backend, trace) {
     7,
     3
   );
-  c = transpose2d2(
+  c = transpose2d(
     layerNorm2(
-      transpose2d2(c, BACKBONE_DIM, T),
+      transpose2d(c, BACKBONE_DIM, T),
       weights.get("global_encoder.backbone.norm.weight"),
       weights.get("global_encoder.backbone.norm.bias"),
       BACKBONE_DIM,
@@ -1744,7 +1715,7 @@ async function backbone(x, T, weights, backend, trace) {
       BACKBONE_DIM
     );
     let h = layerNorm2(
-      transpose2d2(depthwise, BACKBONE_DIM, T),
+      transpose2d(depthwise, BACKBONE_DIM, T),
       weights.get(`${prefix}.norm.weight`),
       weights.get(`${prefix}.norm.bias`),
       BACKBONE_DIM,
@@ -1765,7 +1736,7 @@ async function backbone(x, T, weights, backend, trace) {
     trace?.(`convnext_block${block + 1}`, c.slice());
   }
   return layerNorm2(
-    transpose2d2(c, BACKBONE_DIM, T),
+    transpose2d(c, BACKBONE_DIM, T),
     weights.get("global_encoder.backbone.final_layer_norm.weight"),
     weights.get("global_encoder.backbone.final_layer_norm.bias"),
     BACKBONE_DIM,
@@ -1817,6 +1788,11 @@ function attentiveStatsPool(x, T, weights, trace) {
 async function encodeGlobal(waveform24k, weights, opts) {
   const backend = opts?.backend ?? cpuBackend;
   const trace = opts?.trace;
+  if (waveform24k.length > MAX_INPUT_SECONDS * SAMPLE_RATE) {
+    throw new Error(
+      `encodeGlobal: ${(waveform24k.length / SAMPLE_RATE).toFixed(1)} s of audio is over the ${MAX_INPUT_SECONDS} s cap \u2014 WavLM attention is O(T\xB2) and a long clip allocates gigabytes of scratch. Trim the reference before encoding.`
+    );
+  }
   trace?.("waveform_24k", waveform24k.slice());
   const padding2 = calculateWaveformPadding(waveform24k.length);
   const padded = new Float32Array(waveform24k.length + 2 * padding2);
@@ -1860,7 +1836,7 @@ async function encodeGlobal(waveform24k, weights, opts) {
   trace?.("global_input", globalInput.slice());
   const pooledInput = await backbone(globalInput, T, weights, backend, trace);
   trace?.("after_backbone", pooledInput.slice());
-  const pooled = attentiveStatsPool(transpose2d2(pooledInput, T, BACKBONE_DIM), T, weights, trace);
+  const pooled = attentiveStatsPool(transpose2d(pooledInput, T, BACKBONE_DIM), T, weights, trace);
   trace?.("pooled_stats", pooled.slice());
   const embedding = layerNorm2(
     await linear2(
@@ -2614,6 +2590,7 @@ async function loadTokenizer(json) {
 // browser.ts
 var EOS_IDS = [151645, 151643];
 var SAMPLE_RATE_EXPECTED = 24e3;
+var MAX_REFERENCE_SECONDS = 20;
 async function fetchWithProgress(url, label, report) {
   report(label);
   const response = await fetch(url);
@@ -2854,6 +2831,7 @@ function main() {
   const voiceCache = /* @__PURE__ */ new Map();
   let activeVoice = null;
   let voicePromise = null;
+  let voiceGeneration = 0;
   const formatMB = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   const report = (stage, detail) => {
     if (detail?.loaded !== void 0 && detail.total) {
@@ -2873,10 +2851,13 @@ function main() {
   refAudio.addEventListener("change", () => {
     const file = refAudio.files?.[0];
     if (!file) return;
-    const key = `${file.name}:${file.size}`;
+    const key = `${file.name}:${file.size}:${file.lastModified}`;
+    const generation = voiceGeneration += 1;
+    const current = () => generation === voiceGeneration;
     voicePromise = (async () => {
       const cached = voiceCache.get(key);
       if (cached) {
+        if (!current()) return;
         activeVoice = cached;
         window.__voiceWave = () => Array.from(cached.wave);
         window.__voice = {
@@ -2900,27 +2881,37 @@ function main() {
         const loaded = await loadedPromise;
         const weights = await loadEncoderWeights(report);
         report("decoding + resampling the reference audio");
-        const wave = await toMono24k(await file.arrayBuffer());
-        report(`encoding the voice on ${loaded.codecBackend.name}`);
+        const decoded = await toMono24k(await file.arrayBuffer());
+        const limit = MAX_REFERENCE_SECONDS * SAMPLE_RATE_EXPECTED;
+        const trimmed = decoded.length > limit;
+        const wave = trimmed ? decoded.slice(0, limit) : decoded;
+        const trimNote = trimmed ? ` (reference trimmed to ${MAX_REFERENCE_SECONDS} s)` : "";
+        if (trimmed) {
+          voiceStatus.textContent = `${file.name}: encoding\u2026${trimNote}`;
+        }
+        report(`encoding the voice on ${loaded.codecBackend.name}${trimNote}`);
         await new Promise((resolve2) => setTimeout(resolve2, 0));
         const started = performance.now();
         const embedding = await encodeGlobal(wave, weights, { backend: loaded.codecBackend });
         const encodeMs = performance.now() - started;
         const entry = { embedding, encodeMs, wave };
         voiceCache.set(key, entry);
+        if (!current()) return;
         activeVoice = entry;
         window.__voiceWave = () => Array.from(wave);
         window.__voice = { status: "ready", key, encodeMs, embedding: Array.from(embedding) };
-        voiceStatus.textContent = `${file.name}: encoded in ${encodeMs.toFixed(0)} ms`;
-        status.textContent = "\u8A71\u8005\u30A8\u30F3\u30B3\u30FC\u30C9\u5B8C\u4E86";
+        voiceStatus.textContent = `${file.name}: encoded in ${encodeMs.toFixed(0)} ms${trimNote}`;
+        status.textContent = `\u8A71\u8005\u30A8\u30F3\u30B3\u30FC\u30C9\u5B8C\u4E86${trimNote}`;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        window.__voice = { status: "error", error: message };
-        voiceStatus.textContent = `${file.name}: \u5931\u6557`;
-        status.textContent = `\u8A71\u8005\u30A8\u30F3\u30B3\u30FC\u30C9\u5931\u6557: ${message}`;
+        if (current()) {
+          const message = error instanceof Error ? error.message : String(error);
+          window.__voice = { status: "error", error: message };
+          voiceStatus.textContent = `${file.name}: \u5931\u6557`;
+          status.textContent = `\u8A71\u8005\u30A8\u30F3\u30B3\u30FC\u30C9\u5931\u6557: ${message}`;
+        }
         throw error;
       } finally {
-        bar.classList.add("hidden");
+        if (current()) bar.classList.add("hidden");
       }
     })();
     voicePromise.catch(() => {

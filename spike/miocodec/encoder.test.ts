@@ -92,6 +92,37 @@ function expectedFor(golden: GoldenCase, name: string): { data: Float32Array; sh
   return { data: tensor.data, shape };
 }
 
+describe("encodeGlobal input duration cap", () => {
+  it("rejects a waveform over the 30 s cap, naming the limit", async () => {
+    // WavLM attention is O(T^2): a 3-minute clip means T≈9000 and ~3.9 GB of
+    // f32 scratch — a tab OOM no caller should be able to trigger silently.
+    const samples = new Float32Array(30 * 24000 + 1);
+    await expect(encodeGlobal(samples, weights)).rejects.toThrow(/30 s/);
+  });
+
+  it("accepts exactly the cap boundary (the guard is strictly over)", async () => {
+    // Only the guard is on trial: a backend that throws on first use proves
+    // the 30.0 s input got PAST the cap without paying for a real encode.
+    const samples = new Float32Array(30 * 24000);
+    const tripwire = new Error("past the cap");
+    const throwingBackend: Backend = {
+      name: "tripwire",
+      matmul: async () => {
+        throw tripwire;
+      },
+      conv1d: async () => {
+        throw tripwire;
+      },
+      istft: async () => {
+        throw tripwire;
+      },
+    };
+    await expect(encodeGlobal(samples, weights, { backend: throwingBackend })).rejects.toThrow(
+      "past the cap",
+    );
+  });
+});
+
 describe("MioCodec encoder (global path) against the golden", () => {
   for (const name of Object.keys(index.cases)) {
     const manifest = index.cases[name]!;

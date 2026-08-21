@@ -612,7 +612,7 @@ async function fsqDecode(tokens, levels, weights, backend) {
     backend
   );
 }
-function layerNorm(x, weight, bias, dim) {
+function layerNorm(x, weight, bias, dim, eps = NORM_EPS) {
   return {
     data: layernorm({
       input: x.data,
@@ -620,7 +620,7 @@ function layerNorm(x, weight, bias, dim) {
       bias: bias.data,
       N: x.data.length / dim,
       D: dim,
-      eps: NORM_EPS
+      eps
     }),
     shape: [...x.shape]
   };
@@ -1108,6 +1108,9 @@ var Gpu = class _Gpu {
    * pos_conv, and ConvNeXt's depthwise g384 — each still one dispatch.
    */
   async conv1d(input, weight, bias, Cin, Cout, L, K, padding2, stride = 1, groups = 1) {
+    if (Cin % groups !== 0 || Cout % groups !== 0) {
+      throw new Error(`conv1d(): Cin=${Cin} and Cout=${Cout} must both be divisible by groups=${groups}`);
+    }
     const outLength = Math.floor((L + 2 * padding2 - (K - 1) - 1) / stride) + 1;
     const inputBuffer = this.upload(input);
     const weightBuffer = this.residentBuffer(weight);
