@@ -47,10 +47,14 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@huggingface/transformers": "^4.2.0"
+    "@huggingface/transformers": "^4.2.0",
+    "@webgpu/types": "^0.1.71"
   },
   "peerDependenciesMeta": {
     "@huggingface/transformers": {
+      "optional": true
+    },
+    "@webgpu/types": {
       "optional": true
     }
   },

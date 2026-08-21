@@ -4,7 +4,12 @@
     "noEmitOnError": true,
     "outDir": "dist",
     "rootDir": "src",
-    "types": []
+    // Node's ambient types stay out of the published build, but @webgpu/types
+    // has to come in: src/engine/miotts hands a caller's `GPUDevice` straight
+    // through to the kernels, so the name appears in the emitted .d.ts. It is
+    // declared as an optional peer dependency for the same reason — only a
+    // consumer who imports the MioTTS engine ever needs it.
+    "types": ["@webgpu/types"]
   },
   "include": ["src"]
 }
