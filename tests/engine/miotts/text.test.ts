@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeText } from "./text.js";
+import { normalizeText } from "../../../src/engine/miotts/text.js";
 
 /**
  * Vectors for the `normalize_text` port.

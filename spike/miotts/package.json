@@ -8,6 +8,7 @@
     "build": "esbuild browser.ts --bundle --format=esm --target=es2022 --outfile=../../examples/mio-tts.js --log-level=warning",
     "serve": "node serve.mjs",
     "check:tts": "tsx check-tts.mjs",
+    "check:engine": "tsx check-engine.ts",
     "gen:kernels": "node gen-kernels.mjs"
   },
   "dependencies": {

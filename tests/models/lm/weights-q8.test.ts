@@ -15,12 +15,14 @@ import {
   type Q8TensorEntry,
   type Qwen3WeightsQ8,
   type WeightsQ8Manifest,
-} from "./weights-q8.js";
-import { loadWeightsQ8FromDir, sha256Hex } from "./weights-q8-node.js";
+} from "../../../src/engine/miotts/lm/weights-q8.js";
+import { loadWeightsQ8FromDir, sha256Hex } from "../../../spike/miotts/weights-q8-node.js";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const Q8_DIR = join(HERE, "q8");
-const GOLDEN_INDEX = join(HERE, "golden", "index.json");
+// The artifacts stay where `convert_weights.py` writes them, which is the
+// spike; only the test moved into the release gate.
+const SPIKE = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "spike", "miotts");
+const Q8_DIR = join(SPIKE, "q8");
+const GOLDEN_INDEX = join(SPIKE, "golden", "index.json");
 
 /**
  * The RoPE channel relabeling, restated here independently of both the

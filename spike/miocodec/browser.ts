@@ -1,6 +1,6 @@
-import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "./decoder.js";
-import { Gpu, gpuBackend } from "./gpu.js";
-import { Safetensors } from "./safetensors.js";
+import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "../../src/engine/miotts/codec/decoder.js";
+import { Gpu, gpuBackend } from "../../src/engine/miotts/codec/gpu.js";
+import { Safetensors } from "../../src/engine/miotts/codec/safetensors.js";
 
 /**
  * The browser entry point for `examples/mio-codec.html`.

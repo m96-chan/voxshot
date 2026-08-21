@@ -2,10 +2,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { cpuBackend, type Backend } from "./decoder.js";
-import { calculateWaveformPadding, encodeGlobal } from "./encoder.js";
-import { GoldenCase, worstDifference, type CaseManifest } from "./golden.js";
-import { loadEncoderWeights } from "./weights-cache.js";
+import { cpuBackend, type Backend } from "../../../src/engine/miotts/codec/decoder.js";
+import { calculateWaveformPadding, encodeGlobal } from "../../../src/engine/miotts/codec/encoder.js";
+import { GoldenCase, worstDifference, type CaseManifest } from "../../../spike/miocodec/golden.js";
+import { loadEncoderWeights } from "../../../spike/miocodec/weights-cache.js";
 
 /**
  * The encoder's global path, stage by stage, against the reference
@@ -17,7 +17,9 @@ import { loadEncoderWeights } from "./weights-cache.js";
  * names the culprit.
  */
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "golden-encoder");
+// The goldens stay where the script that dumps them writes them, which is
+// the spike; only the test moved into the release gate.
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "spike", "miocodec", "golden-encoder");
 
 interface EncoderCaseManifest extends Omit<CaseManifest, "num_tokens" | "stft_length" | "interpolate_is_identity"> {
   audio_length: number;

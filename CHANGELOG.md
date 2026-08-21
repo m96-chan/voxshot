@@ -9,6 +9,42 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 ## [Unreleased]
 
 ### Added
+- A `voxshot/miotts` entry point, carrying `createMioTtsEngine` — Japanese text
+  to 24 kHz speech, entirely in the browser on WebGPU, with zero-shot voice
+  cloning from a reference clip. A Qwen3-0.6B language model (int8, resident on
+  the GPU) produces speech tokens at a fixed 25 Hz and MioCodec's decoder turns
+  those into audio, conditioned on a 128-dimension speaker embedding; the
+  language model never sees the voice.
+
+  Three things a caller should know before reaching for it. `speed` does not
+  work — the model has no pace control, so it is ignored rather than
+  approximated by resampling, which would shift the pitch of a voice that was
+  cloned specifically to keep. `expressiveness` maps onto the sampling
+  temperature. And chunks are generated independently, so prosody does not
+  carry across a sentence boundary.
+
+  Alongside it, the contract for being fed weights: `MioTtsWeightSource`, the
+  part names it asks for, and the engine's constants. A subpath rather than part of the main entry, because the
+  WGSL this engine dispatches is large string literals that a consumer running
+  another engine should not carry. Nothing under it touches the network, a
+  cache or a filesystem — where ~1.1 GB of weights come from, how they are
+  cached and how progress is reported stay the caller's decisions, since the
+  right answer differs per application and an engine that picked one would be
+  in the way of everyone it picked wrong for. Parts are requested one at a time
+  so a caller who never clones a voice never pays for the 117 MB encoder.
+  ([#124])
+- `web-xpu-ops` as an optional peer dependency. The MioTTS engine dispatches its
+  kernels through it; consumers who use another engine never install it. The
+  engine also accepts a `GPUDevice` the caller already owns, so an application
+  keeping another model resident does not end up with a second device and a
+  second budget, and `maxSeqLen` is a caller's choice because the KV cache is
+  sized from it — 768 positions cost ~176 MiB against 256's ~59 MiB. ([#124])
+- `@webgpu/types` as an optional peer dependency, alongside
+  `@huggingface/transformers`. The MioTTS engine accepts a `GPUDevice` the
+  caller already owns — an application keeping another model resident should
+  not end up with a second device — so the name reaches the published type
+  declarations. Only consumers who import `voxshot/miotts` need it. ([#124])
+
 - A `load-compiling` milestone on `ChatterboxLifecycleEvent`, marking the end of
   downloading and the start of ONNX session creation. That step dominates a warm
   load — roughly 35 s idle, over two minutes on a busy machine — and emitted
@@ -48,6 +84,14 @@ While the version stays below `1.0.0`, breaking changes ship in minor releases.
 installing `voxshot`. They are here because what the demos can do is the most
 honest signal of where the engines are headed.
 
+- `examples/browser/src/miotts-weights.ts`: a reference answer to the question
+  `voxshot/miotts` deliberately does not answer — where the weights come from
+  and how they are kept. Hugging Face URLs, the Cache API, progress reporting,
+  and a pre-flight that says what a run will cost before it starts. Written to
+  be copied and changed; the one posture worth keeping whatever else you alter
+  is that a `CacheStorage` which cannot be opened, read or written is reported
+  and stepped around, never thrown from — a broken cache should cost a
+  re-download, not the page. ([#124])
 - The MioTTS demo is deployed alongside the Chatterbox one, at `/mio/` on the
   Pages site: Japanese text in, speech out, entirely in the browser on WebGPU,
   with zero-shot voice cloning from a reference clip. Its 1.15 GB of weights
@@ -67,6 +111,13 @@ honest signal of where the engines are headed.
 
 ### Fixed
 
+- `npm run check:package` now checks every `exports` entry, and checks it by
+  packing the real tarball and asking Node to import each subpath from a
+  throwaway `node_modules`. It previously read `exports["."].types` alone,
+  which was the whole surface until a subpath existed. Verified against a
+  subpath pointing at a file that *is* shipped but cannot be imported — the
+  declaration-reading half passes that, and only the resolution half catches
+  it. ([#124])
 - `ChatterboxEngine` releases the tensors it allocates. Every `synthesize` built
   four speaker tensors and abandoned them along with the waveform, and `embed`
   did the same with its input and the encoder's four outputs — roughly a
@@ -270,3 +321,4 @@ Initial release: the core library plus a real Chatterbox ONNX engine.
 [#126]: https://github.com/m96-chan/voxshot/issues/126
 [#130]: https://github.com/m96-chan/voxshot/issues/130
 [#92]: https://github.com/m96-chan/voxshot/issues/92
+[#124]: https://github.com/m96-chan/voxshot/issues/124

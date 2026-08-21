@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { MAX_NEW_TOKENS, MAX_SEQ_LEN, maxNewFor } from "./constants";
+import { MAX_NEW_TOKENS, MAX_SEQ_LEN, maxNewFor } from "../../../src/engine/miotts/constants.js";
 
 describe("shared generation cap", () => {
   it("pins the reference server's limits", () => {

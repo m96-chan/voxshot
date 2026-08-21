@@ -17,13 +17,17 @@ export function toMono(channels: readonly Float32Array[]): Float32Array {
   const length = channels.reduce((min, channel) => Math.min(min, channel.length), Infinity);
   const mono = new Float32Array(length);
 
+  // Read-modify-write through a local rather than `mono[i] += …`: an indexed
+  // read off a typed array is `number | undefined` under
+  // `noUncheckedIndexedAccess`, which the spike's tsconfig enables even though
+  // this one does not. Same code either way; it just says so.
   for (const channel of channels) {
     for (let index = 0; index < length; index += 1) {
-      mono[index] += channel[index] as number;
+      mono[index] = (mono[index] ?? 0) + (channel[index] ?? 0);
     }
   }
   for (let index = 0; index < length; index += 1) {
-    mono[index] /= channels.length;
+    mono[index] = (mono[index] ?? 0) / channels.length;
   }
   return mono;
 }

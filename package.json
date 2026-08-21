@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./miotts": {
+      "types": "./dist/engine/miotts/index.d.ts",
+      "import": "./dist/engine/miotts/index.js"
     }
   },
   "files": [
@@ -22,6 +26,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --coverage",
+    "test:models": "vitest run --config vitest.models.config.ts",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build",
     "check:package": "node scripts/check-package.mjs",
@@ -46,19 +51,29 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@huggingface/transformers": "^4.2.0"
+    "@huggingface/transformers": "^4.2.0",
+    "@webgpu/types": "^0.1.71",
+    "web-xpu-ops": "^0.2.0"
   },
   "peerDependenciesMeta": {
     "@huggingface/transformers": {
+      "optional": true
+    },
+    "@webgpu/types": {
+      "optional": true
+    },
+    "web-xpu-ops": {
       "optional": true
     }
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^4.1.10",
+    "@webgpu/types": "^0.1.72",
     "fake-indexeddb": "^6.0.0",
     "typescript": "^5.7.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "web-xpu-ops": "^0.2.0"
   },
   "engines": {
     "node": ">=18"

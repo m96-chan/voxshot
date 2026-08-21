@@ -10,16 +10,16 @@ import {
   type DownloadEstimate,
   type Progress,
 } from "./assets.js";
-import { MAX_SEQ_LEN, maxNewFor } from "./constants.js";
-import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "../miocodec/decoder.js";
-import { encodeGlobal } from "../miocodec/encoder.js";
-import { Gpu, gpuBackend } from "../miocodec/gpu.js";
-import { Safetensors } from "../miocodec/safetensors.js";
-import { createGpuEngine, type GpuEngine, type GpuEngineStats } from "./gpu-engine.js";
-import { createSamplerStats, sampleNextTopK, xorshift32 } from "./sampler.js";
-import { normalizeText } from "./text.js";
-import { loadTokenizer, speechIndexOf, type Tokenizer, type TokenizerJson } from "./tokenizer.js";
-import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./weights-q8.js";
+import { MAX_SEQ_LEN, maxNewFor } from "../../src/engine/miotts/constants.js";
+import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "../../src/engine/miotts/codec/decoder.js";
+import { encodeGlobal } from "../../src/engine/miotts/codec/encoder.js";
+import { Gpu, gpuBackend } from "../../src/engine/miotts/codec/gpu.js";
+import { Safetensors } from "../../src/engine/miotts/codec/safetensors.js";
+import { createGpuEngine, type GpuEngine, type GpuEngineStats } from "../../src/engine/miotts/lm/gpu-engine.js";
+import { createSamplerStats, sampleNextTopK, xorshift32 } from "../../src/engine/miotts/lm/sampler.js";
+import { normalizeText } from "../../src/engine/miotts/text.js";
+import { loadTokenizer, speechIndexOf, type Tokenizer, type TokenizerJson } from "../../src/engine/miotts/tokenizer.js";
+import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "../../src/engine/miotts/lm/weights-q8.js";
 
 /**
  * Browser entry for `examples/mio-tts.html` — the full pipeline, text to

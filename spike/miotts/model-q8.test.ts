@@ -9,7 +9,7 @@ import {
   type Graph,
   type GraphConfig,
 } from "./model-q8.js";
-import { SPEECH_TOKEN_BASE, SPEECH_TOKEN_COUNT } from "./tokenizer.js";
+import { SPEECH_TOKEN_BASE, SPEECH_TOKEN_COUNT } from "../../src/engine/miotts/tokenizer.js";
 import { loadWeights } from "./weights-cache.js";
 import { loadWeightsQ8FromDir } from "./weights-q8-node.js";
 

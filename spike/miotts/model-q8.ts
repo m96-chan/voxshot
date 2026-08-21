@@ -7,8 +7,8 @@ import { rope } from "web-xpu-ops/ops/rope";
 import { KVCache } from "../../../web-xpu-ops/llm/kv-cache.js";
 import { mergeHeadsMajor, splitHeadsMajor } from "../../../web-xpu-ops/llm/reshape.js";
 import { type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
-import { sampleNextTopK } from "./sampler.js";
-import { gatherDequantRow, type PackedQ8, type Qwen3WeightsQ8 } from "./weights-q8.js";
+import { sampleNextTopK } from "../../src/engine/miotts/lm/sampler.js";
+import { gatherDequantRow, type PackedQ8, type Qwen3WeightsQ8 } from "../../src/engine/miotts/lm/weights-q8.js";
 
 /**
  * The Qwen3-0.6B forward pass over the q8 artifacts — the CPU oracle for the

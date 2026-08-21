@@ -4,10 +4,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MAX_NEW_TOKENS, maxNewFor } from "./constants.js";
+import { MAX_NEW_TOKENS, maxNewFor } from "../../src/engine/miotts/constants.js";
 import { generateQ8 } from "./model-q8.js";
-import { normalizeText } from "./text.js";
-import { loadTokenizer, speechIndexOf, type TokenizerJson } from "./tokenizer.js";
+import { normalizeText } from "../../src/engine/miotts/text.js";
+import { loadTokenizer, speechIndexOf, type TokenizerJson } from "../../src/engine/miotts/tokenizer.js";
 import { loadWeightsQ8FromDir } from "./weights-q8-node.js";
 
 /**

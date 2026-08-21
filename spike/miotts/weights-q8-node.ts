@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { loadWeightsQ8, type Qwen3WeightsQ8, type Sha256Fn, type WeightsQ8Manifest } from "./weights-q8.js";
+import { loadWeightsQ8, type Qwen3WeightsQ8, type Sha256Fn, type WeightsQ8Manifest } from "../../src/engine/miotts/lm/weights-q8.js";
 
 /**
  * Node-only feeding of `loadWeightsQ8`: file reads and the `node:crypto`
