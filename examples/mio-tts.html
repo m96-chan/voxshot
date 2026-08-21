@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MioCodec decoder in the browser — voxshot</title>
+    <title>MioTTS — text to speech in the browser</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -51,6 +51,34 @@
         background: var(--warn-bg);
         border-color: var(--warn-line);
       }
+      textarea {
+        width: 100%;
+        min-height: 4.5rem;
+        font: inherit;
+        color: inherit;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.6rem 0.75rem;
+        resize: vertical;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+        margin-top: 0.85rem;
+      }
+      select, input[type="number"] {
+        font: inherit;
+        color: inherit;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.45rem 0.6rem;
+      }
+      input[type="number"] { width: 7rem; }
+      label { color: var(--muted); }
       button {
         font: inherit;
         font-weight: 600;
@@ -92,129 +120,66 @@
   </head>
   <body>
     <main>
-      <h1>MioCodec decoder in the browser</h1>
+      <h1>MioTTS — text to speech in the browser</h1>
       <p class="sub">
-        <a href="https://huggingface.co/Aratako/MioCodec-25Hz-24kHz">MioCodec-25Hz-24kHz</a> の
-        デコーダを <a href="https://github.com/m96-chan/web-xpu-ops">web-xpu-ops</a> の op だけで
-        組み、ブラウザで動かします。サーバも Python もありません。
+        <a href="https://huggingface.co/Aratako/MioTTS-0.6B">MioTTS-0.6B</a>（Qwen3, int8）が
+        テキストを音声トークンにし、
+        <a href="https://huggingface.co/Aratako/MioCodec-25Hz-24kHz">MioCodec</a> のデコーダが
+        24 kHz の波形にします。両方とも
+        <a href="https://github.com/m96-chan/web-xpu-ops">web-xpu-ops</a> の WGSL カーネルで、
+        すべてこのページの中で動きます。サーバ推論も Python もありません。
       </p>
 
       <section class="panel notice">
-        <h2>これは text-to-speech ではありません</h2>
+        <h2>WebGPU が必須です</h2>
         <p style="margin: 0">
-          テキストからトークンを作る MioTTS の言語モデルには ONNX export がまだ無いため
-          （<a href="https://github.com/m96-chan/voxshot/issues/106">#106</a> の次段）、
-          ここで再生されるトークンは実際の音声クリップを本家の実装でエンコードしたものです。
-          動いているのはパイプラインの後半、<strong>コーデックのデコーダ</strong>です。
+          言語モデルは WebGPU 常駐エンジン（1 トークン = 1 submit、読み戻しは logits のみ）で
+          走ります。CPU フォールバックは意図的にありません（参照実装はテストのオラクル専用）。
+          話者は同梱フィクスチャの global embedding 固定です。
         </p>
       </section>
 
       <section class="panel">
-        <button id="run">デコードする</button>
+        <textarea id="text">こんにちは、今日はいい天気ですね</textarea>
+        <div class="controls">
+          <label for="mode">サンプリング</label>
+          <select id="mode">
+            <option value="greedy" selected>greedy</option>
+            <option value="sample">sample (T=0.8, top-p=1.0)</option>
+          </select>
+          <label for="seed">seed</label>
+          <input id="seed" type="number" value="42" />
+          <button id="run">生成する</button>
+        </div>
         <progress id="bar" class="hidden" max="1" value="0"></progress>
         <p id="status">
-          初回はチェックポイントを Hugging Face から 523 MB ダウンロードします。
-          デコードは WebGPU が使えればカーネル、無ければ参照実装で走ります。
-          どちらで走ったかは結果欄に表示されます（<code>?backend=cpu</code> で強制可）。
+          初回は LM の int8 重み（約 583 MB）と MioCodec のチェックポイント（523 MB）を
+          ダウンロードします。2 回目以降のクリックは生成だけが走ります。
         </p>
         <audio id="player" controls class="hidden"></audio>
         <dl class="metrics hidden" id="metrics">
-          <dt>バックエンド</dt><dd id="m-backend"></dd>
-          <dt>出力</dt><dd id="m-audio"></dd>
-          <dt>デコード時間</dt><dd id="m-elapsed"></dd>
+          <dt>アダプタ</dt><dd id="m-adapter"></dd>
+          <dt>プロンプト</dt><dd id="m-prompt-tokens"></dd>
+          <dt>生成トークン</dt><dd id="m-gen-tokens"></dd>
+          <dt>LM 時間</dt><dd id="m-lm-ms"></dd>
+          <dt>LM スループット</dt><dd id="m-lm-tps"></dd>
+          <dt>デコード時間</dt><dd id="m-decode-ms"></dd>
+          <dt>合計</dt><dd id="m-total-ms"></dd>
           <dt>RTF</dt><dd id="m-rtf"></dd>
-          <dt>トークン</dt><dd id="m-tokens"></dd>
         </dl>
       </section>
 
       <section class="panel">
-        <h2>この数字の読み方</h2>
-        <p style="margin: 0 0 0.5rem">
-          web-xpu-ops には各 op の <strong>reference</strong>（正しさの定義であり、意図的に最も遅い実装）と
-          WGSL カーネルの両方があります。WebGPU 経路が載せているのは
-          <strong>matmul / conv1d / iSTFT の 3 つだけ</strong>で、
-          残りの段（layernorm・rope・attention・group_norm など）は reference のままです。
-          データ量に対して線形なそれらより、この 3 つに演算量が集中しているためです。
-          つまり出る RTF は<strong>ハイブリッドの値</strong>であり、
-          全段カーネル化した場合の数字ではありません。
-          ライブラリ自身も全 op について “Speed is unmeasured” と明記しています。
-        </p>
-        <p style="margin: 0">
-          正しさは別途担保しています。デコーダは本家実装の各段の中間テンソルと突合してあり、
-          段ごとの一致は相対 2.1e-6〜2.2e-5、実音声 6 秒の波形全体では相対 1.2e-4 です。
-        </p>
-      </section>
-
-      <section class="panel">
-        <h2>グラフ</h2>
-        <pre>tokens ─▶ FSQ decode          levels [8,8,8,5,5]
-       ─▶ wave_prenet         Transformer 768, 6L × 12H, window 65 → 512
-       ─▶ wave_conv_upsample  ConvTranspose1d k=2 s=2   (25 Hz → 50 Hz)
-       ─▶ interpolate         linear resample to the STFT length
-       ─▶ wave_prior_net      ResNet ×2: GroupNorm(32) → SiLU → Conv1d
-       ─▶ wave_decoder        Transformer 512, 8L × 8H, window 65, AdaLN-Zero
-       ─▶ wave_post_net       ResNet ×2
-       ─▶ istft_head          Linear [512 → 1922] ─▶ iSTFT "same" (1920/480)
-       ─▶ waveform, 24 kHz</pre>
+        <h2>パイプライン</h2>
+        <pre>text ─▶ ChatML prompt      &lt;|im_start|&gt;user … assistant
+     ─▶ Qwen3-0.6B q8      28L, 1024h, 16Q/8KV×128, QK-norm, RoPE(θ=1e6)
+                           WebGPU 常駐: ~480 dispatch/token, logits のみ読み戻し
+     ─▶ &lt;|s_n|&gt; tokens     25 Hz, eos で停止（最大 700）
+     ─▶ MioCodec decoder   FSQ → Transformer ×2 → iSTFT (1920/480)
+     ─▶ waveform, 24 kHz</pre>
       </section>
     </main>
 
-    <script type="module">
-      import { run, toWav } from "./mio-tts.js";
-
-      const button = document.getElementById("run");
-      const bar = document.getElementById("bar");
-      const status = document.getElementById("status");
-      const player = document.getElementById("player");
-      const metrics = document.getElementById("metrics");
-
-      const format = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        bar.classList.remove("hidden");
-        try {
-          const fixture = await (await fetch("./mio-tts-fixture.json")).json();
-
-          const report = (stage, detail) => {
-            if (detail?.loaded !== undefined && detail.total) {
-              bar.value = detail.loaded / detail.total;
-              status.textContent = `${stage} — ${format(detail.loaded)} / ${format(detail.total)}`;
-            } else if (detail?.loaded !== undefined) {
-              bar.removeAttribute("value");
-              status.textContent = `${stage} — ${format(detail.loaded)}`;
-            } else {
-              bar.removeAttribute("value");
-              status.textContent = stage;
-            }
-          };
-
-          // `?backend=cpu` forces the reference implementations, which is how
-          // the two paths are compared. Default is auto: WebGPU when the
-          // browser has it, the reference otherwise — and the answer is
-          // displayed rather than assumed.
-          const choice = new URLSearchParams(location.search).get("backend") ?? "auto";
-          const result = await run(fixture, report, choice);
-
-          bar.classList.add("hidden");
-          status.textContent = "完了";
-          player.src = URL.createObjectURL(toWav(result.pcm, result.sampleRate));
-          player.classList.remove("hidden");
-          metrics.classList.remove("hidden");
-          document.getElementById("m-backend").textContent = result.backend;
-          document.getElementById("m-audio").textContent =
-            `${result.seconds.toFixed(2)} s @ ${result.sampleRate} Hz`;
-          document.getElementById("m-elapsed").textContent =
-            `${(result.elapsedMs / 1000).toFixed(1)} s`;
-          document.getElementById("m-rtf").textContent = result.realTimeFactor.toFixed(2);
-          document.getElementById("m-tokens").textContent =
-            `${fixture.tokens.length} @ 25 Hz → ${fixture.stft_length} frames`;
-        } catch (error) {
-          bar.classList.add("hidden");
-          status.textContent = `失敗: ${error instanceof Error ? error.message : String(error)}`;
-          button.disabled = false;
-        }
-      });
-    </script>
+    <script type="module" src="./mio-tts.js"></script>
   </body>
 </html>

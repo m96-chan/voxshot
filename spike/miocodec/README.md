@@ -39,32 +39,36 @@ checked nothing.
 
 ### The demo
 
-`examples/mio-tts.html` decodes a committed token fixture in the browser and
+`examples/mio-codec.html` decodes a committed token fixture in the browser and
 plays the result. Build and check it with:
 
 ```bash
-npm run build        # esbuild browser.ts -> examples/mio-tts.js
+npm run build        # esbuild browser.ts -> examples/mio-codec.js
 npm run check:demo   # drives the page in headless Chromium and reads the numbers back
 ```
 
 `check:demo` runs the page twice, once with `?backend=cpu` and once on `auto`,
 and compares **both** against the torch decode of the same tokens — not against
 each other, since two implementations agreeing says nothing if they agree on the
-wrong answer. Measured on this machine:
+wrong answer. Measured on this machine (RTX 5090, driver 610.57.04, headed
+Chromium with `--use-angle=vulkan`):
 
 | backend | decode | RTF | vs torch |
 | --- | ---: | ---: | ---: |
-| reference (CPU) | 36.3 s | 5.98 | 1.64e-4 |
-| WebGPU kernels | 28.0 s | 4.67 | 2.63e-4 |
+| reference (CPU) | 39.1 s | 6.51 | 1.64e-4 |
+| WebGPU (nvidia blackwell) | 2.0 s | 0.33 | 2.73e-4 |
 
-**Neither number is a hardware measurement, and the second one especially is
-not.** Chromium here reports its WebGPU adapter as `google swiftshader` — a
-software rasteriser — whatever combination of `--enable-gpu`,
-`--ignore-gpu-blocklist`, Vulkan feature flags, sandbox flags and headed-versus-
-headless it is given, on a machine with an RTX 5090 and a working Vulkan ICD.
-So the run checks that the **kernels compute the right thing**, and says nothing
-about speed. `check:demo` prints a warning when the adapter is software, because
-an RTF printed next to "WebGPU" looks exactly like a hardware number.
+The WebGPU number is a hardware measurement — the first one this spike has.
+Earlier revisions of this README reported 28.0 s / RTF 4.67 under "WebGPU":
+that was SwiftShader, Chromium's software rasteriser, reached because the host's
+NVIDIA kernel/userspace driver versions disagreed (fixed by a reboot) **and**
+because without `--use-angle=vulkan` Chromium stays on the software path even
+with a working Vulkan ICD. Hardware and SwiftShader agree with torch to within
+~1e-5 of each other, so those old runs did verify the kernels — they just said
+nothing about speed. `check:demo` still prints a warning when the adapter is
+software, because an RTF printed next to "WebGPU" looks exactly like a hardware
+number. New headless (`--headless=new`) still falls back to SwiftShader, so the
+check runs headed whenever `DISPLAY` is set.
 
 The WebGPU path is also a **hybrid**: `matmul`, `conv1d` and the inverse
 transform are dispatched as kernels, and every other stage — layernorm, RoPE,

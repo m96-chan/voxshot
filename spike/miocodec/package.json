@@ -7,7 +7,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "bench": "esbuild bench.ts --bundle --platform=node --format=esm --outfile=.bench.mjs --log-level=warning && node .bench.mjs",
-    "build": "esbuild browser.ts --bundle --format=esm --target=es2022 --outfile=../../examples/mio-tts.js",
+    "build": "esbuild browser.ts --bundle --format=esm --target=es2022 --outfile=../../examples/mio-codec.js",
     "check:demo": "node check-demo.mjs",
     "check:gpu": "esbuild check-gpu.ts --bundle --platform=node --format=esm --external:webgpu --outfile=.check-gpu.mjs --log-level=warning && node .check-gpu.mjs"
   },
