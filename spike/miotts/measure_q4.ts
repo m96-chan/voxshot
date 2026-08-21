@@ -77,7 +77,7 @@
 import { writeFileSync } from "node:fs";
 import { loadCase, loadIndex, worstDifference } from "./golden.js";
 import { buildWeights, MIOTTS_06B, Qwen3Runner, type ModelWeights } from "./model.js";
-import { SPEECH_TOKEN_BASE, SPEECH_TOKEN_COUNT } from "./tokenizer.js";
+import { SPEECH_TOKEN_BASE, SPEECH_TOKEN_COUNT } from "../../src/engine/miotts/tokenizer.js";
 import { loadWeights, type Tensor } from "./weights-cache.js";
 
 // ---------------------------------------------------------------- quantizing

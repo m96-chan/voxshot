@@ -17,8 +17,8 @@ import { Gpu, gpuBackend } from "../miocodec/gpu.js";
 import { Safetensors } from "../miocodec/safetensors.js";
 import { createGpuEngine, type GpuEngine, type GpuEngineStats } from "./gpu-engine.js";
 import { createSamplerStats, sampleNextTopK, xorshift32 } from "./sampler.js";
-import { normalizeText } from "./text.js";
-import { loadTokenizer, speechIndexOf, type Tokenizer, type TokenizerJson } from "./tokenizer.js";
+import { normalizeText } from "../../src/engine/miotts/text.js";
+import { loadTokenizer, speechIndexOf, type Tokenizer, type TokenizerJson } from "../../src/engine/miotts/tokenizer.js";
 import { loadWeightsQ8, type Qwen3WeightsQ8, type WeightsQ8Manifest } from "./weights-q8.js";
 
 /**

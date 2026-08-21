@@ -15,7 +15,7 @@ import {
   speechIndexOf,
   speechTokenId,
   type Tokenizer,
-} from "./tokenizer";
+} from "../../src/engine/miotts/tokenizer.js";
 
 /**
  * Golden vectors from the reference HF tokenizer (`dump_tokenizer_vectors.py`).

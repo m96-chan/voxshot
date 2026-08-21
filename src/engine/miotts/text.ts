@@ -58,7 +58,11 @@ export function normalizeText(text: string): string {
   }
 
   text = text.replace(FULLWIDTH_ALNUM, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
-  text = text.replace(/[ｦ-ﾝ]/g, (ch) => KATAKANA_FOLD.get(ch) ?? ch);
+  // `[ｦ-ﾝ]` (U+FF66..U+FF9D) is exactly the 56 characters KATAKANA_FOLD holds,
+  // so the lookup never misses and there is no fallback branch to test. The
+  // dakuten marks ﾞﾟ (U+FF9E/U+FF9F) sit past the class and pass through
+  // untouched, which is what the reference does too.
+  text = text.replace(/[ｦ-ﾝ]/g, (ch) => KATAKANA_FOLD.get(ch)!);
 
   text = text.replace(/…{3,}/g, "……");
 
