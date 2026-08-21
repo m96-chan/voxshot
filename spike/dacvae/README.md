@@ -151,8 +151,9 @@ stopping there returns 96 channels, which is not a waveform.
 
 ## What this does not show
 
-- **Speed.** Everything runs on the reference implementations, on a CPU. This
-  says the arithmetic is right, not that it is fast enough for a browser.
+- **Speed in a browser.** RTF 0.57 is Dawn in Node on an RTX 5090. A browser's
+  WebGPU is the same API over the same driver, but it is not the same
+  measurement, and neither is a laptop's GPU.
 - **Round-trip quality.** The golden's input is a synthetic signal — chosen so
   the comparison is reproducible and unlicensed — and its round-trip
   correlation is only 0.70, because a codec trained on speech does not
