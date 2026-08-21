@@ -157,3 +157,8 @@ __pycache__/
 # check-engine.ts writes audio and an embedding beside itself; both are
 # regenerable outputs of a run, not sources.
 spike/miotts/check-engine-out.*
+
+# spike/dacvae: the reference venv and the goldens it dumps. Both are
+# regenerable — see spike/dacvae/README.md — and the goldens are ~75 MB.
+spike/dacvae/.venv/
+spike/dacvae/golden/
