@@ -40,6 +40,14 @@ import { buildSafetensors } from "../../helpers/safetensors.js";
 
 installGpuGlobals();
 
+// This file is the only one that drives a real-shaped codec — the engine
+// hard-codes MioCodec's 24 kHz rung, so its checkpoint cannot be scaled down
+// the way the decoder's own tests scale theirs. A synthesise here costs ~200 ms
+// on a workstation and several times that on a shared CI runner, which is past
+// the 5 s default. Raised for the file rather than per test, and deliberately
+// not raised globally: everything else here should still be instant.
+vi.setConfig({ testTimeout: 30_000 });
+
 /**
  * The real vocabulary size.
  *
@@ -146,9 +154,12 @@ const build = async (overrides: Parameters<typeof createMioTtsEngine>[0] | null 
     weights: source,
     device: gpu.device,
     maxSeqLen: 64,
-    // Short on purpose: each step samples over 164,480 logits, and the real
-    // 700-token cap would make this suite seconds slower for nothing.
-    maxNewTokens: 32,
+    // As short as it can be while still producing a speech token. Measured:
+    // 4 steps yield one token and cost ~190 ms; 32 steps yield six and cost
+    // ~930 ms. Nothing here asserts anything about how much audio comes out,
+    // so the extra five tokens buy nothing and cost five times as much on
+    // every run.
+    maxNewTokens: 4,
     ...overrides,
   });
   return { engine, source, asked };
@@ -246,7 +257,7 @@ describe("load", () => {
         throw new Error("network down");
       },
     });
-    const engine = await createMioTtsEngine({ weights: source, device: gpu.device, maxSeqLen: 64, maxNewTokens: 32 });
+    const engine = await createMioTtsEngine({ weights: source, device: gpu.device, maxSeqLen: 64, maxNewTokens: 4 });
 
     await expect(engine.load("webgpu")).rejects.toThrow(/lm-scales/);
   });
@@ -406,7 +417,7 @@ describe("embed", () => {
         throw new Error("network down");
       },
     });
-    const engine = await createMioTtsEngine({ weights: source, device: gpu.device, maxSeqLen: 64, maxNewTokens: 32 });
+    const engine = await createMioTtsEngine({ weights: source, device: gpu.device, maxSeqLen: 64, maxNewTokens: 4 });
     await engine.load("webgpu");
     const audio = { samples: new Float32Array(24_000), sampleRate: MIOTTS_SAMPLE_RATE };
 
@@ -527,7 +538,7 @@ describe("dispose", () => {
     const destroy = vi.fn();
     const shared = { ...gpu.device, destroy } as unknown as GPUDevice;
     const { source } = fakeSource();
-    const engine = await createMioTtsEngine({ weights: source, device: shared, maxSeqLen: 64, maxNewTokens: 32 });
+    const engine = await createMioTtsEngine({ weights: source, device: shared, maxSeqLen: 64, maxNewTokens: 4 });
     await engine.load("webgpu");
 
     await engine.dispose();
