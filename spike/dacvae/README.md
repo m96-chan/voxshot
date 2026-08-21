@@ -30,7 +30,9 @@ python3 -m venv .venv && .venv/bin/pip install torch torchaudio \
     "git+https://github.com/facebookresearch/dacvae" descript-audiotools
 .venv/bin/python dump_weights.py   # ~250 MB, the decode path only
 .venv/bin/python dump_golden.py    # ~75 MB, stage by stage
-npm install && npm run check
+npm install
+npm run check       # reference implementations, on the CPU
+npm run check:gpu   # the same graph through the WGSL kernels
 ```
 
 Neither the weights nor the goldens are in git. Both are regenerable, and every
@@ -54,9 +56,58 @@ ok  tail_1_normconv1d  [1, 57600]     peak-relative 1.947e-6
 ok  tail_2_tanh        [1, 57600]     peak-relative 1.951e-6
 ```
 
+On WebGPU (RTX 5090), against the same goldens:
+
+```
+ok  after_out_proj     peak-relative 2.845e-7      ok  decoder_model_4    7.553e-6
+ok  decoder_model_0    2.906e-6                    ok  tail_0_snake1d     8.065e-6
+ok  decoder_model_1    3.318e-6                    ok  tail_1_normconv1d  4.372e-6
+ok  decoder_model_2    5.218e-6                    ok  tail_2_tanh        4.241e-6
+ok  decoder_model_3    3.299e-6
+
+3 runs: 0.77 / 0.68 / 0.69 s — best RTF 0.57 for 1.20 s of audio
+```
+
+The GPU's errors are larger than the CPU's — 8.1e-6 against 3.7e-6 at the worst
+stage — which is what a different summation order inside a kernel looks like,
+and is still two orders inside the tolerance. **Both backends are held to the
+reference, never to each other**: "the two agree" would be satisfied by two
+identical mistakes.
+
 Stage by stage, not end to end: the decoder upsamples 1920x, so an error in the
 first block is unrecognisable by the last and "the waveform is wrong" would be
 true and useless.
+
+## RTF 0.57, and where the headroom is
+
+Faster than real time on the first attempt, with nothing tuned. The obvious
+cost is still being paid in full: **every stage uploads its input and reads its
+output back**, about 61 MB per second of audio in each direction across roughly
+a hundred dispatches. Keeping activations on the device between stages removes
+almost all of that, and is deliberately not done yet so the number above is the
+honest unoptimised one.
+
+For scale, the reference implementations on the CPU are RTF 138 — they are the
+definition of correct and the slowest thing here, exactly as intended.
+
+## A Dawn limitation, not isolated
+
+`check-gpu.ts` is a separate script rather than a flag on `check.ts`, and that
+is a measured environment limitation. Driving the same dispatches from inside
+`check.ts`'s nested async structure aborts Dawn's Node binding —
+`std::system_error: Invalid argument`, which glibc words as "the futex facility
+returned an unexpected error code" — reproducibly, 3 runs out of 3, before the
+first stage completes. At module top level, with comparisons deferred until
+after the decode, the identical sequence runs clean.
+
+Two plausible explanations were tested and **both are wrong**: heavy CPU work
+between dispatches (64 MB of allocate-and-scan per stage) does not reproduce
+it, and neither do file reads between dispatches. Something else is the
+trigger, and this has not been narrowed to one variable — the working script
+differs from the failing one in more than one way. It is written down rather
+than reported upstream for exactly that reason; web-xpu-ops #107 already covers
+"the Node+Dawn binding crashes", and a half-diagnosed report would cost them
+more than it tells them.
 
 **`snake` works, and our understanding of its contract was right.** DACVAE
 computes `x + (alpha + 1e-9).reciprocal() * sin(alpha*x)²` and upstream's

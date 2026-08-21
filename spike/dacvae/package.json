@@ -2,17 +2,21 @@
   "name": "spike-dacvae",
   "private": true,
   "type": "module",
-  "description": "Spike for voxshot#138: DACVAE's decoder on web-xpu-ops, checked against a golden from Meta's reference — and the first use of ops/snake.",
+  "description": "Spike for voxshot#138: DACVAE's decoder on web-xpu-ops, checked against a golden from Meta's reference \u2014 and the first use of ops/snake.",
   "scripts": {
     "check": "tsx check.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:gpu": "tsx check-gpu.ts",
+    "gen:kernels": "node gen-kernels.mjs"
   },
   "dependencies": {
     "web-xpu-ops": "^0.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@webgpu/types": "^0.1.72",
     "tsx": "^4.23.5",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "webgpu": "^0.4.0"
   }
 }

@@ -1,7 +1,4 @@
-import { conv1d, conv1dOutputLength } from "web-xpu-ops/ops/conv";
-import { convTranspose1d } from "web-xpu-ops/ops/conv_transpose";
-import { snake } from "web-xpu-ops/ops/snake";
-
+import { cpuBackend, type Backend } from "./backend.js";
 import { convWeights, has, tensor, weightIndex } from "./weights.js";
 
 /**
@@ -91,31 +88,30 @@ function convPadding(kernel: number, stride: number, dilation: number): number {
   return Math.floor(((kernel - stride) * dilation) / 2);
 }
 
-function applyConv(input: Signal, prefix: string, dilation = 1, stride = 1): Signal {
+async function applyConv(
+  backend: Backend,
+  input: Signal,
+  prefix: string,
+  dilation = 1,
+): Promise<Signal> {
   const { weight, bias, shape } = convWeights(prefix);
   const [cOut, cIn, k] = shape as [number, number, number];
   if (cIn !== input.channels) {
     throw new Error(`${prefix}: expects ${cIn} channels, got ${input.channels}`);
   }
-  const padding = convPadding(k, stride, dilation);
-  const out = conv1d({
+  const padding = convPadding(k, 1, dilation);
+  const out = await backend.conv1d({
     input: input.data,
     weight,
-    ...(bias ? { bias } : {}),
-    N: 1,
+    bias,
     Cin: cIn,
     Cout: cOut,
     L: input.length,
     K: k,
-    stride,
     padding,
     dilation,
   });
-  return {
-    data: out,
-    channels: cOut,
-    length: conv1dOutputLength({ L: input.length, K: k, stride, padding, dilation }),
-  };
+  return { data: out, channels: cOut, length: out.length / cOut };
 }
 
 /**
@@ -134,7 +130,12 @@ function applyConv(input: Signal, prefix: string, dilation = 1, stride = 1): Sig
  * an odd rate would need it, but nothing here has checked it, and that is worth
  * knowing before trusting this file against a different checkpoint.
  */
-function applyConvTranspose(input: Signal, prefix: string, stride: number): Signal {
+async function applyConvTranspose(
+  backend: Backend,
+  input: Signal,
+  prefix: string,
+  stride: number,
+): Promise<Signal> {
   const { weight, bias, shape } = convWeights(prefix);
   // Transposed convolutions store `[Cin, Cout, K]`, not `[Cout, Cin, K]`.
   const [cIn, cOut, k] = shape as [number, number, number];
@@ -143,11 +144,10 @@ function applyConvTranspose(input: Signal, prefix: string, stride: number): Sign
   }
   const padding = Math.floor((stride + 1) / 2);
   const outputPadding = stride % 2 === 1 ? 1 : 0;
-  const out = convTranspose1d({
+  const out = await backend.convTranspose1d({
     input: input.data,
     weight,
-    ...(bias ? { bias } : {}),
-    N: 1,
+    bias,
     Cin: cIn,
     Cout: cOut,
     L: input.length,
@@ -159,14 +159,14 @@ function applyConvTranspose(input: Signal, prefix: string, stride: number): Sign
   return { data: out, channels: cOut, length: out.length / cOut };
 }
 
-function applySnake(input: Signal, prefix: string): Signal {
+async function applySnake(backend: Backend, input: Signal, prefix: string): Promise<Signal> {
   // `alpha` is stored as [1, C, 1] — one learned value per channel.
   const alpha = tensor(`${prefix}.alpha`);
   if (alpha.length !== input.channels) {
     throw new Error(`${prefix}: alpha has ${alpha.length} channels, input has ${input.channels}`);
   }
   return {
-    data: snake({ input: input.data, alpha, N: 1, C: input.channels, L: input.length }),
+    data: await backend.snake({ input: input.data, alpha, C: input.channels, L: input.length }),
     channels: input.channels,
     length: input.length,
   };
@@ -181,11 +181,16 @@ function applySnake(input: Signal, prefix: string): Signal {
  * zero for these numbers" is a property of the config, not of the code, and the
  * next config would break silently.
  */
-function residualUnit(input: Signal, prefix: string, dilation: number): Signal {
-  let x = applySnake(input, `${prefix}.block.0`);
-  x = applyConv(x, `${prefix}.block.1`, dilation);
-  x = applySnake(x, `${prefix}.block.2`);
-  x = applyConv(x, `${prefix}.block.3`, 1);
+async function residualUnit(
+  backend: Backend,
+  input: Signal,
+  prefix: string,
+  dilation: number,
+): Promise<Signal> {
+  let x = await applySnake(backend, input, `${prefix}.block.0`);
+  x = await applyConv(backend, x, `${prefix}.block.1`, dilation);
+  x = await applySnake(backend, x, `${prefix}.block.2`);
+  x = await applyConv(backend, x, `${prefix}.block.3`, 1);
 
   const crop = (input.length - x.length) / 2;
   if (!Number.isInteger(crop) || crop < 0) {
@@ -201,13 +206,18 @@ function residualUnit(input: Signal, prefix: string, dilation: number): Signal {
 }
 
 /** One upsampling block: snake, transposed conv, then three residual units. */
-function decoderBlock(input: Signal, index: number, rate: number): Signal {
+async function decoderBlock(
+  backend: Backend,
+  input: Signal,
+  index: number,
+  rate: number,
+): Promise<Signal> {
   const prefix = `decoder.model.${index}`;
-  let x = applySnake(input, `${prefix}.block.0`);
-  x = applyConvTranspose(x, `${prefix}.block.1`, rate);
-  x = residualUnit(x, `${prefix}.block.4`, 1);
-  x = residualUnit(x, `${prefix}.block.5`, 3);
-  x = residualUnit(x, `${prefix}.block.8`, 9);
+  let x = await applySnake(backend, input, `${prefix}.block.0`);
+  x = await applyConvTranspose(backend, x, `${prefix}.block.1`, rate);
+  x = await residualUnit(backend, x, `${prefix}.block.4`, 1);
+  x = await residualUnit(backend, x, `${prefix}.block.5`, 3);
+  x = await residualUnit(backend, x, `${prefix}.block.8`, 9);
   // `block.9` is `nn.Identity()` unless the block was built with
   // `last_kernel_size`, in which case it is one more residual unit. This
   // checkpoint has none; the check is here so a checkpoint that does is a
@@ -219,29 +229,33 @@ function decoderBlock(input: Signal, index: number, rate: number): Signal {
 }
 
 /** Decode a `[latentDim, frames]` latent into a `[1, frames * hop]` waveform. */
-export function decode(latent: Signal, options: { trace?: (stage: string, signal: Signal) => void } = {}): Signal {
+export async function decode(
+  latent: Signal,
+  options: { trace?: (stage: string, signal: Signal) => void; backend?: Backend } = {},
+): Promise<Signal> {
+  const backend = options.backend ?? cpuBackend;
   const config = decoderConfig();
   const trace = options.trace;
   if (latent.channels !== config.latentDim) {
     throw new Error(`latent has ${latent.channels} channels, expected ${config.latentDim}`);
   }
 
-  let x = applyConv(latent, "quantizer.out_proj");
+  let x = await applyConv(backend, latent, "quantizer.out_proj");
   trace?.("after_out_proj", x);
 
-  x = applyConv(x, "decoder.model.0");
+  x = await applyConv(backend, x, "decoder.model.0");
   trace?.("decoder_model_0", x);
 
-  config.decoderRates.forEach((rate, i) => {
-    x = decoderBlock(x, i + 1, rate);
+  for (const [i, rate] of config.decoderRates.entries()) {
+    x = await decoderBlock(backend, x, i + 1, rate);
     trace?.(`decoder_model_${i + 1}`, x);
-  });
+  }
 
   // The tail, which lives inside `wm_model` — see the module doc.
   const tail = "decoder.wm_model.encoder_block.pre";
-  x = applySnake(x, `${tail}.0`);
+  x = await applySnake(backend, x, `${tail}.0`);
   trace?.("tail_0_snake1d", x);
-  x = applyConv(x, `${tail}.1`);
+  x = await applyConv(backend, x, `${tail}.1`);
   trace?.("tail_1_normconv1d", x);
   x = { ...x, data: Float32Array.from(x.data, Math.tanh) };
   trace?.("tail_2_tanh", x);

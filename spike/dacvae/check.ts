@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { create, globals } from "webgpu";
+
+import { cpuBackend, type Backend } from "./backend.js";
 import { decode, decoderConfig, type Signal } from "./decoder.js";
+import { Gpu, gpuBackend } from "./gpu.js";
 
 /**
  * The port against Meta's reference, stage by stage.
@@ -25,6 +29,11 @@ import { decode, decoderConfig, type Signal } from "./decoder.js";
  * The threshold is f32 accumulation noise, not a quality judgement. These are
  * the same operations in the same order over the same weights; anything past
  * ~1e-5 peak-relative is a different computation, not a rounding difference.
+ *
+ * `--gpu` runs the same graph through the WGSL kernels instead. The comparison
+ * is against the same goldens, so the two backends are held to the reference
+ * rather than to each other — "they agree" would be satisfied by two identical
+ * mistakes.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -86,8 +95,27 @@ function compare(mine: Float32Array, reference: Float32Array): Difference {
   return { worst, peak, relative: peak > 0 ? worst / peak : worst, at };
 }
 
-function main(): void {
+async function pickBackend(): Promise<Backend> {
+  if (!process.argv.includes("--gpu")) return cpuBackend;
+  Object.assign(globalThis, globals);
+  const gpu = create([]);
+  const adapter = await gpu.requestAdapter();
+  if (!adapter) throw new Error("no WebGPU adapter — check the driver, not this script");
+  const device = await adapter.requestDevice({
+    requiredLimits: {
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxBufferSize: adapter.limits.maxBufferSize,
+    },
+  });
+  const info = adapter.info
+    ? [adapter.info.vendor, adapter.info.architecture].filter(Boolean).join(" ") || "unknown"
+    : "unknown";
+  return gpuBackend(Gpu.fromDevice(device, info));
+}
+
+async function main(): Promise<void> {
   const config = decoderConfig();
+  const backend = await pickBackend();
   const golden = loadIndex();
   if (golden.config.sample_rate !== config.sampleRate || golden.config.hop_length !== config.hopLength) {
     throw new Error(
@@ -103,12 +131,15 @@ function main(): void {
   console.log(
     `${config.sampleRate} Hz, hop ${config.hopLength}, rates [${config.decoderRates.join(", ")}]`,
   );
-  console.log(`latent [${channels}, ${frames}] -> waveform [1, ${frames * config.hopLength}]\n`);
+  console.log(`latent [${channels}, ${frames}] -> waveform [1, ${frames * config.hopLength}]`);
+  console.log(`backend: ${backend.name}\n`);
 
   const results: { stage: string; difference: Difference; ok: boolean }[] = [];
   const seen = new Set<string>();
 
-  decode(latent, {
+  const started = Date.now();
+  await decode(latent, {
+    backend,
     trace(stage, signal) {
       seen.add(stage);
       const reference = loadTensor(stage);
@@ -133,8 +164,14 @@ function main(): void {
     console.log(`\nFAIL  stages in the golden that the port never produced: ${missed.join(", ")}`);
   }
 
+  const elapsed = (Date.now() - started) / 1000;
+  const seconds = (frames * config.hopLength) / config.sampleRate;
   const failed = results.filter((r) => !r.ok);
   console.log();
+  console.log(
+    `${seconds.toFixed(2)} s of audio in ${elapsed.toFixed(2)} s ` +
+      `— RTF ${(elapsed / seconds).toFixed(2)} (${backend.name})`,
+  );
   if (failed.length === 0 && missed.length === 0) {
     const worst = results.reduce((a, b) => (a.difference.relative > b.difference.relative ? a : b));
     console.log(
@@ -147,4 +184,4 @@ function main(): void {
   process.exitCode = 1;
 }
 
-main();
+await main();
