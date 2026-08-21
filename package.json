@@ -57,6 +57,7 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^4.1.10",
+    "@webgpu/types": "^0.1.72",
     "fake-indexeddb": "^6.0.0",
     "typescript": "^5.7.2",
     "vitest": "^4.1.10"

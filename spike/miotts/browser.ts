@@ -10,7 +10,7 @@ import {
   type DownloadEstimate,
   type Progress,
 } from "./assets.js";
-import { MAX_SEQ_LEN, maxNewFor } from "./constants.js";
+import { MAX_SEQ_LEN, maxNewFor } from "../../src/engine/miotts/constants.js";
 import { cpuBackend, decode, MIOCODEC_24K, Weights, type Backend } from "../miocodec/decoder.js";
 import { encodeGlobal } from "../miocodec/encoder.js";
 import { Gpu, gpuBackend } from "../miocodec/gpu.js";
