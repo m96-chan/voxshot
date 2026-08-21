@@ -6,7 +6,8 @@ import { rmsnorm } from "web-xpu-ops/ops/rmsnorm";
 import { rope } from "web-xpu-ops/ops/rope";
 import { KVCache } from "../../../web-xpu-ops/llm/kv-cache.js";
 import { mergeHeadsMajor, splitHeadsMajor } from "../../../web-xpu-ops/llm/reshape.js";
-import { sampleNext, type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
+import { type SamplerOptions } from "../../../web-xpu-ops/llm/sampler.js";
+import { sampleNextTopK } from "./sampler.js";
 import { gatherDequantRow, type PackedQ8, type Qwen3WeightsQ8 } from "./weights-q8.js";
 
 /**
@@ -282,8 +283,10 @@ export interface GenerateQ8Options {
 
 /**
  * One prefill, then the KV-cached decode path, sampling each step with
- * `llm/sampler.js`. Greedy by default — `{mode: "greedy"}` is argmax, so the
- * default call is comparable against the golden's greedy dumps.
+ * `sampler.js` — this spike's front end for `llm/sampler.js`, which picks the
+ * same id ~14x faster in top-p mode (ISSUE #120). Greedy is delegated to
+ * upstream unchanged, so the default call is still argmax and still comparable
+ * against the golden's greedy dumps.
  */
 export function generateQ8(
   promptIds: number[],
@@ -298,7 +301,7 @@ export function generateQ8(
   const out: number[] = [];
   for (let step = 0; step < maxNew; step += 1) {
     opts.onLogits?.(step, logits);
-    const id = sampleNext(logits, [...promptIds, ...out], sampler);
+    const id = sampleNextTopK(logits, [...promptIds, ...out], sampler);
     out.push(id);
     if (stopAtEos && weights.config.eosIds.includes(id)) break;
     if (step + 1 < maxNew) logits = runner.decodeStep(id);
