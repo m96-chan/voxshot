@@ -119,13 +119,24 @@ wrong answer twice.
 `Gpu` therefore takes a `retain` argument and holds whatever produced the
 device. That is not defensiveness, it is the fix.
 
-This looks like it may be web-xpu-ops #107 / #49 / #68. "A test that takes more
-than a few milliseconds before its first dispatch" and "a file that holds too
-many dispatches" are both descriptions of *more time for the collector to run*,
-and vitest necessarily calls a test body as a function — so an instance created
-there is unreachable the moment the body returns, which would explain why no
-pool configuration helped. Sent upstream as a hypothesis with the repro, not as
-a diagnosis: Dawn's own source has not been read here.
+Sent upstream as a hypothesis rather than a diagnosis — Dawn's own source has
+not been read here — and **upstream confirmed it**. `harness/wgsl.ts`'s
+`createRunner` was exactly this shape, and an A-B-A on `ops/gqa/wgsl.test.ts`
+(the file web-xpu-ops #68 recorded as 0/5) went **0/5 with main, 5/5 holding
+the instance in module scope, 0/4 after reverting**, with nothing else changed.
+Four issues there — #38, #49, #68, #107 — had been accumulating descriptions of
+the symptom for three weeks: "a test that takes more than a few milliseconds
+before its first dispatch", "a file that holds too many dispatches". Both are
+descriptions of *more opportunity for the collector to run*, and vitest calls a
+test body as a function, so an instance created there is unreachable the moment
+the body returns — which is why no pool configuration ever helped.
+
+**It is not the whole story, and that matters.** Upstream's
+`llm/engine-q8-resident.wgsl.test.ts` stayed at 2/3 with the reference held. It
+builds ~45 pipelines, and a separate limit on total GPU objects appears to be at
+work there. Two independent causes producing one symptom is a good explanation
+for why this looked like flake for so long: fixing either one alone leaves the
+failures in place, so neither looks like a cause.
 
 ## The round trip, on real speech
 
