@@ -131,12 +131,16 @@ descriptions of *more opportunity for the collector to run*, and vitest calls a
 test body as a function, so an instance created there is unreachable the moment
 the body returns — which is why no pool configuration ever helped.
 
-**It is not the whole story, and that matters.** Upstream's
-`llm/engine-q8-resident.wgsl.test.ts` stayed at 2/3 with the reference held. It
-builds ~45 pipelines, and a separate limit on total GPU objects appears to be at
-work there. Two independent causes producing one symptom is a good explanation
-for why this looked like flake for so long: fixing either one alone leaves the
-failures in place, so neither looks like a cause.
+**How much of the story it is remains open.** Upstream's
+`llm/engine-q8-resident.wgsl.test.ts` measured 2/3 during the experiment and
+3/3 on a retest, which is too few runs to call either way. That file builds ~45
+pipelines, and a separate limit on total GPU objects may still be at work there,
+so upstream's PR states the claim as "at least three of the four issues" rather
+than all of them.
+
+Two independent causes producing one symptom would be a good explanation for
+why this read as flake for so long: fixing either alone leaves failures
+standing, so neither looks like a cause.
 
 ## The round trip, on real speech
 
