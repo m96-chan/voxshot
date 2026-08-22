@@ -74,6 +74,9 @@ function peakRelative(mine: Float32Array, reference: Float32Array): number {
 }
 
 const config = decoderConfig();
+// `gpu` and `adapter` are held for the whole run on purpose — see Gpu's
+// `retain` doc. Letting them go collects the instance out from under the
+// device, and the dispatches crash.
 const gpu = create([]);
 const adapter = await gpu.requestAdapter();
 if (!adapter) throw new Error("no WebGPU adapter — check the driver, not this script");
@@ -86,7 +89,7 @@ const device = await adapter.requestDevice({
 const info = adapter.info
   ? [adapter.info.vendor, adapter.info.architecture].filter(Boolean).join(" ") || "unknown"
   : "unknown";
-const backend = gpuBackend(Gpu.fromDevice(device, info));
+const backend = gpuBackend(Gpu.fromDevice(device, info, [gpu, adapter]));
 
 const latentShape = index.tensors.latent_mean!.shape as [number, number, number];
 const latent: Signal = {

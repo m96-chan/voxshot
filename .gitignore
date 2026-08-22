@@ -164,3 +164,4 @@ spike/dacvae/.venv/
 spike/dacvae/golden/
 spike/dacvae/weights/
 spike/dacvae/node_modules/
+spike/dacvae/roundtrip/

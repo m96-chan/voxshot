@@ -30,6 +30,18 @@ import { CONV1D, CONV_TRANSPOSE1D, SNAKE } from "./kernels.js";
 
 const WORKGROUP = 256;
 
+/**
+ * `maxComputeWorkgroupsPerDimension`, the spec's guaranteed minimum and what
+ * most implementations actually report — including this one.
+ *
+ * It binds on `snake` and nothing else. The convolutions dispatch
+ * `[ceil(Lout/256), Cout]`, and both stay small. `snake` flattens `C * L` into
+ * one dimension, so at 48 kHz it crosses 65,535 after about 3.5 seconds of
+ * audio: 192 channels x 96,000 samples / 256 = 72,000 workgroups. Measured, as
+ * a validation failure rather than as wrong numbers.
+ */
+const MAX_WORKGROUPS_PER_DIMENSION = 65535;
+
 export class Gpu {
   private readonly pipelines = new Map<string, GPUComputePipeline>();
   /**
@@ -43,10 +55,26 @@ export class Gpu {
   private constructor(
     readonly device: GPUDevice,
     readonly adapterInfo: string,
+    /**
+     * Whatever produced the device, held so it cannot be collected.
+     *
+     * **Not defensive.** Dawn's Node binding does not keep its `GPU` instance
+     * alive from the `GPUDevice`, so once the instance becomes unreachable the
+     * collector takes it and later dispatches crash — as a futex abort, a
+     * segfault, or a hang, whichever the race lands on. Measured: 200
+     * dispatches with the instance dropped fail 3 times out of 3, and the
+     * identical code holding a reference passes 3 out of 3.
+     *
+     * This is very likely what web-xpu-ops #107 / #49 / #68 are: "a test that
+     * takes more than a few milliseconds before its first dispatch" and "a file
+     * that holds too many dispatches" are both descriptions of *more time for
+     * the collector to run*, which is why no vitest pool configuration helped.
+     */
+    private readonly retain: unknown,
   ) {}
 
-  static fromDevice(device: GPUDevice, info: string): Gpu {
-    return new Gpu(device, info);
+  static fromDevice(device: GPUDevice, info: string, retain?: unknown): Gpu {
+    return new Gpu(device, info, retain);
   }
 
   private pipeline(code: string): GPUComputePipeline {
@@ -131,6 +159,10 @@ export class Gpu {
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
 
+    // A validation scope around the whole recording. Without it the first
+    // failure surfaces as "[Invalid CommandBuffer] is invalid due to a previous
+    // error" at submit time, which names the symptom and not the cause.
+    device.pushErrorScope("validation");
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
@@ -139,6 +171,14 @@ export class Gpu {
     pass.end();
     encoder.copyBufferToBuffer(output, 0, staging, 0, bytes);
     device.queue.submit([encoder.finish()]);
+    const invalid = await device.popErrorScope();
+    if (invalid) {
+      throw new Error(
+        `dispatch failed: ${invalid.message}\n` +
+          `  output ${outputLength} elements, workgroups ${workgroups.join(" x ")}, ` +
+          `uniforms [${uniforms.join(", ")}]`,
+      );
+    }
 
     await staging.mapAsync(GPUMapMode.READ);
     const result = new Float32Array(staging.getMappedRange().slice(0, outputLength * 4));
@@ -211,20 +251,57 @@ export class Gpu {
     }
   }
 
-  /** The learned per-channel periodic activation. */
+  /**
+   * The learned per-channel periodic activation.
+   *
+   * Chunked by channel when the flat dispatch would exceed
+   * {@link MAX_WORKGROUPS_PER_DIMENSION}. A run of whole channels is itself a
+   * valid `[C', L]` snake with a sliced alpha, so this stays inside the op's
+   * own contract rather than reaching for a second dispatch dimension the
+   * kernel does not read.
+   */
   async snake(input: Float32Array, alpha: Float32Array, C: number, L: number): Promise<Float32Array> {
-    const inputBuffer = this.upload(input);
-    try {
-      return await this.dispatch(
-        SNAKE,
-        [inputBuffer, this.residentBuffer(alpha)],
-        C * L,
-        [1, C, L],
-        [Math.ceil((C * L) / WORKGROUP)],
-      );
-    } finally {
-      inputBuffer.destroy();
+    const perChannel = Math.ceil(L / WORKGROUP);
+    const channelsPerChunk = Math.max(1, Math.floor(MAX_WORKGROUPS_PER_DIMENSION / perChannel));
+    if (channelsPerChunk >= C) {
+      const inputBuffer = this.upload(input);
+      try {
+        return await this.dispatch(
+          SNAKE,
+          [inputBuffer, this.residentBuffer(alpha)],
+          C * L,
+          [1, C, L],
+          [Math.ceil((C * L) / WORKGROUP)],
+        );
+      } finally {
+        inputBuffer.destroy();
+      }
     }
+
+    const out = new Float32Array(C * L);
+    for (let first = 0; first < C; first += channelsPerChunk) {
+      const count = Math.min(channelsPerChunk, C - first);
+      const slice = input.subarray(first * L, (first + count) * L);
+      // `subarray` on alpha would keep the whole array alive as a resident
+      // buffer key; a copy is 4 bytes per channel and keeps the cache honest.
+      const alphaSlice = alpha.slice(first, first + count);
+      const inputBuffer = this.upload(slice);
+      try {
+        out.set(
+          await this.dispatch(
+            SNAKE,
+            [inputBuffer, this.residentBuffer(alphaSlice)],
+            count * L,
+            [1, count, L],
+            [Math.ceil((count * L) / WORKGROUP)],
+          ),
+          first * L,
+        );
+      } finally {
+        inputBuffer.destroy();
+      }
+    }
+    return out;
   }
 
   destroy(): void {

@@ -90,24 +90,65 @@ honest unoptimised one.
 For scale, the reference implementations on the CPU are RTF 138 — they are the
 definition of correct and the slowest thing here, exactly as intended.
 
-## A Dawn limitation, not isolated
+## Dawn collects the instance out from under the device
 
-`check-gpu.ts` is a separate script rather than a flag on `check.ts`, and that
-is a measured environment limitation. Driving the same dispatches from inside
-`check.ts`'s nested async structure aborts Dawn's Node binding —
-`std::system_error: Invalid argument`, which glibc words as "the futex facility
-returned an unexpected error code" — reproducibly, 3 runs out of 3, before the
-first stage completes. At module top level, with comparisons deferred until
-after the decode, the identical sequence runs clean.
+Getting the GPU path to run at all took finding this, and it is the most
+generally useful thing in the spike.
 
-Two plausible explanations were tested and **both are wrong**: heavy CPU work
-between dispatches (64 MB of allocate-and-scan per stage) does not reproduce
-it, and neither do file reads between dispatches. Something else is the
-trigger, and this has not been narrowed to one variable — the working script
-differs from the failing one in more than one way. It is written down rather
-than reported upstream for exactly that reason; web-xpu-ops #107 already covers
-"the Node+Dawn binding crashes", and a half-diagnosed report would cost them
-more than it tells them.
+**Dawn's Node binding does not keep its `GPU` instance alive from the
+`GPUDevice`.** Once the instance becomes unreachable the collector takes it,
+and dispatches after that crash — as a futex abort
+(`std::system_error: Invalid argument`), a segfault, or a hang, whichever the
+race lands on. Measured on 200 trivial dispatches, three runs each:
+
+| how the device was made | result |
+| --- | --- |
+| inside an async function, instance and adapter dropped | hang / hang / abort |
+| **inside the same async function, instance and adapter held** | **ok / ok / ok** |
+| at module top level | ok / ok / ok |
+
+The only difference between the first two rows is a reference. Fifty dispatches
+pass; a hundred start failing — so it is not the count but how much opportunity
+the collector has had.
+
+Two other explanations were tested first and **both were wrong**: heavy CPU work
+between dispatches (64 MB of allocate-and-scan per stage) does not reproduce it,
+and nor do file reads between them. Guessing would have produced a confident
+wrong answer twice.
+
+`Gpu` therefore takes a `retain` argument and holds whatever produced the
+device. That is not defensiveness, it is the fix.
+
+This looks like it may be web-xpu-ops #107 / #49 / #68. "A test that takes more
+than a few milliseconds before its first dispatch" and "a file that holds too
+many dispatches" are both descriptions of *more time for the collector to run*,
+and vitest necessarily calls a test body as a function — so an instance created
+there is unreachable the moment the body returns, which would explain why no
+pool configuration helped. Sent upstream as a hypothesis with the repro, not as
+a diagnosis: Dawn's own source has not been read here.
+
+## The round trip, on real speech
+
+    port vs reference : peak-relative 1.827e-6   correlation 1.000000
+    round trip vs input: correlation 0.9859     rms 0.1245 against 0.1232
+    4.00 s of audio in 2.04 s — RTF 0.51
+
+Both are reported because they answer different questions. The first is about
+this code and sits at the f32 noise floor. The second is about the **codec**,
+which no amount of correct porting can improve — a disappointing reconstruction
+would be Meta's and Aratako's, not ours. The CPU and GPU backends give the same
+0.9859.
+
+`roundtrip.ts` writes `input.wav`, `reference.wav` and `port.wav`. The numbers
+are a summary; the files are the answer, and someone has to listen to them.
+
+**`snake` needed chunking to get here.** It flattens `C * L` into one dispatch
+dimension, so past about 3.5 seconds of 48 kHz audio it asks for 72,000
+workgroups against a limit of 65,535 — which a browser hits too, that being the
+spec's guaranteed minimum. It is chunked by channel: a run of whole channels is
+itself a valid snake with a sliced alpha, so this stays inside the op's contract
+rather than reaching for a dimension the kernel does not read. The convolutions
+are unaffected; they dispatch `[ceil(Lout/256), Cout]`.
 
 **`snake` works, and our understanding of its contract was right.** DACVAE
 computes `x + (alpha + 1e-9).reciprocal() * sin(alpha*x)²` and upstream's
