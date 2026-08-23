@@ -262,3 +262,30 @@ all left the waveform comparison green. Comparing the LUFS value itself is what
 made them fail, and what caught the real bug: `julius.core.unfold` zero-pads the
 tail so every sample is covered by a block, and dropping that partial block was
 0.011 LUFS.
+
+## Running the decode path, rather than checking it
+
+`gpu.ts` reads every result back to a `Float32Array`. That is the right shape
+for `check.ts`, where each stage has to be compared against a golden anyway, and
+the wrong shape for a request. Profiling said so precisely:
+
+```
+  decoder_model_3   2030 ms   127.5 MB
+  decoder_model_4   1859 ms   127.5 MB
+```
+
+Nine operations each, over a tensor copied down and back up between every one.
+
+`gpu-resident.ts` and `decode-gpu.ts` are the same graph with the tensors left
+on the device — **3269 ms to 871 ms** for 6.92 s of audio, agreeing with the
+readback path to 1.05e-7 of peak.
+
+**The workgroup limit is real and it is 65535 on this adapter**, even after
+asking for the adapter's own maximum. `snake` already chunked by channel for
+that reason; `add` and `tanh` did not, because every shape that reached them in
+a test was smaller than one that reaches them in a four-second utterance — 96
+channels of 332160 samples is 124560 workgroups. All three chunk now, and the
+pieces are bound as windows rather than copied.
+
+The engine is the same shape as `spike/irodori`'s. Two spikes now want one, and
+it is written twice; that is the point at which it should move somewhere shared.

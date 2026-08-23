@@ -63,6 +63,8 @@ export interface Tensor {
   readonly length: number;
   /** Identity for the bind-group cache; buffers have none of their own. */
   readonly uid: number;
+  /** Element offset into `buffer`, for a {@link Gpu.view}. */
+  readonly offset?: number;
 }
 
 const WORKGROUP = 256;
@@ -169,6 +171,7 @@ export class Gpu {
   }
 
   private write(tensor: Tensor, data: Float32Array | Int32Array): void {
+    if (tensor.offset) throw new Error("write into a view is not supported");
     // Through a plain `ArrayBuffer` view: `writeBuffer` refuses a
     // `SharedArrayBuffer`-backed one and TypeScript cannot tell them apart.
     this.device.queue.writeBuffer(
@@ -198,6 +201,33 @@ export class Gpu {
     const tensor = this.alloc(data.length);
     this.write(tensor, data);
     return tensor;
+  }
+
+  /**
+   * A window onto part of a tensor, without copying.
+   *
+   * Splitting a fused projection — `Wqkv`'s three parts, the GeGLU's two — is
+   * otherwise a copy per part per layer. A bind group can carry an offset
+   * instead, so the split costs nothing.
+   *
+   * The offset must be a multiple of `minStorageBufferOffsetAlignment`, 256
+   * bytes. Every split this port makes is on a multiple of the model dimension,
+   * which is 768 or 1280 floats — 3072 or 5120 bytes — so the check below is a
+   * guard against a future shape, not against these.
+   */
+  view(tensor: Tensor, offset: number, length: number): Tensor {
+    const bytes = ((tensor.offset ?? 0) + offset) * 4;
+    if (bytes % 256 !== 0) {
+      throw new Error(`view at element ${offset} is ${bytes} bytes in, not a multiple of 256`);
+    }
+    return {
+      buffer: tensor.buffer,
+      length,
+      // Distinct from the parent's, so the bind-group cache does not confuse
+      // two windows onto the same buffer.
+      uid: tensor.uid * 1_000_003 + offset,
+      offset: (tensor.offset ?? 0) + offset,
+    };
   }
 
   /** {@link writeInto} for indices. */
@@ -261,7 +291,9 @@ export class Gpu {
     if (!bindGroup) {
       const entries: GPUBindGroupEntry[] = tensors.map((tensor, binding) => ({
         binding,
-        resource: { buffer: tensor.buffer },
+        resource: tensor.offset
+          ? { buffer: tensor.buffer, offset: tensor.offset * 4, size: tensor.length * 4 }
+          : { buffer: tensor.buffer, size: tensor.length * 4 },
       }));
       entries.push({ binding: tensors.length, resource: { buffer: this.uniform(words, floats) } });
       bindGroup = this.device.createBindGroup({

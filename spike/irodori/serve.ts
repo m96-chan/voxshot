@@ -8,8 +8,9 @@ import { create, globals } from "webgpu";
 Object.assign(globalThis, globals);
 
 import { gpuBackend, Gpu as CodecGpu } from "../dacvae/gpu.js";
-import { decode } from "../dacvae/decoder.js";
+import { decodeGpu } from "../dacvae/decode-gpu.js";
 import { encode } from "../dacvae/encoder.js";
+import { ResidentGpu } from "../dacvae/gpu-resident.js";
 import { normalizeLoudness } from "../dacvae/loudness.js";
 import { loadBertWeights } from "./bert-weights.js";
 import { conditionNorm, prependMeanToken, project } from "./conditions.js";
@@ -17,7 +18,8 @@ import type { Context } from "./dit.js";
 import { framesFrom, predictDuration } from "./duration.js";
 import { Gpu } from "./gpu.js";
 import { loadModelWeights } from "./model-weights.js";
-import { realLength, runModernBert } from "./modernbert.js";
+import { realLength } from "./modernbert.js";
+import { prepareBert, runBertGpu } from "./modernbert-gpu.js";
 import { sampleGpu } from "./sampler-gpu.js";
 import { patchReference, runSpeakerEncoder } from "./speaker-encoder.js";
 import { normalizeText } from "./text.js";
@@ -138,7 +140,11 @@ async function main(): Promise<void> {
   const retain = [instance, adapter];
   const gpu = Gpu.fromDevice(device, info, retain);
   gpu.begin();
+  // Two engines on one device. The encoder still uses the readback path — it
+  // runs once at startup, where four seconds is not worth a second port — and
+  // the decoder uses the resident one, where it was most of every request.
   const codec = gpuBackend(CodecGpu.fromDevice(device, info, retain));
+  const codecResident = new ResidentGpu(device, info, retain);
 
   const started = Date.now();
   const bert = loadBertWeights(join(GOLDEN, "bert")).weights;
@@ -203,12 +209,10 @@ async function main(): Promise<void> {
     const real = realLength(textKeep);
 
     const t1 = Date.now();
-    const backbone = runModernBert({
-      weights: bert,
-      inputIds: ids.subarray(0, real),
-      keep: textKeep.slice(0, real),
-    });
-    const projected = project(backbone.hidden, textKeep.slice(0, real), weights.projectors.text, weights.normEps);
+    const backbone = await gpu.read(
+      runBertGpu(prepareBert(gpu, bert, ids.subarray(0, real), textKeep.slice(0, real))),
+    );
+    const projected = project(backbone, textKeep.slice(0, real), weights.projectors.text, weights.normEps);
     const textState = conditionNorm(projected, weights.norms.text, real, config.text_dim, weights.normEps);
     const textContext: Context = { state: textState, keep: textKeep.slice(0, real) };
 
@@ -270,10 +274,8 @@ async function main(): Promise<void> {
         channelMajor[d * frames + frame] = latent[frame * config.latent_dim + d]!;
       }
     }
-    const audio = await decode(
-      { channels: config.latent_dim, length: frames, data: channelMajor },
-      { backend: codec },
-    );
+    const decoded = decodeGpu(codecResident, codecResident.writeInto("codec.latent", channelMajor), frames);
+    const audio = { data: await codecResident.read(decoded.tensor), length: decoded.length };
     const t5 = Date.now();
 
     return {
