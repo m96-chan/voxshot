@@ -3,6 +3,9 @@ import { join } from "node:path";
 
 import type { TextBlockWeights } from "./blocks.js";
 import type { DitBlockWeights, DitShape } from "./dit.js";
+import type { ProjectorWeights } from "./conditions.js";
+import { type DurationWeights, loadDurationWeights } from "./duration.js";
+import type { CondModuleWeights } from "./sampler.js";
 import { speakerBlocks } from "./speaker-encoder.js";
 
 /**
@@ -38,6 +41,9 @@ export interface ModelConfig {
   use_caption_condition: boolean;
   use_speaker_condition: boolean;
   max_text_len: number;
+  /** Filled in from the tensor shapes, not from the checkpoint's config. */
+  pretrained_hidden: number;
+  projector_hidden: number;
 }
 
 export interface SpeakerWeights {
@@ -70,6 +76,12 @@ export interface ModelWeights {
   normEps: number;
   speaker: SpeakerWeights;
   dit: DitWeights;
+  cond: CondModuleWeights;
+  /** `text_encoder` and `caption_encoder` — the same module, different weights. */
+  projectors: Record<"text" | "caption", ProjectorWeights>;
+  /** `text_norm`, `caption_norm`; the speaker's lives on {@link SpeakerWeights}. */
+  norms: Record<"text" | "caption", Float32Array>;
+  duration: DurationWeights;
   /** Every tensor, for the parts not yet given a shaped view. */
   raw: (name: string) => Float32Array;
 }
@@ -102,6 +114,13 @@ export function loadModelWeights(dir: string): ModelWeights {
   };
 
   const config = index.config;
+  // Not in `config_json`: the backbone's width, and the projector's hidden
+  // size. Both are derivable — 768 is ModernBERT-ja's `hidden_size`, and the
+  // reference computes `max(1, round(output_dim * hidden_ratio))` — but taking
+  // them from the tensors that exist means a different checkpoint cannot make
+  // them quietly wrong.
+  config.pretrained_hidden = index.tensors["text_encoder.residual_norm.weight"]!.shape[0]!;
+  config.projector_hidden = index.tensors["text_encoder.residual_up.bias"]!.shape[0]!;
   const speakerDim = config.speaker_dim;
   const speaker: SpeakerWeights = {
     dim: speakerDim,
@@ -196,7 +215,50 @@ export function loadModelWeights(dir: string): ModelWeights {
     inProjBias: raw("in_proj.bias"),
   };
 
-  return { config, normEps: config.norm_eps, speaker, dit, raw };
+  // `nn.Sequential(Linear, SiLU, Linear, SiLU, Linear)` — the SiLUs occupy
+  // indices 1 and 3, which is why the weights are named 0, 2 and 4.
+  const cond: CondModuleWeights = {
+    in1: transposeOf(raw("cond_module.0.weight"), dim, config.timestep_embed_dim),
+    in2: transposeOf(raw("cond_module.2.weight"), dim, dim),
+    out: transposeOf(raw("cond_module.4.weight"), 3 * dim, dim),
+    embedDim: config.timestep_embed_dim,
+  };
+
+  const projectorFor = (at: string, outDim: number): ProjectorWeights => ({
+    projector: transposeOf(raw(`${at}.projector.weight`), outDim, config.pretrained_hidden),
+    projectorBias: raw(`${at}.projector.bias`),
+    residualNorm: raw(`${at}.residual_norm.weight`),
+    residualUp: transposeOf(raw(`${at}.residual_up.weight`), config.projector_hidden, config.pretrained_hidden),
+    residualUpBias: raw(`${at}.residual_up.bias`),
+    residualDown: transposeOf(raw(`${at}.residual_down.weight`), outDim, config.projector_hidden),
+    residualDownBias: raw(`${at}.residual_down.bias`),
+    inDim: config.pretrained_hidden,
+    outDim,
+    hidden: config.projector_hidden,
+  });
+
+  return {
+    config,
+    normEps: config.norm_eps,
+    speaker,
+    dit,
+    cond,
+    projectors: {
+      text: projectorFor("text_encoder", config.text_dim),
+      caption: projectorFor("caption_encoder", config.caption_dim ?? config.text_dim),
+    },
+    norms: { text: raw("text_norm.weight"), caption: raw("caption_norm.weight") },
+    duration: loadDurationWeights(
+      raw,
+      (name) => {
+        const entry = index.tensors[name];
+        if (!entry) throw new Error(`${name} is not in golden/model/index.json`);
+        return entry.shape;
+      },
+      config.text_dim,
+    ),
+    raw,
+  };
 }
 
 function transposeOf(source: Float32Array, out: number, inn: number): Float32Array {

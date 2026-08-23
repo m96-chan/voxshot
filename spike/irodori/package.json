@@ -8,7 +8,10 @@
     "typecheck": "tsc --noEmit",
     "check:bert": "tsx check-bert.ts",
     "check:speaker": "tsx check-speaker.ts",
-    "check:dit": "tsx check-dit.ts"
+    "check:dit": "tsx check-dit.ts",
+    "check:sampler": "tsx check-sampler.ts",
+    "check:conditions": "tsx check-conditions.ts",
+    "check:duration": "tsx check-duration.ts"
   },
   "dependencies": {
     "web-xpu-ops": "^0.2.0"
