@@ -77,6 +77,30 @@ export class Gpu {
     return new Gpu(device, info, retain);
   }
 
+  /**
+   * A device that can bind the encoder's first activation.
+   *
+   * `encoder.block.0` widens a 48 kHz waveform to 64 channels before anything
+   * downsamples it: a 20-second clip is 64 x 950400 x 4 bytes = **243 MB**,
+   * against WebGPU's default `maxStorageBufferBindingSize` of 128 MiB. The
+   * decode path never comes close, because it only reaches full rate at one
+   * channel.
+   *
+   * This asks for what the adapter reports rather than for a number, and it is
+   * a real constraint on a browser port, not a quirk of this harness — a
+   * browser whose adapter caps at the default cannot encode a reference clip
+   * this long in one piece and would have to chunk along time.
+   */
+  static async requestDevice(adapter: GPUAdapter): Promise<GPUDevice> {
+    const wanted = ["maxStorageBufferBindingSize", "maxBufferSize"] as const;
+    const requiredLimits: Record<string, number> = {};
+    for (const name of wanted) {
+      const supported = adapter.limits[name];
+      if (typeof supported === "number") requiredLimits[name] = supported;
+    }
+    return adapter.requestDevice({ requiredLimits });
+  }
+
   private pipeline(code: string): GPUComputePipeline {
     let pipeline = this.pipelines.get(code);
     if (!pipeline) {
@@ -190,7 +214,7 @@ export class Gpu {
     return result;
   }
 
-  /** `conv1d` at stride 1 — the only stride the decode path uses. */
+  /** `conv1d`. The decode path is all stride 1; the encoder downsamples. */
   async conv1d(
     input: Float32Array,
     weight: Float32Array,
@@ -201,15 +225,17 @@ export class Gpu {
     K: number,
     padding: number,
     dilation: number,
+    stride = 1,
   ): Promise<Float32Array> {
-    const outLength = L + 2 * padding - dilation * (K - 1);
+    // torch's formula, not the stride-1 shortcut the decode path could use.
+    const outLength = Math.floor((L + 2 * padding - dilation * (K - 1) - 1) / stride) + 1;
     const inputBuffer = this.upload(input);
     try {
       return await this.dispatch(
         CONV1D,
         [inputBuffer, this.residentBuffer(weight), this.residentBuffer(bias ?? zeros(Cout))],
         Cout * outLength,
-        [Cin, Cout, L, K, outLength, 1, padding, dilation, Cin, Cout, 0, 0],
+        [Cin, Cout, L, K, outLength, stride, padding, dilation, Cin, Cout, 0, 0],
         [Math.ceil(outLength / WORKGROUP), Cout, 1],
       );
     } finally {
@@ -329,8 +355,8 @@ function zeros(length: number): Float32Array {
 export function gpuBackend(gpu: Gpu): Backend {
   return {
     name: `WebGPU (${gpu.adapterInfo})`,
-    conv1d: ({ input, weight, bias, Cin, Cout, L, K, padding, dilation }) =>
-      gpu.conv1d(input, weight, bias, Cin, Cout, L, K, padding, dilation),
+    conv1d: ({ input, weight, bias, Cin, Cout, L, K, padding, dilation, stride }) =>
+      gpu.conv1d(input, weight, bias, Cin, Cout, L, K, padding, dilation, stride ?? 1),
     convTranspose1d: ({ input, weight, bias, Cin, Cout, L, K, stride, padding, outputPadding }) =>
       gpu.convTranspose1d(input, weight, bias, Cin, Cout, L, K, stride, padding, outputPadding),
     snake: ({ input, alpha, C, L }) => gpu.snake(input, alpha, C, L),

@@ -6,12 +6,17 @@
 parse one. This writes the same shape of artifact the goldens use — one file
 per tensor plus an index carrying shapes and digests.
 
-## Only what the decode path reaches
+## Only what a real run reaches
 
-The encoder is 27 M parameters that decoding never touches, and 14.7 M more sit
-in branches `forward()` walks past (see `dump_golden.py`'s doc for which). None
-of it is written, so the port cannot accidentally depend on something the
-browser would then have to download.
+14.7 M parameters sit in branches `forward()` walks past (see `dump_golden.py`'s
+doc for which). None of them is written, so the port cannot accidentally depend
+on something the browser would then have to download.
+
+The encoder's 27 M *are* written now. They were not at first — decoding never
+touches them — but `spike/irodori` needs them: cloning a voice means turning a
+reference clip into a latent, and a text-to-speech pipeline that can only speak
+in one recorded voice is a partial pipeline. It is the decoder mirrored and
+needs no operation the decoder did not already need.
 
 `weight_g`/`weight_v` pairs are written as they are, not folded — folding is
 `weights.ts`' job, and doing it here would hide from the port the fact that the
@@ -45,7 +50,17 @@ TAIL_PREFIX = "decoder.wm_model.encoder_block.pre."
 TAIL_KEPT = {0, 1, 2}
 
 
+# The encode path, added after `spike/irodori` needed it: cloning a voice means
+# turning a reference clip into a latent, and only the decode side was dumped
+# the first time. It is the decoder mirrored — conv, snake, conv, over
+# `encoder_rates` [2, 8, 10, 12] — so it needs no operation the decoder did not
+# already need.
+ENCODER_PREFIXES = ("encoder.", "quantizer.in_proj")
+
+
 def wanted(key: str) -> bool:
+    if key.startswith(ENCODER_PREFIXES):
+        return True
     if key.startswith("quantizer.out_proj"):
         return True  # 32 -> 1024, the decode side of the VAE bottleneck
     if key.startswith(TAIL_PREFIX):
@@ -98,6 +113,8 @@ def main() -> None:
             "latent_dim": int(metadata["codebook_dim"]),
             "decoder_dim": int(metadata["decoder_dim"]),
             "decoder_rates": list(metadata["decoder_rates"]),
+            "encoder_dim": int(metadata["encoder_dim"]),
+            "encoder_rates": list(metadata["encoder_rates"]),
         },
         "checkpoint": {"file": "weights.pth", "sha256": sha256_of(checkpoint)},
         "tensors": tensors,
@@ -110,7 +127,7 @@ def main() -> None:
     (OUT / "index.json").write_text(json.dumps(index, indent=2) + "\n")
     print(f"wrote {len(tensors)} tensors to {OUT}")
     print(f"  kept    {kept / 1e6:7.2f} M parameters")
-    print(f"  skipped {skipped / 1e6:7.2f} M (encoder, watermark branches)")
+    print(f"  skipped {skipped / 1e6:7.2f} M (watermark branches)")
 
 
 if __name__ == "__main__":

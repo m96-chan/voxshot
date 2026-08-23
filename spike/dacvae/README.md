@@ -222,3 +222,43 @@ stopping there returns 96 channels, which is not a waveform.
 
 `facebookresearch/dacvae` is Apache-2.0. `Aratako/Semantic-DACVAE-Japanese-32dim`
 and `Aratako/Irodori-TTS` are MIT.
+
+## The encode path
+
+Added after `spike/irodori` needed it: cloning a voice means turning a reference
+clip into a latent, and only the decode side existed. It is the decoder
+mirrored — three residual units then `snake -> conv(stride=rate)` where the
+decoder does `snake -> convTranspose -> three residual units` — and needs no
+operation the decoder did not, only a stride the seam here had assumed was 1.
+
+```bash
+npm run check:encode -- --gpu
+```
+
+Three things came out of it that reading the code would not have given.
+
+**A 20-second clip exceeds WebGPU's default buffer limit.** `encoder.block.0`
+widens a 48 kHz waveform to 64 channels before anything downsamples it: 64 x
+950400 x 4 bytes is **243 MB**, against a default
+`maxStorageBufferBindingSize` of 128 MiB. The device now asks for what the
+adapter reports. A browser whose adapter caps at the default would have to chunk
+along time — the decode path never comes close, because it only reaches full
+rate at one channel.
+
+**The last step is a VAE, not a slice.** `quantizer.in_proj` gives 64 channels
+for a 32-dimension latent: the mean and the log-variance. Deterministic encoding
+takes the mean.
+
+**Loudness normalisation had to be ported, not noted.** `encode_waveform`
+normalises to -16 dB LUFS first; skipping it is a 3.36x gain on this clip and
+moves the latent by **50% of peak**. `loudness.ts` is BS.1770-4 with K-weighting
+biquads and the two-stage gate, matching the reference to 2.6e-5 LUFS.
+
+That number is checked directly, and it has to be. The gain here takes the peak
+past full scale, so `ensure_max_of_audio` scales it back to exactly 1.0 and the
+normalised waveform becomes `raw / peak` — **the same signal whatever the meter
+measured**. Breaking the relative gate, the block overlap or the -0.691 offset
+all left the waveform comparison green. Comparing the LUFS value itself is what
+made them fail, and what caught the real bug: `julius.core.unfold` zero-pads the
+tail so every sample is covered by a block, and dropping that partial block was
+0.011 LUFS.

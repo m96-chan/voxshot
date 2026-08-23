@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit",
     "check:gpu": "tsx check-gpu.ts",
     "gen:kernels": "node gen-kernels.mjs",
-    "roundtrip": "tsx roundtrip.ts"
+    "roundtrip": "tsx roundtrip.ts",
+    "check:encode": "tsx check-encode.ts"
   },
   "dependencies": {
     "web-xpu-ops": "^0.2.0"

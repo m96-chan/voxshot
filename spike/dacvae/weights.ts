@@ -45,6 +45,8 @@ export interface WeightIndex {
     latent_dim: number;
     decoder_dim: number;
     decoder_rates: number[];
+    encoder_dim: number;
+    encoder_rates: number[];
   };
   tensors: Record<string, TensorMeta>;
 }
