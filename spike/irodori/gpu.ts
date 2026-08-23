@@ -180,9 +180,29 @@ export class Gpu {
     );
   }
 
+  /**
+   * Write into a named slot, reusing its buffer.
+   *
+   * For values that change every step but keep their shape — the timestep's
+   * modulation vectors, `x_t`. Allocating fresh ones would miss the bind-group
+   * cache on every dispatch that reads them, which is most of the graph.
+   */
+  writeInto(slot: string, data: Float32Array): Tensor {
+    const tensor = this.scratch(slot, data.length);
+    this.write(tensor, data);
+    return tensor;
+  }
+
   /** Integer indices, for `gather`. */
   uploadInts(data: Int32Array): Tensor {
     const tensor = this.alloc(data.length);
+    this.write(tensor, data);
+    return tensor;
+  }
+
+  /** {@link writeInto} for indices. */
+  writeIntsInto(slot: string, data: Int32Array): Tensor {
+    const tensor = this.scratch(slot, data.length);
     this.write(tensor, data);
     return tensor;
   }

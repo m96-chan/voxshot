@@ -2,6 +2,7 @@ import { ACTIVATION, activation } from "web-xpu-ops/ops/activation";
 import { rmsnorm } from "web-xpu-ops/ops/rmsnorm";
 
 import { linear } from "./blocks.js";
+import type { AdaLnWeights } from "./dit.js";
 import { type Context, type ContextKv, ditBlock, projectContexts } from "./dit.js";
 import type { ModelWeights } from "./model-weights.js";
 
@@ -134,6 +135,45 @@ export function velocityFor(
     h = ditBlock(h, embedded, dit.blocks[index]!, contexts[index]!, tokens, dit.shape);
   }
   return head(h, weights, batch * tokens);
+}
+
+/**
+ * AdaLN's low-rank refinement, on the host.
+ *
+ * `[batch, dim]`-sized — about 2 MFLOP a block against the DiT's 40 GFLOP a
+ * step — so the device version keeps it here too. What crosses down is already
+ * `1 + scale` and `tanh(gate)`, which is why the graph on the device has no
+ * constants in it.
+ */
+export function adaLnVectors(
+  cond: Float32Array,
+  w: AdaLnWeights,
+  dim: number,
+  rank: number,
+  batch: number,
+): { scale: Float32Array; shift: Float32Array; gate: Float32Array } {
+  const refine = (part: number, down: Float32Array, up: Float32Array, bias: Float32Array) => {
+    const source = new Float32Array(batch * dim);
+    for (let b = 0; b < batch; b += 1) {
+      source.set(cond.subarray(b * 3 * dim + part * dim, b * 3 * dim + (part + 1) * dim), b * dim);
+    }
+    const out = linear(
+      linear(activation({ input: source.slice(), kind: ACTIVATION.silu }), down, batch, dim, rank),
+      up,
+      batch,
+      rank,
+      dim,
+      bias,
+    );
+    for (let i = 0; i < out.length; i += 1) out[i]! += source[i]!;
+    return out;
+  };
+  const shift = refine(0, w.shiftDown, w.shiftUp, w.shiftBias);
+  const scale = refine(1, w.scaleDown, w.scaleUp, w.scaleBias);
+  const gate = refine(2, w.gateDown, w.gateUp, w.gateBias);
+  for (let i = 0; i < scale.length; i += 1) scale[i]! += 1;
+  for (let i = 0; i < gate.length; i += 1) gate[i] = Math.tanh(gate[i]!);
+  return { scale, shift, gate };
 }
 
 export function sample({

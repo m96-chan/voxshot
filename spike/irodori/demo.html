@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Irodori-TTS — TypeScript 移植</title>
+<style>
+  :root {
+    --bg:#fbfaf8; --fg:#1c1a17; --muted:#6b6560; --line:#e2ddd6;
+    --card:#fff; --accent:#8a5a2b; --accent-bg:#fdf6ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#171513; --fg:#ece8e2; --muted:#9a938b; --line:#322e29;
+            --card:#201d1a; --accent:#d9a066; --accent-bg:#2a221a; }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:2.5rem 1.25rem 5rem; background:var(--bg); color:var(--fg);
+    font:16px/1.7 -apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+  }
+  main { max-width:44rem; margin:0 auto; }
+  h1 { font-size:1.5rem; margin:0 0 .3rem; letter-spacing:-.01em; }
+  .lede { color:var(--muted); margin:0 0 2rem; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1.1rem; }
+  textarea {
+    width:100%; min-height:5.5rem; resize:vertical; padding:.7rem .8rem;
+    border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg);
+    font:inherit; line-height:1.6;
+  }
+  textarea:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .row { display:flex; gap:.75rem; align-items:center; margin-top:.8rem; flex-wrap:wrap; }
+  button {
+    background:var(--accent); color:#fff; border:0; border-radius:8px;
+    padding:.6rem 1.4rem; font:inherit; font-weight:650; cursor:pointer;
+  }
+  button:disabled { opacity:.5; cursor:default; }
+  .status { color:var(--muted); font-size:.92rem; }
+  .presets { display:flex; gap:.4rem; flex-wrap:wrap; margin-top:.9rem; }
+  .presets button {
+    background:transparent; color:var(--muted); border:1px solid var(--line);
+    font-weight:400; padding:.28rem .7rem; font-size:.88rem; border-radius:999px;
+  }
+  audio { width:100%; margin-top:1rem; }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; margin-top:1rem; }
+  th,td { text-align:left; padding:.32rem .5rem; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  h2 { font-size:1.05rem; margin:2.5rem 0 .3rem; padding-bottom:.35rem; border-bottom:1px solid var(--line); }
+  .note { color:var(--muted); font-size:.92rem; }
+  code { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.88em; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Irodori-TTS v4.1 — TypeScript 移植</h1>
+<p class="lede">
+  打ち込んだ文をその場で合成します。torch は一度も呼びません。
+  トークナイザ、ModernBERT-ja 25 層、12 層の DiT、32 ステップの rectified flow、
+  DACVAE の両端 — すべてこの移植と web-xpu-ops です。
+</p>
+
+<div class="box">
+  <textarea id="text" placeholder="喋らせたい文を入れてください">こんにちは、今日はいい天気ですね。</textarea>
+  <div class="presets">
+    <button data-text="……ん。来たんだ。">……ん。来たんだ。</button>
+    <button data-text="全部追うの、無理だよ？">全部追うの、無理だよ？</button>
+    <button data-text="えっと、それはちょっと、わたしには難しいかもしれません。">えっと、それはちょっと…</button>
+    <button data-text="明日は晴れるといいですね。そうしたら、今度こそ散歩に行きましょう。">明日は晴れるといいですね…</button>
+  </div>
+  <div class="row">
+    <button id="go">合成する</button>
+    <span class="status" id="status">GPU に常駐済み。1 文あたり数秒。</span>
+  </div>
+  <audio id="player" controls hidden></audio>
+  <table id="timings" hidden>
+    <thead><tr><th>段</th><th class="num">ミリ秒</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<h2>この画面が何をしているか</h2>
+<p class="note">
+  押すたびに全段を計算しています。事前に用意した音声を再生しているのではありません。
+  声は <code>samples/reference-voice.wav</code> の 1 本で、起動時に一度だけエンコードして常駐させています
+  — 声はクリップ次第で文には依存しないので、毎回払う必要がありません。
+</p>
+<p class="note">
+  <strong>同じ文でも押すたびに音が変わります。</strong> 初期ノイズが毎回違うためで、
+  参照実装がシードを変えたときと同じ性質です。波形の一致は原理的に起きません。
+</p>
+<p class="note">
+  <strong>まだ CPU で回っている段があります。</strong> ModernBERT-ja と speaker encoder は
+  web-xpu-ops の CPU 参照実装のままで、DiT・flow・コーデックが WebGPU です。
+  下の表がその内訳で、<code>text_encoder</code> が CPU 側です。
+</p>
+<p class="note">
+  一度に 1 リクエストしか処理しません。スクラッチバッファを名前で使い回しているので、
+  同時に 2 本走らせると互いに書き潰して、エラーにならないまま両方間違えます。
+</p>
+
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const text = $("text"), go = $("go"), status = $("status"), player = $("player"), table = $("timings");
+let url = null;
+
+for (const b of document.querySelectorAll(".presets button")) {
+  b.addEventListener("click", () => { text.value = b.dataset.text; text.focus(); });
+}
+
+async function say() {
+  const value = text.value.trim();
+  if (!value) { status.textContent = "文を入れてください。"; return; }
+  go.disabled = true;
+  const began = performance.now();
+  const tick = setInterval(() => {
+    status.textContent = `合成中… ${((performance.now() - began) / 1000).toFixed(1)} 秒`;
+  }, 100);
+  try {
+    const response = await fetch(`/say?text=${encodeURIComponent(value)}`);
+    if (!response.ok) throw new Error(await response.text());
+    const timings = JSON.parse(response.headers.get("x-timings") || "{}");
+    const frames = response.headers.get("x-frames");
+    const blob = await response.blob();
+    if (url) URL.revokeObjectURL(url);
+    url = URL.createObjectURL(blob);
+    player.src = url;
+    player.hidden = false;
+    player.play().catch(() => {});
+    const seconds = (Number(frames) / 25).toFixed(2);
+    status.textContent = `${seconds} 秒の音声を ${(timings.total / 1000).toFixed(1)} 秒で。`;
+    const body = table.querySelector("tbody");
+    body.innerHTML = "";
+    for (const [name, ms] of Object.entries(timings)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${name}</td><td class="num">${ms}</td>`;
+      body.append(tr);
+    }
+    table.hidden = false;
+  } catch (error) {
+    status.textContent = `失敗: ${error.message}`;
+  } finally {
+    clearInterval(tick);
+    go.disabled = false;
+  }
+}
+
+go.addEventListener("click", say);
+text.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") say();
+});
+</script>
+</body>
+</html>

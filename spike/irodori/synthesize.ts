@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { cpuBackend, type Backend } from "../dacvae/backend.js";
+import type { Gpu as IrodoriGpu } from "./gpu.js";
 import { decode } from "../dacvae/decoder.js";
 import { encode } from "../dacvae/encoder.js";
 import { normalizeLoudness } from "../dacvae/loudness.js";
@@ -14,6 +15,7 @@ import { loadBertWeights } from "./bert-weights.js";
 import { loadModelWeights } from "./model-weights.js";
 import { runModernBert, realLength } from "./modernbert.js";
 import { sample } from "./sampler.js";
+import { sampleGpu } from "./sampler-gpu.js";
 import { patchReference, runSpeakerEncoder } from "./speaker-encoder.js";
 import { normalizeText } from "./text.js";
 import { loadTokenizer, type TokenizerJson } from "./tokenizer.js";
@@ -119,30 +121,37 @@ function stack(members: Record<string, Context>[], dim: Record<string, number>):
 }
 
 /**
- * WebGPU for the codec when there is a device, the CPU reference when not.
+ * One device for both halves, or the CPU reference for both.
  *
- * The Irodori half has no GPU backend, so this only speeds up the last stage —
- * but the last stage is a 48 kHz waveform and the CPU reference is very slow at
- * it. Falling back rather than failing keeps the script runnable on a machine
- * with no adapter; which one ran is printed either way, because "it produced
- * audio" and "it produced audio the fast way" are different claims.
+ * The Irodori half has its own engine now (`gpu.ts`) and the codec has
+ * `spike/dacvae`'s, and they share a `GPUDevice` — two devices would mean two
+ * copies of every weight. Falling back rather than failing keeps the script
+ * runnable where there is no adapter, and which one ran is printed either way:
+ * "it produced audio" and "it produced audio in seconds" are different claims.
  */
-async function codecBackend(): Promise<Backend> {
+async function acquire(): Promise<{ codec: Backend; dit: IrodoriGpu | null }> {
   try {
     const { create, globals } = await import("webgpu");
     Object.assign(globalThis, globals);
-    const { Gpu, gpuBackend } = await import("../dacvae/gpu.js");
+    const codecGpu = await import("../dacvae/gpu.js");
+    const ditGpu = await import("./gpu.js");
     const instance = create([]);
     const adapter = await instance.requestAdapter();
-    if (!adapter) return cpuBackend;
+    if (!adapter) return { codec: cpuBackend, dit: null };
     const info = adapter.info?.description ?? "unknown adapter";
+    // `requestDevice` asks for the adapter's buffer limits: the codec encoder's
+    // first activation is 243 MB for a twenty-second clip, over WebGPU's
+    // 128 MiB default.
+    const device = await ditGpu.Gpu.requestDevice(adapter);
     // `instance` and `adapter` are retained deliberately: Dawn's Node binding
     // does not keep the `GPU` alive from the `GPUDevice`.
-    //  asks for the adapter's buffer limits: the encoder's
-    // first activation is 243 MB for a 20-second clip, over the 128 MiB default.
-    return gpuBackend(Gpu.fromDevice(await Gpu.requestDevice(adapter), info, [instance, adapter]));
-  } catch {
-    return cpuBackend;
+    const retain = [instance, adapter];
+    const dit = ditGpu.Gpu.fromDevice(device, info, retain);
+    dit.begin();
+    return { codec: codecGpu.gpuBackend(codecGpu.Gpu.fromDevice(device, info, retain)), dit };
+  } catch (error) {
+    console.log(`no WebGPU (${(error as Error).message}); using the CPU reference`);
+    return { codec: cpuBackend, dit: null };
   }
 }
 
@@ -252,7 +261,7 @@ async function main(): Promise<void> {
   void backboneDim;
 
   // --- speaker ------------------------------------------------------------
-  const backend = await codecBackend();
+  const { codec: backend, dit: gpu } = await acquire();
   let refLatent: Float32Array;
   let refKeep: boolean[];
   let refDim: number;
@@ -341,16 +350,33 @@ async function main(): Promise<void> {
     if (index + 1 < noise.length) noise[index + 1] = radius * Math.sin(angle);
   }
 
-  const latent = sample({
-    weights,
-    cond: weights.cond,
-    noise,
-    conditions: { guided, plain, scales: [3.0, 5.0] },
-    steps: STEPS,
-    onStep: (at, t) => process.stdout.write(`\r[${since().padStart(5)}] flow ${at}/${STEPS} t=${t.toFixed(3)}   `),
-  });
+  const flowStarted = Date.now();
+  const report = (at: number, t: number) =>
+    process.stdout.write(`\r[${since().padStart(5)}] flow ${at}/${STEPS} t=${t.toFixed(3)}   `);
+  const latent = gpu
+    ? await sampleGpu({
+        gpu,
+        weights,
+        noise,
+        guided,
+        plain,
+        scales: [3.0, 5.0],
+        steps: STEPS,
+        onStep: report,
+      })
+    : sample({
+        weights,
+        cond: weights.cond,
+        noise,
+        conditions: { guided, plain, scales: [3.0, 5.0] },
+        steps: STEPS,
+        onStep: report,
+      });
   process.stdout.write("\r".padEnd(44) + "\r");
-  step(`flow: ${STEPS} steps done`);
+  step(
+    `flow: ${STEPS} steps on ${gpu ? "WebGPU" : "the CPU reference"} in ` +
+      `${((Date.now() - flowStarted) / 1000).toFixed(1)}s`,
+  );
 
   // --- codec --------------------------------------------------------------
   // `decode` wants `[latentDim, frames]`; the sampler produced `[frames, latentDim]`.

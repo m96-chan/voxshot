@@ -212,7 +212,26 @@ it.
 is what a non-autoregressive model needs and an autoregressive one does not. It
 agrees to 7e-8 and predicts 97.07 frames — the 97 the pipeline used.
 
-## End to end
+## Type a sentence, hear it
+
+```bash
+cd spike/irodori && npm run serve      # then open http://127.0.0.1:8123
+```
+
+Everything below the text box is computed when the request arrives. About
+**9 seconds** a sentence: the model stays loaded, the device stays alive, and
+the reference clip is encoded once at startup because the voice depends on the
+clip and not on the sentence.
+
+The same sentence sounds different each time — the initial noise is redrawn per
+request, which is the same property the reference has when its seed changes.
+
+One request at a time, serialised. The scratch pool is one set of buffers named
+by what they hold; two renders at once would write into each other and produce
+two wrong answers rather than an error. Said out loud rather than left to look
+like it scales.
+
+## End to end, as a file
 
 ```bash
 cd spike/irodori && npm run say -- "こんにちは、今日はいい天気ですね。"
@@ -257,11 +276,22 @@ the same timing and the same broad spectrum as the reference, which is what a
 correct port should do and what a subtly wrong one would not. Whether it sounds
 good is a listening question and still belongs to whoever is choosing.
 
-**One gap, and it is speed.** There is no GPU backend for the Irodori half;
-web-xpu-ops' CPU reference is the definition of correct and the slowest thing
-available. The sixteen guided flow steps at batch 3 are most of it — 1446 s for
-a four-second utterance. The codec at both ends uses `spike/dacvae`'s WebGPU
-backend when a device is available, and says which one ran.
+**Speed, and where it still goes.** The DiT and the flow loop run on the device
+now (`gpu.ts`, `dit-gpu.ts`): the 32-step loop is **3.7 s** where it was 1476 s,
+and a whole utterance is 22 s from a cold start or about 9 s against a warm
+server.
+
+What is left on the CPU reference is ModernBERT-ja (~3 s) and the speaker
+encoder (~6 s, and only when the voice changes). The server prints the
+breakdown per request, so which half is which is a number rather than a claim.
+
+| stage | where | ms |
+| --- | --- | --- |
+| tokenize | host | 0 |
+| text encoder | **CPU reference** | ~3000 |
+| duration | host | ~300 |
+| flow, 32 steps | WebGPU | ~3500 |
+| codec decode | WebGPU | ~2000 |
 
 Irodori's `normalize_text` also differs from MioTTS's at every point that
 matters: spaces survive, bracket stripping walks the string for depth rather

@@ -148,7 +148,10 @@ export function prepareGpu(args: {
       const { wk, wv, dim: contextDim } = block.contexts[name]!;
       const rows = context.keep.length;
       if (rows % batch !== 0) throw new Error(`${name} context has ${rows} rows, not a multiple of ${batch}`);
-      const state = gpu.upload(context.state);
+      // Pooled, not freshly allocated: a server renders many utterances and
+      // `alloc` never frees. The text state changes every request, the shape
+      // does not.
+      const state = gpu.writeInto(`prep.state.${batch}.${index}.${name}`, context.state);
       const raw = gpu.matmul(state, gpu.weight(wk), rows, dim, contextDim, `prep.k.${index}.${name}`);
       const k = gpu.rmsnorm(raw, kNorm, rows * heads, headDim, eps, `prep.kn.${index}.${name}`, heads);
       const v = gpu.matmul(state, gpu.weight(wv), rows, dim, contextDim, `prep.v.${index}.${name}`);
@@ -158,8 +161,8 @@ export function prepareGpu(args: {
 
     // Concatenated along tokens *within* each batch member, so the pieces
     // interleave rather than append.
-    const contextK = gpu.alloc(batch * total * dim);
-    const contextV = gpu.alloc(batch * total * dim);
+    const contextK = gpu.scratch(`prep.ck.${batch}.${index}`, batch * total * dim);
+    const contextV = gpu.scratch(`prep.cv.${batch}.${index}`, batch * total * dim);
     const keep = new Array<boolean>(batch * total);
     for (let b = 0; b < batch; b += 1) {
       let at = b * total;
@@ -216,11 +219,11 @@ export function prepareGpu(args: {
     outProjBias: gpu.weight(dit.outProjBias),
     inProj: gpu.weight(dit.inProjWeight),
     inProjBias: gpu.weight(dit.inProjBias),
-    broadcast: gpu.uploadInts(indices),
-    ones: gpu.weight(new Float32Array(batch * tokens * dim).fill(1)),
-    keyBias: gpu.upload(bias),
-    inProjBiasRows: gpu.weight(repeatRows(dit.inProjBias, batch * tokens)),
-    outProjBiasRows: gpu.weight(repeatRows(dit.outProjBias, batch * tokens)),
+    broadcast: gpu.writeIntsInto(`prep.idx.${batch}`, indices),
+    ones: gpu.writeInto(`prep.ones.${batch}`, new Float32Array(batch * tokens * dim).fill(1)),
+    keyBias: gpu.writeInto(`prep.bias.${batch}`, bias),
+    inProjBiasRows: gpu.writeInto(`prep.inb.${batch}`, repeatRows(dit.inProjBias, batch * tokens)),
+    outProjBiasRows: gpu.writeInto(`prep.outb.${batch}`, repeatRows(dit.outProjBias, batch * tokens)),
   };
 }
 
