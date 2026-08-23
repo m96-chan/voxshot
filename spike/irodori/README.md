@@ -100,6 +100,37 @@ cd Irodori-TTS && /path/to/spike/dacvae/.venv/bin/python infer.py \
 research recorded, and newer still than the v3 the only existing browser port
 (`ngc-shj/irodori-tts-webgpu`) targets.
 
+## Ported so far
+
+**The text path.** `normalize_text` and the tokenizer, checked against 27
+vectors from the reference — both halves separately, because they fail
+differently and a single number would hide the useful one.
+
+```
+all 27 vectors agree — normalization and Unigram both, against ModernBERT-ja @ 77675fc9
+```
+
+Two things were learned by getting them wrong first.
+
+**Byte fallback is not a lattice candidate.** The `<0xNN>` pieces carry a score
+of **0** in this vocabulary while every real piece is negative, so offering them
+as candidates makes byte fallback win every position and the whole corpus
+tokenizes one byte at a time — which is exactly what the first run did, 24
+vectors out of 27. Byte fallback applies *after* the path is chosen, to
+characters the vocabulary could not cover.
+
+**Unigram is not BPE.** BPE merges greedily by rank; Unigram scores every
+segmentation and takes the best. Replacing the Viterbi with greedy longest-match
+fails only **3 of the 27 vectors** — most inputs agree — which is the argument
+for porting the real algorithm rather than the one already to hand. A port that
+was "mostly right" here would produce fluent output that says something slightly
+else.
+
+Irodori's `normalize_text` also differs from MioTTS's at every point that
+matters: spaces survive, bracket stripping walks the string for depth rather
+than checking the first and last character, NFKC replaces the explicit width
+tables. Two models by the same author, no shared normalisation.
+
 ## What this does not settle
 
 - **Quality.** Nobody has listened. That is the point of the files.
