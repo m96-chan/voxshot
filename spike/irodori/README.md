@@ -161,6 +161,26 @@ added for that reason, and it is the only one those two sabotages fail. The
 tolerance was tightened for the same class of reason — at 2e-4 the check could
 not distinguish exact `gelu` from its tanh approximation.
 
+**The speaker encoder.** Eight `TextBlock`s over the reference clip's patched
+DACVAE latents — this is the whole of the speaker identity, which is what makes
+it zero-shot. It agrees to ~3e-6 of peak.
+
+It runs on the *recorded input* rather than on anything ported: `dump_golden.py`
+now captures each module's arguments as well as its output, so the speaker
+encoder is checkable without the DACVAE encoder existing in TypeScript. That
+inverted the porting order for everything left.
+
+Irodori's own blocks share no convention with ModernBERT-ja — RMSNorm not
+LayerNorm, SwiGLU not GeGLU, one RoPE base not two, a per-head Q/K norm, and a
+sigmoid gate on the attention output that has no counterpart at all. The RoPE
+lane convention is the opposite one too, which is why these blocks use
+web-xpu-ops' `rope` directly where ModernBERT needed its weights permuted.
+
+**One decision here is unverified.** The reference zeroes masked positions after
+every block; a single reference clip at batch 1 has no padding, so removing that
+changes nothing and the check stays green. It is ported because the reference
+does it, not because anything has shown it matters.
+
 Irodori's `normalize_text` also differs from MioTTS's at every point that
 matters: spaces survive, bracket stripping walks the string for depth rather
 than checking the first and last character, NFKC replaces the explicit width

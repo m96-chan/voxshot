@@ -6,7 +6,8 @@
   "scripts": {
     "check:tokenizer": "tsx check-tokenizer.ts",
     "typecheck": "tsc --noEmit",
-    "check:bert": "tsx check-bert.ts"
+    "check:bert": "tsx check-bert.ts",
+    "check:speaker": "tsx check-speaker.ts"
   },
   "dependencies": {
     "web-xpu-ops": "^0.2.0"
