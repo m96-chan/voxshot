@@ -229,6 +229,34 @@ is whatever was handed in; without it, the speaker condition is the latent
 The two paths agree where they can be compared: the recorded latent asks for
 97.07 latent frames and an encoded `reference-voice.wav` asks for 97.18.
 
+### What the output sounds like, without listening
+
+`samples/port-01.wav` is this port's render of "……ん。来たんだ。";
+`samples/reference-01.wav` is the waveform `dump_golden.py` recorded from the
+reference for the same text, written through the same WAV encoder.
+
+They are not sample-identical and cannot be: `torch.randn` with a seeded
+generator is a different algorithm, so the port draws different noise. The
+question is whether the difference is larger than the reference's own
+run-to-run variation, and that needed a baseline rather than a number in
+isolation — two reference renders at different seeds.
+
+| | envelope correlation | long-term spectrum difference |
+| --- | --- | --- |
+| torch seed 7 vs seed 99 | 0.9312 | 0.1239 |
+| torch seed 7 vs seed 42 | 0.8286 | 0.4071 |
+| **this port vs torch seed 42** | **0.9685** | **0.2063** |
+| **this port vs torch seed 7** | **0.9183** | **0.4419** |
+
+The port sits inside that spread — it tracks seed 42's rhythm more closely
+(0.9685) than two reference runs track each other (0.8286, 0.9312). Both are
+3.88 s, both peak at full scale, rms 0.117 against 0.123.
+
+**None of that is a quality judgement.** It says the port produces speech with
+the same timing and the same broad spectrum as the reference, which is what a
+correct port should do and what a subtly wrong one would not. Whether it sounds
+good is a listening question and still belongs to whoever is choosing.
+
 **One gap, and it is speed.** There is no GPU backend for the Irodori half;
 web-xpu-ops' CPU reference is the definition of correct and the slowest thing
 available. The sixteen guided flow steps at batch 3 are most of it — 1446 s for
