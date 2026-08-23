@@ -114,11 +114,10 @@ function head(x: Float32Array, weights: ModelWeights, rows: number): Float32Arra
   return linear(normed, dit.outProjWeight, rows, dit.shape.dim, weights.config.latent_dim, dit.outProjBias);
 }
 
-function velocity(
+export function velocityFor(
   x: Float32Array,
   t: number,
   weights: ModelWeights,
-  cond: CondModuleWeights,
   contexts: ContextKv[],
   tokens: number,
   batch: number,
@@ -126,7 +125,7 @@ function velocity(
   const { dit, config } = weights;
   const embedded = condModule(
     timestepEmbedding(t, config.timestep_embed_dim, batch),
-    cond,
+    weights.cond,
     dit.shape.dim,
     batch,
   );
@@ -172,7 +171,7 @@ export function sample({
       // One forward pass over the stacked batch, then the velocities combine.
       const stacked = new Float32Array(guidedBatch * x.length);
       for (let b = 0; b < guidedBatch; b += 1) stacked.set(x, b * x.length);
-      const out = velocity(stacked, t, weights, cond, guidedKv, tokens, guidedBatch);
+      const out = velocityFor(stacked, t, weights, guidedKv, tokens, guidedBatch);
       const width = tokens * config.latent_dim;
       v = out.slice(0, width);
       for (let which = 0; which < conditions.scales.length; which += 1) {
@@ -181,7 +180,7 @@ export function sample({
         for (let i = 0; i < width; i += 1) v[i]! += scale * (out[i]! - dropped[i]!);
       }
     } else {
-      v = velocity(x, t, weights, cond, plainKv, tokens, 1);
+      v = velocityFor(x, t, weights, plainKv, tokens, 1);
     }
 
     const dt = schedule[step + 1]! - t;

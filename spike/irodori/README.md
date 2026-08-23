@@ -181,6 +181,37 @@ every block; a single reference clip at batch 1 has no padding, so removing that
 changes nothing and the check stays green. It is ported because the reference
 does it, not because anything has shown it matters.
 
+**The DiT, and the flow loop around it.** Twelve `DiffusionBlock`s — joint
+attention over the latent's own keys concatenated with the text, speaker and
+caption states — and the 32-step rectified-flow sampler that runs them. The
+whole loop, integrated from the reference's own initial noise, tracks the
+reference's trajectory to **1.1e-6 of peak** at step 16 and again at step 31.
+
+```
+ok   x_t at step 16   max |diff| 4.05e-6 of peak 3.994  (1.01e-6 relative)
+ok   x_t at step 31   max |diff| 6.79e-6 of peak 6.272  (1.08e-6 relative)
+```
+
+**Guidance is a batch, and only for the first half.** The conditional and two
+unconditional variants go through one forward pass stacked on the batch axis
+while `t >= 0.5`, then it drops to batch 1. That is readable straight off the
+goldens — `[3, 97, 1280]` at step 0, `[1, 97, 1280]` at steps 16 and 31 — and
+reading `x` as 291 tokens instead of three sequences of 97 was this port's first
+mistake here. Six of nine block comparisons passed anyway, because the two later
+ones really are batch 1.
+
+**A prediction that turned out wrong, kept because it was worth testing.** The
+timestep embedding evaluates `cos` near 999 radians, where float32 keeps about
+four digits; torch computes it in float32 and this port in float64, and they
+differ by 8.4e-5. That looked like it would compound over 32 integrated steps.
+It does not — `cond_module`'s first `Linear` contracts it to 7.5e-8 before it
+reaches a single AdaLN, and the loop ends no worse than a stage that never sees
+it.
+
+**The duration predictor decides the length before anything is sampled**, which
+is what a non-autoregressive model needs and an autoregressive one does not. It
+agrees to 7e-8 and predicts 97.07 frames — the 97 the pipeline used.
+
 Irodori's `normalize_text` also differs from MioTTS's at every point that
 matters: spaces survive, bracket stripping walks the string for depth rather
 than checking the first and last character, NFKC replaces the explicit width

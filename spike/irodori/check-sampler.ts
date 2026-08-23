@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { Context } from "./dit.js";
+import { type Context, projectContexts } from "./dit.js";
 import { loadModelWeights } from "./model-weights.js";
-import { condModule, linearSchedule, sample, timestepEmbedding } from "./sampler.js";
+import { condModule, linearSchedule, sample, timestepEmbedding, velocityFor } from "./sampler.js";
 
 /**
  * The whole flow loop against the reference, from the reference's own noise.
@@ -32,23 +32,21 @@ const MODEL = join(GOLDEN, "model");
 const STEPS = 32;
 
 /**
- * Looser than the 5e-6 the static stages hold to, and for a reason worth
- * naming.
+ * The same 5e-6 the static stages hold to — which was not the expectation.
  *
  * `get_timestep_embedding` multiplies the timestep by frequencies up to 1000,
- * so `cos` is evaluated near **999 radians** — where float32 keeps about four
- * digits of the argument and loses the rest. torch computes it in float32 and
- * lands ~6e-5 from the true value; this port computes it in float64, because
- * JavaScript numbers are float64, and lands on the true value. Neither is
- * wrong; they differ by torch's error, and no rounding order reproduces it
- * without reimplementing torch's `cos`.
+ * so `cos` is evaluated near **999 radians**, where float32 keeps about four
+ * digits of the argument. torch computes it in float32 and lands ~6e-5 from the
+ * true value; this port computes it in float64, because JavaScript numbers are
+ * float64, and lands on the true value. Neither is wrong, and no rounding order
+ * reproduces torch's without reimplementing its `cos`.
  *
- * That difference enters `cond_module`, becomes the AdaLN shift, scale and
- * gate, and is then integrated over 32 steps. The bound below is what that
- * costs, and `check-dit.ts` remains at 5e-6 because it is handed the
- * reference's own `cond_embed` and never sees it.
+ * That looked like it would cost precision through 32 integrated steps, and it
+ * does not. `cond_module`'s first `Linear` contracts the difference to 7.5e-8
+ * before it reaches a single AdaLN, and the loop finishes at 1.1e-6 — no worse
+ * than a stage that never sees it. The bound is set from that measurement.
  */
-const TOLERANCE = 5e-3;
+const TOLERANCE = 5e-6;
 
 function golden(name: string): Float32Array {
   const bytes = readFileSync(join(GOLDEN, `${name}.f32`));
@@ -117,6 +115,12 @@ const plain: Record<string, Context> = {
   caption: { state: golden(at("caption_state", "__step31")), keep: flags(at("caption_mask", "__step31")) },
 };
 
+// The step-0 velocity, before guidance combines it. One guided forward pass
+// exercises the timestep embedding, `cond_module`, `in_proj`, all twelve
+// blocks, `out_norm` and `out_proj` — everything except the schedule and the
+// combination — in about a minute rather than the loop's twenty-four.
+const quick = process.argv.includes("--quick");
+
 const noiseStack = golden("in_proj.in.input");
 const tokens = noiseStack.length / (3 * config.latent_dim);
 // Member 0 of the stack is `x_t` itself; the other two are copies of it.
@@ -126,6 +130,50 @@ const recorded = new Map<number, Float32Array>([
   [16, golden("in_proj.in.input__step16")],
   [31, golden("in_proj.in.input__step31")],
 ]);
+
+/**
+ * Where guidance stops, checked against the shapes rather than against `rf.py`.
+ *
+ * The reference recorded `blocks.0.in.x` as `[3, 97, 1280]` at step 0 and
+ * `[1, 97, 1280]` at steps 16 and 31, so the batch width at a recorded step
+ * *is* whether guidance ran there. This costs nothing and pins the schedule and
+ * `cfg_min_t` together — a wrong `0.999`, a wrong step count or a wrong
+ * threshold all move the crossing.
+ */
+const shapes = (JSON.parse(readFileSync(join(GOLDEN, "index.json"), "utf8")) as {
+  tensors: Record<string, { shape: number[] }>;
+}).tensors;
+for (const [step, key] of [[0, "blocks.0.in.x"], [16, "blocks.0.in.x__step16"], [31, "blocks.0.in.x__step31"]] as const) {
+  const t = schedule[step]!;
+  const mine = t >= 0.5 && t <= 1.0;
+  const theirs = shapes[key]!.shape[0]! > 1;
+  const ok = mine === theirs;
+  if (!ok) failures += 1;
+  console.log(
+    `${ok ? "ok  " : "FAIL"} guidance at step ${String(step).padStart(2)}          ` +
+      `t=${t.toFixed(3)} -> ${mine ? "guided" : "plain"}, reference ran batch ${shapes[key]!.shape[0]}`,
+  );
+}
+console.log();
+
+if (quick) {
+  const guidedContext = dit.blocks.map((block) =>
+    projectContexts(guided, block, dit.shape, 3),
+  );
+  const started_ = Date.now();
+  const v = velocityFor(noiseStack, t0, weights, guidedContext, tokens, 3);
+  console.log(`one guided velocity in ${((Date.now() - started_) / 1000).toFixed(0)}s`);
+  if (!report("velocity at step 0", v, golden("out_proj"), TOLERANCE)) failures += 1;
+  console.log();
+  console.log(
+    failures > 0
+      ? `${failures} comparisons disagree`
+      : `the velocity function agrees within ${TOLERANCE.toExponential(0)} of peak ` +
+        `(--quick: the schedule and the guidance combination are not exercised)`,
+  );
+  if (failures > 0) process.exitCode = 1;
+  process.exit();
+}
 
 console.log(`sampling ${tokens} latent frames from the reference's own noise`);
 const started = Date.now();
