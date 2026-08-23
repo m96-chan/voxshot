@@ -212,6 +212,30 @@ it.
 is what a non-autoregressive model needs and an autoregressive one does not. It
 agrees to 7e-8 and predicts 97.07 frames — the 97 the pipeline used.
 
+## End to end
+
+```bash
+cd spike/irodori && npm run say -- "こんにちは、今日はいい天気ですね。"
+```
+
+Text in, 48 kHz WAV out, and nothing calls torch: normalisation, the Unigram
+tokenizer, ModernBERT-ja's 25 layers, the projector, the duration predictor, the
+12-block DiT under 32 steps of rectified flow, and `spike/dacvae`'s decoder.
+
+**Two gaps, both in the port and neither hidden.**
+
+**The voice is fixed.** The reference clip reaches the model as a DACVAE latent
+and the DACVAE *encoder* is not ported — `spike/dacvae` deliberately dumped only
+the decode path. So this speaks arbitrary text in the one voice whose latent was
+recorded. Cloning a new voice needs the encoder: 27.3 M parameters, 119 tensors,
+mirroring the decoder and using the same three operations, plus the LUFS
+loudness normalisation `encode_waveform` applies first.
+
+**It is slow.** There is no GPU backend for the Irodori half; web-xpu-ops' CPU
+reference is the definition of correct and the slowest thing available. Roughly
+half an hour per utterance, most of it the sixteen guided flow steps at batch 3.
+The codec half already has WebGPU and uses it.
+
 Irodori's `normalize_text` also differs from MioTTS's at every point that
 matters: spaces survive, bracket stripping walks the string for depth rather
 than checking the first and last character, NFKC replaces the explicit width
