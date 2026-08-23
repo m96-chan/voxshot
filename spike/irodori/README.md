@@ -216,25 +216,24 @@ agrees to 7e-8 and predicts 97.07 frames — the 97 the pipeline used.
 
 ```bash
 cd spike/irodori && npm run say -- "こんにちは、今日はいい天気ですね。"
+cd spike/irodori && npm run say -- "こんにちは。" --ref path/to/voice.wav
 ```
 
 Text in, 48 kHz WAV out, and nothing calls torch: normalisation, the Unigram
 tokenizer, ModernBERT-ja's 25 layers, the projector, the duration predictor, the
-12-block DiT under 32 steps of rectified flow, and `spike/dacvae`'s decoder.
+12-block DiT under 32 steps of rectified flow, and `spike/dacvae`'s codec at both
+ends. With `--ref` the clip is loudness-normalised and encoded here, so the voice
+is whatever was handed in; without it, the speaker condition is the latent
+`dump_golden.py` recorded, which is exact and needs no GPU.
 
-**Two gaps, both in the port and neither hidden.**
+The two paths agree where they can be compared: the recorded latent asks for
+97.07 latent frames and an encoded `reference-voice.wav` asks for 97.18.
 
-**The voice is fixed.** The reference clip reaches the model as a DACVAE latent
-and the DACVAE *encoder* is not ported — `spike/dacvae` deliberately dumped only
-the decode path. So this speaks arbitrary text in the one voice whose latent was
-recorded. Cloning a new voice needs the encoder: 27.3 M parameters, 119 tensors,
-mirroring the decoder and using the same three operations, plus the LUFS
-loudness normalisation `encode_waveform` applies first.
-
-**It is slow.** There is no GPU backend for the Irodori half; web-xpu-ops' CPU
-reference is the definition of correct and the slowest thing available. Roughly
-half an hour per utterance, most of it the sixteen guided flow steps at batch 3.
-The codec half already has WebGPU and uses it.
+**One gap, and it is speed.** There is no GPU backend for the Irodori half;
+web-xpu-ops' CPU reference is the definition of correct and the slowest thing
+available. The sixteen guided flow steps at batch 3 are most of it — 1446 s for
+a four-second utterance. The codec at both ends uses `spike/dacvae`'s WebGPU
+backend when a device is available, and says which one ran.
 
 Irodori's `normalize_text` also differs from MioTTS's at every point that
 matters: spaces survive, bracket stripping walks the string for depth rather

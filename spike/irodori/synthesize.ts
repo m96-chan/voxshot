@@ -3,7 +3,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { cpuBackend, type Backend } from "../dacvae/backend.js";
 import { decode } from "../dacvae/decoder.js";
+import { encode } from "../dacvae/encoder.js";
+import { normalizeLoudness } from "../dacvae/loudness.js";
 import { conditionNorm, prependMeanToken, project } from "./conditions.js";
 import type { Context } from "./dit.js";
 import { framesFrom, predictDuration } from "./duration.js";
@@ -25,25 +28,27 @@ import { loadTokenizer, type TokenizerJson } from "./tokenizer.js";
  * the 12-block DiT under 32 steps of rectified flow, and `spike/dacvae`'s
  * decoder. Nothing calls torch.
  *
- * ## Two things this is not
+ *     npm run say -- "こんにちは。" --ref path/to/voice.wav
  *
- * **The voice is fixed.** The reference clip reaches the model as a DACVAE
- * latent, and the DACVAE *encoder* is not ported — `spike/dacvae` deliberately
- * dumped only the decode path. So the speaker conditioning here is the latent
- * `dump_golden.py` recorded for `samples/reference-voice.wav`, and this
- * synthesizes arbitrary text in that one voice. Cloning a new voice needs the
- * encoder: 27.3 M parameters and 119 tensors, mirroring the decoder and using
- * the same three operations, plus the LUFS loudness normalisation
- * `encode_waveform` applies first.
+ * With `--ref` the clip is encoded here — loudness-normalised to -16 LUFS and
+ * run through `spike/dacvae`'s encoder — so the voice is whatever was handed
+ * in. Without it, the speaker condition is the latent `dump_golden.py` recorded
+ * for `samples/reference-voice.wav`, which is exact and needs no GPU.
+ *
+ * ## What this is not
  *
  * **It is slow.** web-xpu-ops' CPU reference is the definition of correct and
- * the slowest thing available; there is no GPU backend for the Irodori half
- * yet. Expect roughly half an hour per utterance, most of it the sixteen guided
- * flow steps at batch 3. `spike/dacvae` already has a WebGPU backend and it is
- * used here for the codec.
+ * the slowest thing available, and there is no GPU backend for the Irodori
+ * half. The sixteen guided flow steps at batch 3 are most of it — about
+ * twenty-four minutes for a four-second utterance.
  *
- * Both are gaps in the port, not in the model, and neither is hidden behind a
- * plausible-sounding result: the header this prints says which parts ran.
+ * The codec does not have to be: `spike/dacvae` has a WebGPU backend, and this
+ * uses it when a device is available and falls back to the CPU reference when
+ * one is not. Which one ran is printed.
+ *
+ * That is a gap in the port, not in the model, and it is not hidden behind a
+ * plausible-sounding result: the header this prints says which parts ran and on
+ * what.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -113,9 +118,87 @@ function stack(members: Record<string, Context>[], dim: Record<string, number>):
   return out;
 }
 
+/**
+ * WebGPU for the codec when there is a device, the CPU reference when not.
+ *
+ * The Irodori half has no GPU backend, so this only speeds up the last stage —
+ * but the last stage is a 48 kHz waveform and the CPU reference is very slow at
+ * it. Falling back rather than failing keeps the script runnable on a machine
+ * with no adapter; which one ran is printed either way, because "it produced
+ * audio" and "it produced audio the fast way" are different claims.
+ */
+async function codecBackend(): Promise<Backend> {
+  try {
+    const { create, globals } = await import("webgpu");
+    Object.assign(globalThis, globals);
+    const { Gpu, gpuBackend } = await import("../dacvae/gpu.js");
+    const instance = create([]);
+    const adapter = await instance.requestAdapter();
+    if (!adapter) return cpuBackend;
+    const info = adapter.info?.description ?? "unknown adapter";
+    // `instance` and `adapter` are retained deliberately: Dawn's Node binding
+    // does not keep the `GPU` alive from the `GPUDevice`.
+    //  asks for the adapter's buffer limits: the encoder's
+    // first activation is 243 MB for a 20-second clip, over the 128 MiB default.
+    return gpuBackend(Gpu.fromDevice(await Gpu.requestDevice(adapter), info, [instance, adapter]));
+  } catch {
+    return cpuBackend;
+  }
+}
+
+/**
+ * A reference clip as the model wants it: mono 48 kHz, -16 LUFS, `[frames, 32]`.
+ *
+ * `patch_sequence_with_mask` is applied by the caller, not here, because the
+ * recorded latent has already been through it and both paths have to arrive at
+ * the same shape.
+ */
+async function encodeReference(
+  path: string,
+  backend: Backend,
+): Promise<{ latent: Float32Array; keep: boolean[] }> {
+  const file = readFileSync(path);
+  if (file.toString("ascii", 0, 4) !== "RIFF" || file.toString("ascii", 8, 12) !== "WAVE") {
+    throw new Error(`${path} is not a RIFF/WAVE file`);
+  }
+  const channels = file.readUInt16LE(22);
+  const rate = file.readUInt32LE(24);
+  const bits = file.readUInt16LE(34);
+  if (rate !== 48000 || bits !== 16) {
+    throw new Error(
+      `${path} is ${rate} Hz ${bits}-bit; this reads 48 kHz 16-bit PCM only ` +
+        `(the reference resamples, and that is not ported)`,
+    );
+  }
+  const frames = (file.length - 44) / 2 / channels;
+  const mono = new Float32Array(frames);
+  for (let frame = 0; frame < frames; frame += 1) {
+    let sum = 0;
+    for (let channel = 0; channel < channels; channel += 1) {
+      sum += file.readInt16LE(44 + (frame * channels + channel) * 2) / 32768;
+    }
+    mono[frame] = sum / channels;
+  }
+
+  const normalized = normalizeLoudness(mono, rate, -16);
+  const encoded = await encode({ data: normalized.data, channels: 1, length: frames }, { backend });
+  // `[latentDim, frames]` to `[frames, latentDim]`, which is what the speaker
+  // encoder reads.
+  const out = new Float32Array(encoded.data.length);
+  for (let frame = 0; frame < encoded.length; frame += 1) {
+    for (let d = 0; d < encoded.channels; d += 1) {
+      out[frame * encoded.channels + d] = encoded.data[d * encoded.length + frame]!;
+    }
+  }
+  return { latent: out, keep: new Array<boolean>(encoded.length).fill(true) };
+}
+
 async function main(): Promise<void> {
-  const args = process.argv.slice(2).filter((value) => !value.startsWith("--"));
-  const text = args[0] ?? "こんにちは、今日はいい天気ですね。";
+  const argv = process.argv.slice(2);
+  const args = argv.filter((value) => !value.startsWith("--"));
+  const refAt = argv.indexOf("--ref");
+  const refWav = refAt >= 0 ? argv[refAt + 1] : undefined;
+  const text = args.find((value) => value !== refWav) ?? "こんにちは、今日はいい天気ですね。";
   const output = join(HERE, "samples", "port-01.wav");
 
   if (!existsSync(TOKENIZER_JSON)) {
@@ -127,7 +210,11 @@ async function main(): Promise<void> {
   const step = (what: string) => console.log(`[${since().padStart(5)}] ${what}`);
 
   console.log(`text  ${JSON.stringify(text)}`);
-  console.log(`voice samples/reference-voice.wav, as a recorded DACVAE latent (the encoder is not ported)\n`);
+  console.log(
+    refWav
+      ? `voice ${refWav}, encoded here\n`
+      : `voice samples/reference-voice.wav, as the latent dump_golden.py recorded (pass --ref to encode one)\n`,
+  );
 
   const bert = loadBertWeights(join(GOLDEN, "bert")).weights;
   const weights = loadModelWeights(join(GOLDEN, "model"));
@@ -165,8 +252,25 @@ async function main(): Promise<void> {
   void backboneDim;
 
   // --- speaker ------------------------------------------------------------
-  const refLatent = golden("speaker_encoder.in.latent");
-  const refKeep = Array.from(golden("speaker_encoder.in.mask"), (value) => value !== 0);
+  const backend = await codecBackend();
+  let refLatent: Float32Array;
+  let refKeep: boolean[];
+  let refDim: number;
+  if (refWav) {
+    const encoded = await encodeReference(refWav, backend);
+    refLatent = encoded.latent;
+    refKeep = encoded.keep;
+    refDim = config.latent_dim;
+    step(`reference encoded on ${backend.name}: ${refKeep.length} latent frames`);
+    // `patch_sequence_with_mask` with speaker_patch_size, which the recorded
+    // latent has already been through.
+    const patchedRef = patchReference(refLatent, refKeep, refDim, config.speaker_patch_size);
+    refLatent = patchedRef.latent;
+    refKeep = patchedRef.keep;
+  } else {
+    refLatent = golden("speaker_encoder.in.latent");
+    refKeep = Array.from(golden("speaker_encoder.in.mask"), (value) => value !== 0);
+  }
   const patched = patchReference(refLatent, refKeep, refLatent.length / refKeep.length, 1);
   const speakerRun = runSpeakerEncoder({ weights, latent: patched.latent, keep: patched.keep });
   const speakerNormed = conditionNorm(
@@ -256,8 +360,14 @@ async function main(): Promise<void> {
       channelMajor[d * frames + frame] = latent[frame * config.latent_dim + d]!;
     }
   }
-  const audio = await decode({ channels: config.latent_dim, length: frames, data: channelMajor });
-  step(`DACVAE decode: ${audio.length} samples (${(audio.length / SAMPLE_RATE).toFixed(2)}s at ${SAMPLE_RATE} Hz)`);
+  const audio = await decode(
+    { channels: config.latent_dim, length: frames, data: channelMajor },
+    { backend },
+  );
+  step(
+    `DACVAE decode on ${backend.name}: ${audio.length} samples ` +
+      `(${(audio.length / SAMPLE_RATE).toFixed(2)}s at ${SAMPLE_RATE} Hz)`,
+  );
 
   writeFileSync(output, wav(audio.data, SAMPLE_RATE));
   let peak = 0;
