@@ -6,6 +6,19 @@
 Writes `golden/index.json` plus one `.f32` per tensor. Not in git — regenerable,
 and large.
 
+## Inputs as well as outputs
+
+A forward hook alone gives a chain that can only be checked end to end: the
+port has to reproduce every stage before it can compare any stage, because it
+has no way to feed a module the arguments the reference fed it. So each
+interesting module also gets a *pre*-hook, and its tensor arguments are recorded
+under `<name>.in.<argument>`.
+
+That is what makes a stage independently checkable — the speaker encoder can be
+run against a reference latent this file recorded, without the DACVAE encoder
+being ported first, and the DiT can be run one step at a time without the flow
+loop existing yet.
+
 ## Hooks, not a re-implementation
 
 `InferenceRuntime.synthesize` is five hundred lines branching over candidates,
@@ -61,6 +74,12 @@ INTERESTING = (
     "text_encoder",                       # the projector onto the DiT's context
     "speaker_encoder",                    # the reference-latent encoder
     "duration_predictor",
+    "caption_encoder",                    # fires even for an empty caption
+    "caption_norm",
+    "text_norm",
+    "speaker_norm",
+    "cond_module",                        # the timestep embedding
+    "in_proj",                            # latent -> model_dim
     "blocks.0",                           # first, middle and last DiffusionBlock
     "blocks.5",
     "blocks.11",
@@ -81,7 +100,15 @@ def sha256_of(path: Path) -> str:
 
 
 def save(name: str, tensor: torch.Tensor, into: dict) -> None:
-    array = tensor.detach().to(torch.float32).cpu().contiguous()
+    tensor = tensor.detach()
+    # RoPE here is complex64 (`precompute_freqs_cis`), and casting that to
+    # float32 keeps the real part and silently drops the imaginary one — half
+    # the rotation, with a shape that still looks right. Split into a trailing
+    # pair instead, which is what `torch.view_as_real` gives and what the reader
+    # expects.
+    if tensor.is_complex():
+        tensor = torch.view_as_real(tensor.contiguous())
+    array = tensor.to(torch.float32).cpu().contiguous()
     path = OUT / f"{name}.f32"
     path.write_bytes(array.numpy().tobytes())
     into[name] = {
@@ -164,6 +191,41 @@ def main() -> None:
     tensors: dict = {}
     fired: dict[str, int] = {}
 
+    import inspect
+
+    def pre_hook(name: str):
+        """Record a module's tensor arguments, by the names its signature gives them."""
+
+        def record(module, inputs, kwargs):
+            index = fired.get(f"{name}.in", 0)
+            fired[f"{name}.in"] = index + 1
+            if index > 0 and index not in KEEP_STEPS:
+                return
+            suffix = "" if index == 0 else f"__step{index}"
+            try:
+                bound = inspect.signature(module.forward).bind(*inputs, **kwargs)
+            except TypeError:
+                # A module whose signature does not accept what it was called
+                # with is not worth guessing about; positional order is still
+                # unambiguous.
+                bound = None
+            named = (
+                bound.arguments.items()
+                if bound is not None
+                else ((str(i), value) for i, value in enumerate(inputs))
+            )
+            for argument, value in named:
+                tensor = value if isinstance(value, torch.Tensor) else None
+                if tensor is None or tensor.numel() == 0:
+                    continue
+                # Passed through as-is: `save` casts, and doing it here would
+                # take the real part of a complex `freqs_cis` and drop the
+                # rotation's other half. Bool masks and int ids do become
+                # float32 there; the reader casts them back.
+                save(f"{name}.in.{argument}{suffix}", tensor, tensors)
+
+        return record
+
     def hook(name: str):
         def record(_module, _inputs, output):
             index = fired.get(name, 0)
@@ -183,6 +245,9 @@ def main() -> None:
     for name, module in runtime.model.named_modules():
         if any(name == key or name.endswith("." + key) for key in INTERESTING):
             handles.append(module.register_forward_hook(hook(name)))
+            handles.append(
+                module.register_forward_pre_hook(pre_hook(name), with_kwargs=True)
+            )
     print(f"hooked {len(handles)} modules\n")
 
     result = runtime.synthesize(
