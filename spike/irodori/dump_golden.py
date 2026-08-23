@@ -87,8 +87,17 @@ INTERESTING = (
     "out_proj",
 )
 
-# DiT steps to keep. The loop is 32 by default; these three bracket it.
-KEEP_STEPS = (0, 16, 31)
+# DiT steps to keep. The loop is 32 by default.
+#
+# Step 1 earns its place by what it makes cheap. Guidance and the Euler update
+# both go wrong on the *first* step, but with goldens only at 0, 16 and 31 the
+# earliest observation is sixteen steps in — eighteen minutes on the CPU
+# reference for every attempt. With step 1 recorded, a wrong guidance
+# combination or a wrong `dt` shows up after one step, in about a minute.
+#
+# 16 and 31 still matter: they are what distinguishes a schedule that drifts
+# from arithmetic that is wrong immediately.
+KEEP_STEPS = (0, 1, 16, 31)
 
 
 def sha256_of(path: Path) -> str:

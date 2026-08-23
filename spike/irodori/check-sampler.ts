@@ -21,9 +21,13 @@ import { condModule, linearSchedule, sample, timestepEmbedding, velocityFor } fr
  * anything touched it. Sampling from the reference's own noise is also the only
  * way to compare trajectories rather than distributions.
  *
- * `x_t` was recorded again at steps 16 and 31, so the loop is checked at three
- * points rather than one — enough to separate a wrong schedule (which drifts)
- * from a wrong guidance combination (which is wrong immediately).
+ * `x_t` is recorded at steps 1, 16 and 31. Step 1 is where guidance and the
+ * Euler update are already wrong if they are wrong at all — about a minute in,
+ * against eighteen for step 16 — and 16 and 31 are what tell a schedule that
+ * drifts apart from arithmetic that was wrong immediately.
+ *
+ * `--stop-at <step>` ends the run once every golden up to that step has been
+ * compared, which is what makes checking the guidance combination affordable.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -120,15 +124,33 @@ const plain: Record<string, Context> = {
 // blocks, `out_norm` and `out_proj` — everything except the schedule and the
 // combination — in about a minute rather than the loop's twenty-four.
 const quick = process.argv.includes("--quick");
+const stopAt = (() => {
+  const at = process.argv.indexOf("--stop-at");
+  return at >= 0 ? Number(process.argv[at + 1]) : Infinity;
+})();
 
 const noiseStack = golden("in_proj.in.input");
 const tokens = noiseStack.length / (3 * config.latent_dim);
 // Member 0 of the stack is `x_t` itself; the other two are copies of it.
 const noise = noiseStack.slice(0, tokens * config.latent_dim);
 
+/**
+ * `x_t` as the reference had it, at each recorded step.
+ *
+ * Trimmed to the first batch member, because a *guided* step records the
+ * stacked `[3, 97, 32]` and `x_t` is one `[97, 32]` copied three times.
+ * Comparing against the whole stack reads past the end of the port's array and
+ * reports NaN — which is what it did, and is the same batch confusion that cost
+ * the DiT block a wrong first result.
+ */
+const width = tokens * config.latent_dim;
 const recorded = new Map<number, Float32Array>([
-  [16, golden("in_proj.in.input__step16")],
-  [31, golden("in_proj.in.input__step31")],
+  // Step 1 is the cheap one and the reason the dump records it: guidance and
+  // the Euler update both go wrong on the *first* step, so a fault that only
+  // showed at step 16 cost eighteen minutes an attempt to see.
+  [1, golden("in_proj.in.input__step1").subarray(0, width)],
+  [16, golden("in_proj.in.input__step16").subarray(0, width)],
+  [31, golden("in_proj.in.input__step31").subarray(0, width)],
 ]);
 
 /**
@@ -175,9 +197,13 @@ if (quick) {
   process.exit();
 }
 
+class StopEarly extends Error {}
+
 console.log(`sampling ${tokens} latent frames from the reference's own noise`);
 const started = Date.now();
-const final = sample({
+let final: Float32Array | null = null;
+try {
+  final = sample({
   weights,
   cond: weights.cond,
   noise,
@@ -190,12 +216,17 @@ const final = sample({
     if (!theirs) return;
     process.stdout.write("\r".padEnd(48) + "\r");
     if (!report(`x_t at step ${step}`, x, theirs, TOLERANCE)) failures += 1;
+    if (step >= stopAt) throw new StopEarly();
   },
-});
+  });
+} catch (error) {
+  if (!(error instanceof StopEarly)) throw error;
+}
 process.stdout.write("\r".padEnd(48) + "\r");
-console.log(`\n${STEPS} steps in ${((Date.now() - started) / 1000).toFixed(0)}s\n`);
+console.log(`\n${((Date.now() - started) / 1000).toFixed(0)}s\n`);
 
-console.log(`final latent: ${final.length / config.latent_dim} frames of ${config.latent_dim}`);
+if (final) console.log(`final latent: ${final.length / config.latent_dim} frames of ${config.latent_dim}`);
+else console.log(`stopped at step ${stopAt} (--stop-at); later steps were not run`);
 if (failures > 0) {
   console.log(`\n${failures} comparisons disagree`);
   process.exitCode = 1;
