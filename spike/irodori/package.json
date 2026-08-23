@@ -2,10 +2,11 @@
   "name": "spike-irodori",
   "private": true,
   "type": "module",
-  "description": "Spike for voxshot#140: Irodori-TTS v4 above the codec — ModernBERT-ja, the DiT, and the flow-matching loop, on web-xpu-ops.",
+  "description": "Spike for voxshot#140: Irodori-TTS v4 above the codec \u2014 ModernBERT-ja, the DiT, and the flow-matching loop, on web-xpu-ops.",
   "scripts": {
     "check:tokenizer": "tsx check-tokenizer.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:bert": "tsx check-bert.ts"
   },
   "dependencies": {
     "web-xpu-ops": "^0.2.0"

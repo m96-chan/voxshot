@@ -62,9 +62,16 @@ OmniVoice — with the difference that this one has a usable licence.
 **The part voxshot has already ported is 5% of the run.** `decode_latent` is
 44 ms of 817. The expensive half is `sample_rf`, and porting it means the DiT.
 
-**The download is 3.8x MioTTS's.** 4.3 GB against 1.12 GB, and ModernBERT-ja is
-1.26 GB of that — a third of the model's parameters are a text encoder. There
-are `-Quantized` checkpoints published alongside; they have not been looked at.
+**The download is 2.7x MioTTS's** — 3.06 GB against 1.12 GB, not the 4.3 GB an
+earlier reading of this said. ModernBERT-ja's 1.26 GB is *inside* that
+checkpoint: Irodori fine-tunes the backbone and ships all 152 of its tensors
+under `pretrained_text_backbone.backbone.`. The separate 1.26 GB Hugging Face
+download supplies `config.json` and `tokenizer.json` and nothing else — the
+reference does not load those weights either
+(`load_pretrained_backbone_weights=not use_pretrained_text_encoder`).
+
+Still, a third of the model's parameters are a text encoder. There are
+`-Quantized` checkpoints published alongside; they have not been looked at.
 
 ## What the samples show without listening
 
@@ -126,6 +133,34 @@ for porting the real algorithm rather than the one already to hand. A port that
 was "mostly right" here would produce fluent output that says something slightly
 else.
 
+**ModernBERT-ja.** All 25 layers, on six web-xpu-ops operations — `gather`,
+`layernorm`, `matmul`, `rope`, `attention`, `activation`. Every captured stage
+agrees with Irodori's own fine-tuned backbone to ~1e-7 of peak, for two inputs.
+
+```
+18 stage comparisons agree within 5e-6 of peak, against Irodori's own ModernBERT-ja
+```
+
+**RoPE is the interesting part.** web-xpu-ops rotates adjacent lanes
+`(x[2i], x[2i+1])`; HF's `rotate_half` rotates split halves `(x[i], x[i+d/2])`.
+The two are the same rotation under a permutation of the head dimension, and
+`q·k` is invariant when that permutation is applied to both — so the Q and K
+rows of `Wqkv` are interleaved once at load and web-xpu-ops' own `rope` is used
+unchanged. No second RoPE, and nothing downstream sees the permuted axis.
+
+**Padding does not have to be computed.** Irodori pads every text to 256, but
+key padding blocks column `j >= n` in both layer types, so rows `0..n-1` attend
+only to each other at every layer. Truncating is exact, and for the 7-token
+sample it is the difference between **2.9 s and 111.3 s** on the CPU reference —
+both checked against the same goldens.
+
+**A short input cannot check the sliding window.** With 7 real tokens,
+`|i - j| <= 64` never binds: deleting the sliding pattern entirely, or widening
+the window by one, both leave the check green. A second 78-token golden was
+added for that reason, and it is the only one those two sabotages fail. The
+tolerance was tightened for the same class of reason — at 2e-4 the check could
+not distinguish exact `gelu` from its tanh approximation.
+
 Irodori's `normalize_text` also differs from MioTTS's at every point that
 matters: spaces survive, bracket stripping walks the string for depth rather
 than checking the first and last character, NFKC replaces the explicit width
@@ -134,10 +169,12 @@ tables. Two models by the same author, no shared normalisation.
 ## What this does not settle
 
 - **Quality.** Nobody has listened. That is the point of the files.
-- **Whether to port it.** `sample_rf` is 50% of the run and needs the DiT;
-  ModernBERT-ja is a third of the weights and is a second model. Neither cost
-  is known until the quality question is answered.
-- **Browser viability.** These are torch numbers on a workstation GPU.
+- **Speed.** Everything ported so far runs on web-xpu-ops' CPU reference, which
+  is the definition of correct and the slowest thing available. No GPU backend
+  yet, so there is no RTF for the port.
+- **The rest of the model.** The DiT, the speaker encoder and the duration
+  predictor are not ported. `sample_rf` is 50% of the reference's run.
+- **Browser viability.** The torch numbers above are a workstation GPU.
 
 ## Licences
 
