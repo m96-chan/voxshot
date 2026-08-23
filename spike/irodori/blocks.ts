@@ -94,27 +94,45 @@ export function swiglu(
   return linear(gate, w2, rows, hidden, dim);
 }
 
-/** `[tokens, heads * headDim]` to `[heads, tokens, headDim]`. */
-export function toHeads(source: Float32Array, tokens: number, heads: number, headDim: number) {
+/** `[batch, tokens, heads * headDim]` to `[batch, heads, tokens, headDim]`. */
+export function toHeads(
+  source: Float32Array,
+  tokens: number,
+  heads: number,
+  headDim: number,
+  batch = 1,
+) {
   const out = new Float32Array(source.length);
-  for (let token = 0; token < tokens; token += 1) {
-    for (let head = 0; head < heads; head += 1) {
-      const from = (token * heads + head) * headDim;
-      const to = (head * tokens + token) * headDim;
-      for (let d = 0; d < headDim; d += 1) out[to + d] = source[from + d]!;
+  const stride = tokens * heads * headDim;
+  for (let b = 0; b < batch; b += 1) {
+    for (let token = 0; token < tokens; token += 1) {
+      for (let head = 0; head < heads; head += 1) {
+        const from = b * stride + (token * heads + head) * headDim;
+        const to = b * stride + (head * tokens + token) * headDim;
+        for (let d = 0; d < headDim; d += 1) out[to + d] = source[from + d]!;
+      }
     }
   }
   return out;
 }
 
 /** The inverse of {@link toHeads}. */
-export function fromHeads(source: Float32Array, tokens: number, heads: number, headDim: number) {
+export function fromHeads(
+  source: Float32Array,
+  tokens: number,
+  heads: number,
+  headDim: number,
+  batch = 1,
+) {
   const out = new Float32Array(source.length);
-  for (let head = 0; head < heads; head += 1) {
-    for (let token = 0; token < tokens; token += 1) {
-      const from = (head * tokens + token) * headDim;
-      const to = (token * heads + head) * headDim;
-      for (let d = 0; d < headDim; d += 1) out[to + d] = source[from + d]!;
+  const stride = tokens * heads * headDim;
+  for (let b = 0; b < batch; b += 1) {
+    for (let head = 0; head < heads; head += 1) {
+      for (let token = 0; token < tokens; token += 1) {
+        const from = b * stride + (head * tokens + token) * headDim;
+        const to = b * stride + (token * heads + head) * headDim;
+        for (let d = 0; d < headDim; d += 1) out[to + d] = source[from + d]!;
+      }
     }
   }
   return out;
