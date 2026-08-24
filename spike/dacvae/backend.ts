@@ -13,6 +13,11 @@ import { snake } from "web-xpu-ops/ops/snake";
  * Unlike MioCodec's, this covers the *whole* graph rather than the three
  * expensive ops out of a dozen. DACVAE's decoder is only these three, so there
  * is no hybrid here and nothing quietly running on the CPU in the GPU path.
+ *
+ * The encoder needs the same three and one extra argument: it downsamples with
+ * strided `conv1d` where the decoder upsamples with `convTranspose1d`. Both
+ * web-xpu-ops' reference and its WGSL kernel already took a stride — only this
+ * seam and the GPU host code assumed 1.
  */
 export interface Backend {
   readonly name: string;
@@ -26,6 +31,8 @@ export interface Backend {
     K: number;
     padding: number;
     dilation: number;
+    /** 1 everywhere on the decode path; the encoder downsamples with it. */
+    stride?: number;
   }): Promise<Float32Array>;
   convTranspose1d(args: {
     input: Float32Array;
@@ -50,8 +57,8 @@ export interface Backend {
 /** The reference implementations — the definition of correct, and the slowest. */
 export const cpuBackend: Backend = {
   name: "reference (CPU)",
-  async conv1d({ input, weight, bias, Cin, Cout, L, K, padding, dilation }) {
-    return conv1d({ input, weight, ...(bias ? { bias } : {}), N: 1, Cin, Cout, L, K, padding, dilation });
+  async conv1d({ input, weight, bias, Cin, Cout, L, K, padding, dilation, stride = 1 }) {
+    return conv1d({ input, weight, ...(bias ? { bias } : {}), N: 1, Cin, Cout, L, K, padding, dilation, stride });
   },
   async convTranspose1d({ input, weight, bias, Cin, Cout, L, K, stride, padding, outputPadding }) {
     return convTranspose1d({

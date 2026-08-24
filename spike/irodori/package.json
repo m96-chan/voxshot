@@ -1,0 +1,32 @@
+{
+  "name": "spike-irodori",
+  "private": true,
+  "type": "module",
+  "description": "Spike for voxshot#140: Irodori-TTS v4 above the codec \u2014 ModernBERT-ja, the DiT, and the flow-matching loop, on web-xpu-ops.",
+  "scripts": {
+    "check:tokenizer": "tsx check-tokenizer.ts",
+    "typecheck": "tsc --noEmit",
+    "check:bert": "tsx check-bert.ts",
+    "check:speaker": "tsx check-speaker.ts",
+    "check:dit": "tsx check-dit.ts",
+    "check:sampler": "tsx check-sampler.ts",
+    "check:conditions": "tsx check-conditions.ts",
+    "check:duration": "tsx check-duration.ts",
+    "say": "tsx synthesize.ts",
+    "check:dit-gpu": "tsx check-dit-gpu.ts",
+    "serve": "tsx serve.ts",
+    "check:bert-gpu": "tsx check-bert-gpu.ts",
+    "check:speaker-gpu": "tsx check-speaker-gpu.ts",
+    "check:sampler-gpu": "tsx check-sampler.ts --gpu"
+  },
+  "dependencies": {
+    "web-xpu-ops": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@webgpu/types": "^0.1.71",
+    "tsx": "^4.23.5",
+    "typescript": "^5.7.2",
+    "webgpu": "^0.4.0"
+  }
+}

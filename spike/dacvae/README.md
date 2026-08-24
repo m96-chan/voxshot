@@ -222,3 +222,70 @@ stopping there returns 96 channels, which is not a waveform.
 
 `facebookresearch/dacvae` is Apache-2.0. `Aratako/Semantic-DACVAE-Japanese-32dim`
 and `Aratako/Irodori-TTS` are MIT.
+
+## The encode path
+
+Added after `spike/irodori` needed it: cloning a voice means turning a reference
+clip into a latent, and only the decode side existed. It is the decoder
+mirrored — three residual units then `snake -> conv(stride=rate)` where the
+decoder does `snake -> convTranspose -> three residual units` — and needs no
+operation the decoder did not, only a stride the seam here had assumed was 1.
+
+```bash
+npm run check:encode -- --gpu
+```
+
+Three things came out of it that reading the code would not have given.
+
+**A 20-second clip exceeds WebGPU's default buffer limit.** `encoder.block.0`
+widens a 48 kHz waveform to 64 channels before anything downsamples it: 64 x
+950400 x 4 bytes is **243 MB**, against a default
+`maxStorageBufferBindingSize` of 128 MiB. The device now asks for what the
+adapter reports. A browser whose adapter caps at the default would have to chunk
+along time — the decode path never comes close, because it only reaches full
+rate at one channel.
+
+**The last step is a VAE, not a slice.** `quantizer.in_proj` gives 64 channels
+for a 32-dimension latent: the mean and the log-variance. Deterministic encoding
+takes the mean.
+
+**Loudness normalisation had to be ported, not noted.** `encode_waveform`
+normalises to -16 dB LUFS first; skipping it is a 3.36x gain on this clip and
+moves the latent by **50% of peak**. `loudness.ts` is BS.1770-4 with K-weighting
+biquads and the two-stage gate, matching the reference to 2.6e-5 LUFS.
+
+That number is checked directly, and it has to be. The gain here takes the peak
+past full scale, so `ensure_max_of_audio` scales it back to exactly 1.0 and the
+normalised waveform becomes `raw / peak` — **the same signal whatever the meter
+measured**. Breaking the relative gate, the block overlap or the -0.691 offset
+all left the waveform comparison green. Comparing the LUFS value itself is what
+made them fail, and what caught the real bug: `julius.core.unfold` zero-pads the
+tail so every sample is covered by a block, and dropping that partial block was
+0.011 LUFS.
+
+## Running the decode path, rather than checking it
+
+`gpu.ts` reads every result back to a `Float32Array`. That is the right shape
+for `check.ts`, where each stage has to be compared against a golden anyway, and
+the wrong shape for a request. Profiling said so precisely:
+
+```
+  decoder_model_3   2030 ms   127.5 MB
+  decoder_model_4   1859 ms   127.5 MB
+```
+
+Nine operations each, over a tensor copied down and back up between every one.
+
+`gpu-resident.ts` and `decode-gpu.ts` are the same graph with the tensors left
+on the device — **3269 ms to 871 ms** for 6.92 s of audio, agreeing with the
+readback path to 1.05e-7 of peak.
+
+**The workgroup limit is real and it is 65535 on this adapter**, even after
+asking for the adapter's own maximum. `snake` already chunked by channel for
+that reason; `add` and `tanh` did not, because every shape that reached them in
+a test was smaller than one that reaches them in a four-second utterance — 96
+channels of 332160 samples is 124560 workgroups. All three chunk now, and the
+pieces are bound as windows rather than copied.
+
+The engine is the same shape as `spike/irodori`'s. Two spikes now want one, and
+it is written twice; that is the point at which it should move somewhere shared.

@@ -165,3 +165,9 @@ spike/dacvae/golden/
 spike/dacvae/weights/
 spike/dacvae/node_modules/
 spike/dacvae/roundtrip/
+
+# spike/irodori: rendered audio, regenerable — see spike/irodori/README.md
+spike/irodori/samples/
+spike/irodori/golden/
+spike/irodori/.venv/
+spike/irodori/node_modules/

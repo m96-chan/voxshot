@@ -45,6 +45,8 @@ export interface WeightIndex {
     latent_dim: number;
     decoder_dim: number;
     decoder_rates: number[];
+    encoder_dim: number;
+    encoder_rates: number[];
   };
   tensors: Record<string, TensorMeta>;
 }
@@ -108,7 +110,26 @@ export interface ConvWeights {
 }
 
 /** A convolution's effective weight, with `weight_norm` folded in. */
+/**
+ * Folded weights, kept.
+ *
+ * `weight_norm` folding builds a new `Float32Array` every call, and the GPU
+ * engines cache their uploads on array identity — so calling this per request
+ * re-uploaded the whole decode path. Measured at **261 MB a request**, which is
+ * the decoder's weights exactly, and is how a long-lived server reached 25.7 GB
+ * of VRAM.
+ */
+const FOLDED = new Map<string, ConvWeights>();
+
 export function convWeights(prefix: string): ConvWeights {
+  const cached = FOLDED.get(prefix);
+  if (cached) return cached;
+  const built = foldConvWeights(prefix);
+  FOLDED.set(prefix, built);
+  return built;
+}
+
+function foldConvWeights(prefix: string): ConvWeights {
   if (has(`${prefix}.weight`)) {
     // No weight_norm on this one (the reference uses norm="none" in places).
     return {

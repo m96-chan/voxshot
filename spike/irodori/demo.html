@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Irodori-TTS — TypeScript 移植</title>
+<style>
+  :root {
+    --bg:#fbfaf8; --fg:#1c1a17; --muted:#6b6560; --line:#e2ddd6;
+    --card:#fff; --accent:#8a5a2b; --accent-bg:#fdf6ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#171513; --fg:#ece8e2; --muted:#9a938b; --line:#322e29;
+            --card:#201d1a; --accent:#d9a066; --accent-bg:#2a221a; }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:2.5rem 1.25rem 5rem; background:var(--bg); color:var(--fg);
+    font:16px/1.7 -apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+  }
+  main { max-width:44rem; margin:0 auto; }
+  h1 { font-size:1.5rem; margin:0 0 .3rem; letter-spacing:-.01em; }
+  .lede { color:var(--muted); margin:0 0 2rem; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1.1rem; }
+  textarea {
+    width:100%; min-height:5.5rem; resize:vertical; padding:.7rem .8rem;
+    border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg);
+    font:inherit; line-height:1.6;
+  }
+  textarea:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .row { display:flex; gap:.75rem; align-items:center; margin-top:.8rem; flex-wrap:wrap; }
+  button {
+    background:var(--accent); color:#fff; border:0; border-radius:8px;
+    padding:.6rem 1.4rem; font:inherit; font-weight:650; cursor:pointer;
+  }
+  button:disabled { opacity:.5; cursor:default; }
+  button.ghost {
+    background:transparent; color:var(--fg); border:1px solid var(--line); font-weight:500;
+    padding:.4rem .9rem;
+  }
+  button.rec { background:#b03030; color:#fff; border-color:#b03030; }
+  select {
+    font:inherit; padding:.35rem .5rem; border-radius:8px;
+    border:1px solid var(--line); background:var(--bg); color:var(--fg); max-width:20rem;
+  }
+  .status { color:var(--muted); font-size:.92rem; }
+  .presets { display:flex; gap:.4rem; flex-wrap:wrap; margin-top:.9rem; }
+  .presets button {
+    background:transparent; color:var(--muted); border:1px solid var(--line);
+    font-weight:400; padding:.28rem .7rem; font-size:.88rem; border-radius:999px;
+  }
+  audio { width:100%; margin-top:1rem; }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; margin-top:1rem; }
+  th,td { text-align:left; padding:.32rem .5rem; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  h2 { font-size:1.05rem; margin:2.5rem 0 .3rem; padding-bottom:.35rem; border-bottom:1px solid var(--line); }
+  .note { color:var(--muted); font-size:.92rem; }
+  code { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.88em; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Irodori-TTS v4.1 — TypeScript 移植</h1>
+<p class="lede">
+  <strong>声を渡して、文を打ち込むと、その声で喋ります。</strong>
+  話者の学習はありません。渡したクリップだけが話者の情報です。
+  torch は一度も呼びません — トークナイザ、ModernBERT-ja 25 層、12 層の DiT、
+  32 ステップの rectified flow、DACVAE の両端、すべてこの移植と web-xpu-ops です。
+</p>
+
+<div class="box" style="margin-bottom:1rem">
+  <div class="row" style="margin-top:0">
+    <strong>声</strong>
+    <select id="voice"></select>
+    <button id="pick" class="ghost">音声ファイルから</button>
+    <button id="rec" class="ghost">マイクで録音</button>
+    <span class="status" id="vstatus"></span>
+  </div>
+  <input type="file" id="file" accept="audio/*" hidden>
+  <p class="note" style="margin:.7rem 0 0">
+    1〜30 秒。<strong>デコードと 48 kHz へのリサンプルはブラウザがやっています</strong>
+    （<code>decodeAudioData</code> と <code>OfflineAudioContext</code>）。
+    参照実装は torchaudio でリサンプルしますが、この移植にリサンプラはありません。
+    そこから先 — ラウドネス正規化、DACVAE エンコーダ、speaker encoder 8 層 — は全部この移植です。
+  </p>
+</div>
+
+<div class="box">
+  <textarea id="text" placeholder="喋らせたい文を入れてください">こんにちは、今日はいい天気ですね。</textarea>
+  <div class="presets">
+    <button data-text="……ん。来たんだ。">……ん。来たんだ。</button>
+    <button data-text="全部追うの、無理だよ？">全部追うの、無理だよ？</button>
+    <button data-text="えっと、それはちょっと、わたしには難しいかもしれません。">えっと、それはちょっと…</button>
+    <button data-text="明日は晴れるといいですね。そうしたら、今度こそ散歩に行きましょう。">明日は晴れるといいですね…</button>
+  </div>
+  <div class="row">
+    <button id="go">合成する</button>
+    <span class="status" id="status">GPU に常駐済み。1 文あたり数秒。</span>
+  </div>
+  <audio id="player" controls hidden></audio>
+  <table id="timings" hidden>
+    <thead><tr><th>段</th><th class="num">ミリ秒</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<h2>この画面が何をしているか</h2>
+<p class="note">
+  押すたびに全段を計算しています。事前に用意した音声を再生しているのではありません。
+  声は一度エンコードしたら常駐するので、同じ声に戻すのは無料です
+  — 声はクリップ次第で、文には依存しないためです。
+</p>
+<p class="note">
+  <strong>同じ文でも押すたびに音が変わります。</strong> 初期ノイズが毎回違うためで、
+  参照実装がシードを変えたときと同じ性質です。波形の一致は原理的に起きません。
+</p>
+<p class="note">
+  <strong>重い段はすべて WebGPU です</strong> — ModernBERT-ja、speaker encoder、DiT、
+  flow ループ、DACVAE の両端。下の表が段ごとの実測で、<code>duration</code> だけが
+  まだ CPU 参照実装です。
+</p>
+<p class="note">
+  <strong>プロセスは常に 1 コアを回しています。</strong> これは合成とは無関係で、
+  <code>webgpu</code> パッケージ（Dawn の Node binding）が <code>requestDevice()</code> 以降
+  何もしなくても回り続けるためです。実測して上流に報告済み。
+</p>
+<p class="note">
+  一度に 1 リクエストしか処理しません。スクラッチバッファを名前で使い回しているので、
+  同時に 2 本走らせると互いに書き潰して、エラーにならないまま両方間違えます。
+</p>
+
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const text = $("text"), go = $("go"), status = $("status"), player = $("player"), table = $("timings");
+const voice = $("voice"), vstatus = $("vstatus"), file = $("file"), pick = $("pick"), rec = $("rec");
+let url = null;
+
+const RATE = 48000, MAX_SECONDS = 30;
+
+function renderVoices(list, select) {
+  voice.innerHTML = "";
+  for (const v of list) {
+    const option = document.createElement("option");
+    option.value = v.id;
+    option.textContent = `${v.label} — ${v.seconds}s`;
+    voice.append(option);
+  }
+  if (select) voice.value = select;
+}
+
+fetch("/voices").then((r) => r.json()).then((list) => renderVoices(list));
+
+/**
+ * Any audio file or recording to 48 kHz mono float32.
+ *
+ * The browser owns this because the port has no resampler — `encode_waveform`
+ * uses torchaudio and that is not ported. Everything after it is the port.
+ */
+async function toSamples(blob) {
+  const context = new AudioContext();
+  const decoded = await context.decodeAudioData(await blob.arrayBuffer());
+  await context.close();
+  const seconds = Math.min(decoded.duration, MAX_SECONDS);
+  const offline = new OfflineAudioContext(1, Math.floor(seconds * RATE), RATE);
+  const source = offline.createBufferSource();
+  source.buffer = decoded;
+  source.connect(offline.destination);
+  source.start();
+  return (await offline.startRendering()).getChannelData(0);
+}
+
+async function upload(blob, label) {
+  vstatus.textContent = "読み込み中…";
+  pick.disabled = rec.disabled = go.disabled = true;
+  try {
+    const samples = await toSamples(blob);
+    vstatus.textContent = `${(samples.length / RATE).toFixed(1)} 秒をエンコード中…`;
+    const response = await fetch(`/voice?label=${encodeURIComponent(label)}`, {
+      method: "POST",
+      body: samples,
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const { id, voices } = await response.json();
+    renderVoices(voices, id);
+    const added = voices.find((v) => v.id === id);
+    vstatus.textContent = `「${added.label}」を ${added.ms} ms でエンコードしました。`;
+  } catch (error) {
+    vstatus.textContent = `失敗: ${error.message}`;
+  } finally {
+    pick.disabled = rec.disabled = go.disabled = false;
+  }
+}
+
+pick.addEventListener("click", () => file.click());
+file.addEventListener("change", () => {
+  if (file.files[0]) upload(file.files[0], file.files[0].name);
+  file.value = "";
+});
+
+let recorder = null;
+rec.addEventListener("click", async () => {
+  if (recorder) {
+    recorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks = [];
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (event) => chunks.push(event.data);
+    recorder.onstop = () => {
+      for (const track of stream.getTracks()) track.stop();
+      rec.textContent = "マイクで録音";
+      rec.classList.remove("rec");
+      recorder = null;
+      upload(new Blob(chunks, { type: chunks[0]?.type || "audio/webm" }), "録音");
+    };
+    recorder.start();
+    rec.textContent = "録音を止める";
+    rec.classList.add("rec");
+    vstatus.textContent = `${MAX_SECONDS} 秒まで。止めるともう一度押せます。`;
+    setTimeout(() => recorder && recorder.stop(), MAX_SECONDS * 1000);
+  } catch (error) {
+    vstatus.textContent = `マイクを使えません: ${error.message}`;
+    recorder = null;
+  }
+});
+
+for (const b of document.querySelectorAll(".presets button")) {
+  b.addEventListener("click", () => { text.value = b.dataset.text; text.focus(); });
+}
+
+async function say() {
+  const value = text.value.trim();
+  if (!value) { status.textContent = "文を入れてください。"; return; }
+  go.disabled = true;
+  const began = performance.now();
+  const tick = setInterval(() => {
+    status.textContent = `合成中… ${((performance.now() - began) / 1000).toFixed(1)} 秒`;
+  }, 100);
+  try {
+    const response = await fetch(
+      `/say?text=${encodeURIComponent(value)}&voice=${encodeURIComponent(voice.value || "reference")}`,
+    );
+    if (!response.ok) throw new Error(await response.text());
+    const timings = JSON.parse(response.headers.get("x-timings") || "{}");
+    const frames = response.headers.get("x-frames");
+    const blob = await response.blob();
+    if (url) URL.revokeObjectURL(url);
+    url = URL.createObjectURL(blob);
+    player.src = url;
+    player.hidden = false;
+    player.play().catch(() => {});
+    const seconds = (Number(frames) / 25).toFixed(2);
+    status.textContent = `${seconds} 秒の音声を ${(timings.total / 1000).toFixed(1)} 秒で。`;
+    const body = table.querySelector("tbody");
+    body.innerHTML = "";
+    for (const [name, ms] of Object.entries(timings)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${name}</td><td class="num">${ms}</td>`;
+      body.append(tr);
+    }
+    table.hidden = false;
+  } catch (error) {
+    status.textContent = `失敗: ${error.message}`;
+  } finally {
+    clearInterval(tick);
+    go.disabled = false;
+  }
+}
+
+go.addEventListener("click", say);
+text.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") say();
+});
+</script>
+</body>
+</html>
