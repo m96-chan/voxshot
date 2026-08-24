@@ -325,6 +325,31 @@ tables. Two models by the same author, no shared normalisation.
   predictor are not ported. `sample_rf` is 50% of the reference's run.
 - **Browser viability.** The torch numbers above are a workstation GPU.
 
+## Regenerating what is not in git
+
+`golden/` is about 3 GB and `samples/` is audio; neither is committed. Both come
+back from the checkpoints, which Hugging Face has already cached — no download.
+
+```bash
+cd spike/irodori
+git clone https://github.com/Aratako/Irodori-TTS /tmp/Irodori-TTS
+export IRODORI_REPO=/tmp/Irodori-TTS
+V=../dacvae/.venv/bin/python
+
+$V dump_tokenizer.py                       # golden/tokenizer_vectors.json
+$V dump_bert.py                            # golden/bert/ — ModernBERT-ja weights + per-layer
+$V dump_model.py                           # golden/model/ — the other 562 tensors
+$V dump_golden.py --text "……ん。来たんだ。" \
+     --ref-wav samples/reference-voice.wav  # golden/ — the pipeline, stage by stage
+npx tsx reference-wav.ts                   # samples/reference-01.wav
+```
+
+`spike/dacvae` needs its own `dump_weights.py` and `dump_golden.py` first — see
+its README. The codec's weights are what both halves decode and encode with.
+
+`samples/reference-voice.wav` is the one file here that is *not* regenerable: it
+is the clip everything clones from. Keep it.
+
 ## Licences
 
 Code MIT (`Aratako/Irodori-TTS`), weights MIT with ethical restrictions,
