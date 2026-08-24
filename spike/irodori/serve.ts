@@ -161,10 +161,34 @@ async function main(): Promise<void> {
   const retain = [instance, adapter];
   const gpu = Gpu.fromDevice(device, info, retain);
   gpu.begin();
+
+  /**
+   * Device errors, made loud.
+   *
+   * The checks call `gpu.check()` and this did not, so a validation error here
+   * produced a dispatch against whatever the driver handed back and the request
+   * returned noise with a 200. "Used in submit while destroyed" is the one that
+   * has actually happened; there is no reason to think it is the only one.
+   *
+   * Both the uncaptured handler and the per-request scope are here because they
+   * catch different things: the scope covers what a request records, the
+   * handler covers everything else including work already in flight.
+   */
+  let deviceFault: string | null = null;
+  device.addEventListener("uncapturederror", (event) => {
+    const message = (event as GPUUncapturedErrorEvent).error.message;
+    deviceFault = message;
+    console.error(`\n[device error] ${message}\n`);
+  });
+  device.lost.then((reason) => {
+    deviceFault = `device lost: ${reason.message}`;
+    console.error(`\n[device lost] ${reason.message}\n`);
+  });
   // Both codec directions on the resident engine, sharing the device with the
   // model's. The readback path is still what `check.ts` and `check-encode.ts`
   // compare against; it is not what a request runs.
   const codecResident = new ResidentGpu(device, info, retain);
+  codecResident.begin();
 
   const started = Date.now();
   const bert = loadBertWeights(join(GOLDEN, "bert")).weights;
@@ -455,7 +479,12 @@ async function main(): Promise<void> {
       }
       queue = queue.then(async () => {
         try {
+          if (deviceFault) throw new Error(`the device is in a bad state: ${deviceFault}`);
           const result = await say(text, voice);
+          // Whatever this request recorded, checked before its audio is
+          // returned. An invalid dispatch is silent otherwise.
+          await gpu.check("synthesising");
+          await codecResident.check("decoding");
           console.log(
             `"${text.slice(0, 30)}" as ${voice.label} -> ${result.frames} frames in ` +
               `${result.timings.total} ms (flow ${result.timings.flow}, decode ${result.timings.decode})`,

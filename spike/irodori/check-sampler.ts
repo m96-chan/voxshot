@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type Context, projectContexts } from "./dit.js";
+import { sampleGpu } from "./sampler-gpu.js";
 import { loadModelWeights } from "./model-weights.js";
 import { condModule, linearSchedule, sample, timestepEmbedding, velocityFor } from "./sampler.js";
 
@@ -28,6 +29,12 @@ import { condModule, linearSchedule, sample, timestepEmbedding, velocityFor } fr
  *
  * `--stop-at <step>` ends the run once every golden up to that step has been
  * compared, which is what makes checking the guidance combination affordable.
+ *
+ * `--gpu` runs `sampler-gpu.ts` against the same goldens instead. **That is the
+ * check this file was missing**, and its absence cost a working demo: every
+ * stage had one, the device sampler that stitches them together did not, and a
+ * buffer released before its recorded commands were submitted turned the audio
+ * into noise while all of them stayed green. It takes seconds, not minutes.
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -51,6 +58,14 @@ const STEPS = 32;
  * than a stage that never sees it. The bound is set from that measurement.
  */
 const TOLERANCE = 5e-6;
+/**
+ * The device path's bound, set from what it achieves.
+ *
+ * Looser than the CPU path's for the reason `check-dit-gpu.ts` gives: the
+ * device tiles its matmuls and reduces in a tree where the reference walks K in
+ * one loop, and 32 integrated steps carry that difference forward.
+ */
+const TOLERANCE_GPU = 5e-5;
 
 function golden(name: string): Float32Array {
   const bytes = readFileSync(join(GOLDEN, `${name}.f32`));
@@ -198,6 +213,63 @@ if (quick) {
 }
 
 class StopEarly extends Error {}
+
+if (process.argv.includes("--gpu")) {
+  const { create, globals } = await import("webgpu");
+  Object.assign(globalThis, globals);
+  const { Gpu } = await import("./gpu.js");
+  const instance = create([]);
+  const adapter = await instance.requestAdapter();
+  if (!adapter) throw new Error("no WebGPU adapter");
+  const info = adapter.info?.description ?? "unknown adapter";
+  const gpu = Gpu.fromDevice(await Gpu.requestDevice(adapter), info, [instance, adapter]);
+  gpu.begin();
+
+  console.log(`sampling ${tokens} latent frames on ${info}\n`);
+  const started = Date.now();
+  const final = await sampleGpu({
+    gpu,
+    weights,
+    noise,
+    guided,
+    plain,
+    scales: [3.0, 5.0],
+    steps: STEPS,
+    onStep: (step, _t, isGuided) => {
+      const theirs = recorded.get(step);
+      if (!theirs) return;
+      // `onStep` fires before the step runs, so `x` is what the loop is about
+      // to integrate — the same instant the CPU path records.
+      void isGuided;
+    },
+  });
+  // The device sampler does not hand out `x_t` mid-loop, so the goldens are
+  // compared by re-running to each recorded step and reading the result.
+  let bad = 0;
+  for (const step of [1, 16, 31]) {
+    const partial = await sampleGpu({
+      gpu,
+      weights,
+      noise,
+      guided,
+      plain,
+      scales: [3.0, 5.0],
+      steps: STEPS,
+      stopAfter: step,
+    });
+    if (!report(`x_t at step ${step}`, partial, recorded.get(step)!, TOLERANCE_GPU)) bad += 1;
+  }
+  console.log(`\n${STEPS} steps in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+  console.log(`final latent: ${final.length / config.latent_dim} frames of ${config.latent_dim}`);
+  console.log(
+    bad > 0
+      ? `\n${bad} comparisons disagree`
+      : `\nthe device sampler tracks the reference to ${TOLERANCE_GPU.toExponential(0)} of peak`,
+  );
+  if (bad > 0) process.exitCode = 1;
+  gpu.destroy();
+  process.exit();
+}
 
 console.log(`sampling ${tokens} latent frames from the reference's own noise`);
 const started = Date.now();

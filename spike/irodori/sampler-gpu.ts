@@ -55,6 +55,8 @@ export interface GpuSampleArgs {
   cfgMinT?: number;
   cfgMaxT?: number;
   onStep?: (step: number, t: number, guided: boolean) => void;
+  /** Stop once this many steps have run, for comparing against a recorded one. */
+  stopAfter?: number;
 }
 
 export async function sampleGpu({
@@ -68,6 +70,7 @@ export async function sampleGpu({
   cfgMinT = 0.5,
   cfgMaxT = 1.0,
   onStep,
+  stopAfter,
 }: GpuSampleArgs): Promise<Float32Array> {
   const { dit, config } = weights;
   const { dim, rank } = dit.shape;
@@ -170,6 +173,7 @@ export async function sampleGpu({
   let x = noise.slice();
 
   for (let step = 0; step < steps; step += 1) {
+    if (stopAfter !== undefined && step >= stopAfter) return x;
     const t = schedule[step]!;
     const isGuided = t >= cfgMinT && t <= cfgMaxT;
     const batch = isGuided ? guidedBatch : 1;

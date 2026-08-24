@@ -16,7 +16,8 @@
     "check:dit-gpu": "tsx check-dit-gpu.ts",
     "serve": "tsx serve.ts",
     "check:bert-gpu": "tsx check-bert-gpu.ts",
-    "check:speaker-gpu": "tsx check-speaker-gpu.ts"
+    "check:speaker-gpu": "tsx check-speaker-gpu.ts",
+    "check:sampler-gpu": "tsx check-sampler.ts --gpu"
   },
   "dependencies": {
     "web-xpu-ops": "^0.2.0"

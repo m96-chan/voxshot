@@ -452,6 +452,12 @@ export class Gpu {
    * gigabytes for nothing.
    */
   releaseScratch(prefix?: string): number {
+    // Anything recorded and not yet submitted reads these buffers. Destroying
+    // them first is not an error the API reports — the dispatch runs against
+    // whatever the driver hands back — and the audio comes out as noise. This
+    // cost a working demo and was invisible to every stage check, because no
+    // check ran the sampler that calls it.
+    this.flush();
     let freed = 0;
     for (const [slot, held] of [...this.pool]) {
       if (prefix !== undefined && !slot.startsWith(prefix)) continue;
