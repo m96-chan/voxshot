@@ -197,6 +197,44 @@ async function main(): Promise<void> {
     if (!report("latent", swapped, theirs)) failures += 1;
   }
 
+  // The device-resident path, against the same golden and the same input. It is
+  // what the server runs; this one comparison is what says the two agree.
+  if (useGpu) {
+    const { ResidentGpu } = await import("./gpu-resident.js");
+    const { encodeGpu, padForHop } = await import("./encode-gpu.js");
+    const { create: create2 } = await import("webgpu");
+    const instance2 = create2([]);
+    const adapter2 = await instance2.requestAdapter();
+    if (adapter2) {
+      const resident = new ResidentGpu(await ResidentGpu.requestDevice(adapter2), "resident", [
+        instance2,
+        adapter2,
+      ]);
+      resident.begin();
+      const padded = padForHop(normalized.data, config.hopLength);
+      const uploaded = resident.upload(padded);
+      await resident.read(encodeGpu(resident, uploaded, padded.length).tensor); // warm
+      const began = Date.now();
+      const out = encodeGpu(resident, uploaded, padded.length);
+      const mineResident = await resident.read(out.tensor);
+      await resident.check("device-resident encode");
+      const residentMs = Date.now() - began;
+      const swapped = new Float32Array(mineResident.length);
+      for (let frame = 0; frame < out.length; frame += 1) {
+        for (let d = 0; d < config.latentDim; d += 1) {
+          swapped[frame * config.latentDim + d] = mineResident[d * out.length + frame]!;
+        }
+      }
+      console.log(`device-resident encode in ${(residentMs / 1000).toFixed(1)}s`);
+      if (report("latent (resident)", swapped, golden("latent"))) {
+        console.log();
+      } else {
+        failures += 1;
+      }
+      resident.destroy();
+    }
+  }
+
   console.log();
   if (failures > 0) {
     console.log(`${failures} stages disagree`);

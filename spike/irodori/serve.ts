@@ -7,9 +7,9 @@ import { create, globals } from "webgpu";
 
 Object.assign(globalThis, globals);
 
-import { gpuBackend, Gpu as CodecGpu } from "../dacvae/gpu.js";
 import { decodeGpu } from "../dacvae/decode-gpu.js";
-import { encode } from "../dacvae/encoder.js";
+import { encodeGpu, padForHop } from "../dacvae/encode-gpu.js";
+import { encoderConfig } from "../dacvae/encoder.js";
 import { ResidentGpu } from "../dacvae/gpu-resident.js";
 import { normalizeLoudness } from "../dacvae/loudness.js";
 import { loadBertWeights } from "./bert-weights.js";
@@ -21,7 +21,8 @@ import { loadModelWeights } from "./model-weights.js";
 import { realLength } from "./modernbert.js";
 import { prepareBert, runBertGpu } from "./modernbert-gpu.js";
 import { sampleGpu } from "./sampler-gpu.js";
-import { patchReference, runSpeakerEncoder } from "./speaker-encoder.js";
+import { patchReference } from "./speaker-encoder.js";
+import { prepareSpeaker, runSpeakerGpu } from "./speaker-encoder-gpu.js";
 import { normalizeText } from "./text.js";
 import { loadTokenizer, type TokenizerJson } from "./tokenizer.js";
 
@@ -35,13 +36,24 @@ import { loadTokenizer, type TokenizerJson } from "./tokenizer.js";
  * Everything below the text box is computed when the request arrives, by this
  * port, on this machine's GPU.
  *
+ * ## Voices are swappable, which is the whole point of the model
+ *
+ * Irodori is zero-shot: the reference clip *is* the speaker, and a demo with
+ * one baked-in voice shows everything about the model except the interesting
+ * part. `POST /voice` takes 48 kHz mono float32 PCM, encodes it, runs the
+ * speaker encoder, and keeps the result under an id that `/say` can name.
+ *
+ * **The browser does the decoding and resampling**, through
+ * `decodeAudioData` and an `OfflineAudioContext`. That is not modesty about
+ * where the work happens: `encode_waveform` resamples with torchaudio and this
+ * port has no resampler, so the alternative would be refusing everything that
+ * is not already 48 kHz. The page says so.
+ *
  * ## What is warm and what is not
  *
- * The model is loaded once and the device stays alive for the process, so a
- * request pays for its own text and nothing else. The reference clip's latent
- * and the speaker state are computed once at startup — they depend on the
- * voice, not the sentence — which is what makes a request about ten seconds
- * rather than twenty.
+ * The model is loaded once and the device stays alive for the process. A voice
+ * is encoded when it arrives and cached after that, so swapping back to one you
+ * have used is free; a sentence pays only for itself.
  *
  * ## Not concurrent
  *
@@ -65,6 +77,15 @@ const PORT = Number(process.env.PORT ?? 8123);
 const STEPS = 32;
 const SAMPLE_RATE = 48000;
 const MAX_TEXT = 200;
+/**
+ * How long a reference clip may be.
+ *
+ * The model's own config allows 120 s. This is lower because the encoder widens
+ * a 48 kHz waveform to 64 channels before it downsamples anything — 30 s is
+ * 368 MB for that one activation — and because a demo that takes a minute to
+ * accept a voice is not one.
+ */
+const MAX_CLIP_SECONDS = 30;
 
 function wav(samples: Float32Array, rate: number): Buffer {
   const data = Buffer.alloc(samples.length * 2);
@@ -140,10 +161,9 @@ async function main(): Promise<void> {
   const retain = [instance, adapter];
   const gpu = Gpu.fromDevice(device, info, retain);
   gpu.begin();
-  // Two engines on one device. The encoder still uses the readback path — it
-  // runs once at startup, where four seconds is not worth a second port — and
-  // the decoder uses the resident one, where it was most of every request.
-  const codec = gpuBackend(CodecGpu.fromDevice(device, info, retain));
+  // Both codec directions on the resident engine, sharing the device with the
+  // model's. The readback path is still what `check.ts` and `check-encode.ts`
+  // compare against; it is not what a request runs.
   const codecResident = new ResidentGpu(device, info, retain);
 
   const started = Date.now();
@@ -153,40 +173,71 @@ async function main(): Promise<void> {
   const tokenizer = loadTokenizer(JSON.parse(readFileSync(TOKENIZER_JSON, "utf8")) as TokenizerJson);
   console.log(`weights loaded in ${((Date.now() - started) / 1000).toFixed(1)}s on ${info}`);
 
-  // The voice, once. It depends on the clip and not on the sentence, so paying
-  // for it per request would double the wait for nothing.
-  const voicePath = join(HERE, "samples", "reference-voice.wav");
-  const voiceStarted = Date.now();
-  const normalized = normalizeLoudness(readWav(voicePath), SAMPLE_RATE, -16);
-  const encoded = await encode(
-    { data: normalized.data, channels: 1, length: normalized.data.length },
-    { backend: codec },
-  );
-  const refLatent = new Float32Array(encoded.data.length);
-  for (let frame = 0; frame < encoded.length; frame += 1) {
-    for (let d = 0; d < encoded.channels; d += 1) {
-      refLatent[frame * encoded.channels + d] = encoded.data[d * encoded.length + frame]!;
-    }
+  interface Voice {
+    id: string;
+    label: string;
+    seconds: number;
+    context: Context;
+    /** The first token, the masked-mean summary the duration predictor wants. */
+    summary: Float32Array;
+    ms: number;
   }
-  const patchedRef = patchReference(
-    refLatent,
-    new Array<boolean>(encoded.length).fill(true),
-    config.latent_dim,
-    config.speaker_patch_size,
+
+  /**
+   * A clip to a speaker condition.
+   *
+   * Loudness-normalise, encode, patch, eight blocks, `speaker_norm`, prepend
+   * the mean token. Every step of that is this port; the browser only supplied
+   * 48 kHz mono samples.
+   */
+  async function makeVoice(id: string, label: string, samples: Float32Array): Promise<Voice> {
+    const began = Date.now();
+    const normalized = normalizeLoudness(samples, SAMPLE_RATE, -16);
+    const padded = padForHop(normalized.data, encoderConfig().hopLength);
+    const encoded = encodeGpu(codecResident, codecResident.writeInto("voice.wave", padded), padded.length);
+    const channelMajor = await codecResident.read(encoded.tensor);
+    const latent = new Float32Array(channelMajor.length);
+    for (let frame = 0; frame < encoded.length; frame += 1) {
+      for (let d = 0; d < encoded.channels; d += 1) {
+        latent[frame * encoded.channels + d] = channelMajor[d * encoded.length + frame]!;
+      }
+    }
+    const patched = patchReference(
+      latent,
+      new Array<boolean>(encoded.length).fill(true),
+      config.latent_dim,
+      config.speaker_patch_size,
+    );
+    const patchedDim = patched.latent.length / patched.keep.length;
+    const state = await gpu.read(
+      runSpeakerGpu(
+        prepareSpeaker(gpu, weights, patched.keep),
+        gpu.writeInto("voice.latent", patched.latent),
+        patchedDim,
+      ),
+    );
+    await gpu.check(`encoding ${label}`);
+    const withMean = prependMeanToken(state, patched.keep, config.speaker_dim);
+    return {
+      id,
+      label,
+      seconds: samples.length / SAMPLE_RATE,
+      context: { state: withMean.state, keep: withMean.keep },
+      summary: withMean.state.subarray(0, config.speaker_dim),
+      ms: Date.now() - began,
+    };
+  }
+
+  const voices = new Map<string, Voice>();
+  const builtIn = await makeVoice(
+    "reference",
+    "reference-voice.wav",
+    readWav(join(HERE, "samples", "reference-voice.wav")),
   );
-  const speakerRun = runSpeakerEncoder({ weights, latent: patchedRef.latent, keep: patchedRef.keep });
-  const speakerNormed = conditionNorm(
-    speakerRun.state,
-    weights.speaker.outNorm,
-    patchedRef.keep.length,
-    config.speaker_dim,
-    weights.normEps,
-  );
-  const withMean = prependMeanToken(speakerNormed, patchedRef.keep, config.speaker_dim);
-  const speakerContext: Context = { state: withMean.state, keep: withMean.keep };
+  voices.set(builtIn.id, builtIn);
   console.log(
-    `voice ready in ${((Date.now() - voiceStarted) / 1000).toFixed(1)}s — ` +
-      `${encoded.length} latent frames, ${withMean.keep.length} speaker tokens`,
+    `built-in voice ready in ${(builtIn.ms / 1000).toFixed(1)}s — ` +
+      `${builtIn.seconds.toFixed(1)}s of audio, ${builtIn.context.keep.length} speaker tokens`,
   );
 
   const captionDim = config.caption_dim ?? config.text_dim;
@@ -198,7 +249,10 @@ async function main(): Promise<void> {
   /** One render at a time — see the module note. */
   let queue: Promise<unknown> = Promise.resolve();
 
-  async function say(text: string): Promise<{ audio: Buffer; timings: Record<string, number>; frames: number }> {
+  async function say(
+    text: string,
+    voice: Voice,
+  ): Promise<{ audio: Buffer; timings: Record<string, number>; frames: number }> {
     const t0 = Date.now();
     const normalizedText = normalizeText(text).trim();
     const body = tokenizer.encodePieces(normalizedText).slice(0, config.max_text_len - 1);
@@ -221,18 +275,18 @@ async function main(): Promise<void> {
       weights,
       textState,
       textKeep: textContext.keep,
-      speakerVec: withMean.state.subarray(0, config.speaker_dim),
+      speakerVec: voice.summary,
       captionVec: null,
     });
     const frames = Math.max(1, Math.round(framesFrom(logFrames)));
 
-    const plain = { text: textContext, speaker: speakerContext, caption: captionContext };
+    const plain = { text: textContext, speaker: voice.context, caption: captionContext };
     const dims = { text: config.text_dim, speaker: config.speaker_dim, caption: captionDim };
     const guided = stack(
       [
         plain,
         { ...plain, text: dropped(textContext, config.text_dim) },
-        { ...plain, speaker: dropped(speakerContext, config.speaker_dim) },
+        { ...plain, speaker: dropped(voice.context, config.speaker_dim) },
       ],
       dims,
     );
@@ -293,42 +347,110 @@ async function main(): Promise<void> {
   }
 
   const page = readFileSync(join(HERE, "demo.html"));
+
+  /** Read a whole request body, up to a cap. */
+  function body(request: import("node:http").IncomingMessage, cap: number): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const parts: Buffer[] = [];
+      let size = 0;
+      request.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > cap) {
+          reject(new Error(`clip is larger than ${(cap / 1e6).toFixed(0)} MB of samples`));
+          request.destroy();
+          return;
+        }
+        parts.push(chunk);
+      });
+      request.on("end", () => resolve(Buffer.concat(parts)));
+      request.on("error", reject);
+    });
+  }
+
+  const listing = () =>
+    JSON.stringify(
+      [...voices.values()].map((voice) => ({
+        id: voice.id,
+        label: voice.label,
+        seconds: Number(voice.seconds.toFixed(2)),
+        tokens: voice.context.keep.length,
+        ms: voice.ms,
+      })),
+    );
+
   createServer((request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
+    const send = (code: number, type: string, payload: string | Buffer, extra: Record<string, string> = {}) => {
+      response.writeHead(code, { "content-type": type, ...extra });
+      response.end(payload);
+    };
+
     if (url.pathname === "/") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(page);
+      send(200, "text/html; charset=utf-8", page);
       return;
     }
-    if (url.pathname === "/say") {
-      const text = (url.searchParams.get("text") ?? "").slice(0, MAX_TEXT);
-      if (!text.trim()) {
-        response.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
-        response.end("text is required");
-        return;
-      }
+
+    if (url.pathname === "/voices") {
+      send(200, "application/json; charset=utf-8", listing());
+      return;
+    }
+
+    if (url.pathname === "/voice" && request.method === "POST") {
+      // Serialised with the renders: the scratch pool is one set of buffers, so
+      // encoding a voice while a sentence is in flight would corrupt both.
       queue = queue.then(async () => {
         try {
-          const result = await say(text);
-          console.log(
-            `"${text.slice(0, 30)}" -> ${result.frames} frames in ${result.timings.total} ms ` +
-              `(flow ${result.timings.flow}, decode ${result.timings.decode})`,
-          );
-          response.writeHead(200, {
-            "content-type": "audio/wav",
-            "content-length": String(result.audio.length),
-            "x-timings": JSON.stringify(result.timings),
-            "x-frames": String(result.frames),
-          });
-          response.end(result.audio);
+          const raw = await body(request, MAX_CLIP_SECONDS * SAMPLE_RATE * 4);
+          if (raw.length % 4 !== 0) throw new Error("body is not whole float32 samples");
+          const samples = new Float32Array(raw.buffer, raw.byteOffset, raw.length / 4);
+          if (samples.length < SAMPLE_RATE) throw new Error("a clip shorter than one second is not enough voice");
+          const label = (url.searchParams.get("label") ?? "uploaded").slice(0, 60);
+          const id = `v${voices.size}`;
+          // Copied out of the request buffer: the Float32Array above is a view
+          // onto a pooled Buffer that Node is free to reuse.
+          const voice = await makeVoice(id, label, new Float32Array(samples));
+          voices.set(id, voice);
+          console.log(`voice "${label}" (${voice.seconds.toFixed(1)}s) ready in ${voice.ms} ms`);
+          send(200, "application/json; charset=utf-8", JSON.stringify({ id, voices: JSON.parse(listing()) }));
         } catch (error) {
           console.error(error);
-          response.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
-          response.end(String((error as Error).message ?? error));
+          send(400, "text/plain; charset=utf-8", String((error as Error).message ?? error));
         }
       });
       return;
     }
+
+    if (url.pathname === "/say") {
+      const text = (url.searchParams.get("text") ?? "").slice(0, MAX_TEXT);
+      const voice = voices.get(url.searchParams.get("voice") ?? "reference");
+      if (!text.trim()) {
+        send(400, "text/plain; charset=utf-8", "text is required");
+        return;
+      }
+      if (!voice) {
+        send(404, "text/plain; charset=utf-8", "no such voice — upload one or use \"reference\"");
+        return;
+      }
+      queue = queue.then(async () => {
+        try {
+          const result = await say(text, voice);
+          console.log(
+            `"${text.slice(0, 30)}" as ${voice.label} -> ${result.frames} frames in ` +
+              `${result.timings.total} ms (flow ${result.timings.flow}, decode ${result.timings.decode})`,
+          );
+          send(200, "audio/wav", result.audio, {
+            "content-length": String(result.audio.length),
+            "x-timings": JSON.stringify(result.timings),
+            "x-frames": String(result.frames),
+          });
+        } catch (error) {
+          console.error(error);
+          send(500, "text/plain; charset=utf-8", String((error as Error).message ?? error));
+        }
+      });
+      return;
+    }
+
     response.writeHead(404).end();
   }).listen(PORT, "127.0.0.1", () => {
     console.log(`\nlistening on http://127.0.0.1:${PORT}`);

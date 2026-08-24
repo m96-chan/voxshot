@@ -212,16 +212,31 @@ it.
 is what a non-autoregressive model needs and an autoregressive one does not. It
 agrees to 7e-8 and predicts 97.07 frames — the 97 the pipeline used.
 
-## Type a sentence, hear it
+## Hand it a voice, type a sentence, hear it
 
 ```bash
 cd spike/irodori && npm run serve      # then open http://127.0.0.1:8123
 ```
 
 Everything below the text box is computed when the request arrives. About
-**9 seconds** a sentence: the model stays loaded, the device stays alive, and
-the reference clip is encoded once at startup because the voice depends on the
-clip and not on the sentence.
+**2.5 seconds** a sentence, and **half a second** to take on a new voice.
+
+Voices are the point. Irodori is zero-shot — the reference clip *is* the
+speaker — so a demo with one baked-in voice shows everything about the model
+except the interesting part. Upload an audio file or record from the mic; the
+clip is encoded once and cached, so switching back to one already used is free.
+
+**The browser decodes and resamples**, through `decodeAudioData` and an
+`OfflineAudioContext`. That is not a detail to be modest about: the reference
+resamples with torchaudio and this port has no resampler, so the alternative
+would be refusing anything that is not already 48 kHz. Everything after those
+samples — loudness normalisation, the DACVAE encoder, the speaker encoder — is
+the port.
+
+The same sentence in two different voices comes out at different lengths (the
+duration predictor reads the speaker) and differs in long-term spectrum by 0.48,
+against the 0.12–0.41 that two renders of the *same* voice differ by. The voice
+is doing something.
 
 The same sentence sounds different each time — the initial noise is redrawn per
 request, which is the same property the reference has when its seed changes.
@@ -276,22 +291,24 @@ the same timing and the same broad spectrum as the reference, which is what a
 correct port should do and what a subtly wrong one would not. Whether it sounds
 good is a listening question and still belongs to whoever is choosing.
 
-**Speed, and where it still goes.** The DiT and the flow loop run on the device
-now (`gpu.ts`, `dit-gpu.ts`): the 32-step loop is **3.7 s** where it was 1476 s,
-and a whole utterance is 22 s from a cold start or about 9 s against a warm
-server.
-
-What is left on the CPU reference is ModernBERT-ja (~3 s) and the speaker
-encoder (~6 s, and only when the voice changes). The server prints the
-breakdown per request, so which half is which is a number rather than a claim.
+**Speed.** Every expensive stage is on the device now — ModernBERT-ja, the
+speaker encoder, the DiT and its flow loop, and both codec directions.
 
 | stage | where | ms |
 | --- | --- | --- |
 | tokenize | host | 0 |
-| text encoder | **CPU reference** | ~3000 |
-| duration | host | ~300 |
-| flow, 32 steps | WebGPU | ~3500 |
-| codec decode | WebGPU | ~2000 |
+| text encoder | WebGPU | ~40 |
+| duration | host | ~235 |
+| flow, 32 steps | WebGPU | ~1300 |
+| codec decode | WebGPU | ~660 |
+| **a sentence** | | **~2250** |
+| taking on a new voice | WebGPU | ~500 |
+
+The process pins one CPU core throughout, and that is **not** the synthesis:
+`webgpu@0.4.0` spins from `requestDevice()` until `device.destroy()`, doing
+nothing. Measured — 109% of a core with an open device and no work — and
+reported upstream. Subtracting that baseline, a request's own CPU is
+indistinguishable from zero.
 
 Irodori's `normalize_text` also differs from MioTTS's at every point that
 matters: spaces survive, bracket stripping walks the string for depth rather
