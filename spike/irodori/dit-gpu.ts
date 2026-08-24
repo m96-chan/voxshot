@@ -101,18 +101,52 @@ export interface GpuDit {
   outProjBiasRows: Tensor;
 }
 
-function halve(source: Float32Array): Float32Array {
-  const out = new Float32Array(source.length);
-  for (let i = 0; i < source.length; i += 1) out[i] = source[i]! * 0.5;
-  return out;
+/**
+ * Derived weights, memoised on the array they came from.
+ *
+ * `Gpu.weight` caches on the `Float32Array` itself, so handing it a freshly
+ * built one uploads again. `prepareGpu` runs twice per request — once per batch
+ * — and every run rebuilt twelve halved `gate`s and twelve halved `wo`s, which
+ * is 314 MB of VRAM per request that nothing ever freed. A server answering a
+ * few dozen sentences reached 25.7 GB and took the machine's other work with it.
+ */
+const DERIVED = new WeakMap<Float32Array, Map<string, Float32Array>>();
+function derive(source: Float32Array, tag: string, make: () => Float32Array): Float32Array {
+  let byTag = DERIVED.get(source);
+  if (!byTag) {
+    byTag = new Map();
+    DERIVED.set(source, byTag);
+  }
+  let found = byTag.get(tag);
+  if (!found) {
+    found = make();
+    byTag.set(tag, found);
+  }
+  return found;
+}
+
+export function halveFor(source: Float32Array): Float32Array {
+  return derive(source, "half", () => {
+    const out = new Float32Array(source.length);
+    for (let i = 0; i < source.length; i += 1) out[i] = source[i]! * 0.5;
+    return out;
+  });
 }
 
 /** One row per output row, so a `[rows, D]` bias can be added with `elementwise`. */
-function repeatRows(vector: Float32Array, rows: number): Float32Array {
-  const out = new Float32Array(rows * vector.length);
-  for (let row = 0; row < rows; row += 1) out.set(vector, row * vector.length);
-  return out;
+export function repeatRowsFor(vector: Float32Array, rows: number): Float32Array {
+  return derive(vector, `rows:${rows}`, () => {
+    const out = new Float32Array(rows * vector.length);
+    for (let row = 0; row < rows; row += 1) out.set(vector, row * vector.length);
+    return out;
+  });
 }
+
+/** A constant tensor of `value`, memoised so it uploads once per shape. */
+export function filled(value: number, length: number): Float32Array {
+  return derive(FILL_KEY, `${value}:${length}`, () => new Float32Array(length).fill(value));
+}
+const FILL_KEY = new Float32Array(1);
 
 /**
  * Upload everything that does not change, once.
@@ -181,8 +215,8 @@ export function prepareGpu(args: {
       wq: gpu.weight(block.wq),
       wk: gpu.weight(block.wk),
       wv: gpu.weight(block.wv),
-      gate: gpu.weight(halve(block.gate)),
-      wo: gpu.weight(halve(block.wo)),
+      gate: gpu.weight(halveFor(block.gate)),
+      wo: gpu.weight(halveFor(block.wo)),
       qNorm: gpu.weight(block.qNorm),
       kNorm,
       w1: gpu.weight(block.w1),
@@ -220,10 +254,10 @@ export function prepareGpu(args: {
     inProj: gpu.weight(dit.inProjWeight),
     inProjBias: gpu.weight(dit.inProjBias),
     broadcast: gpu.writeIntsInto(`prep.idx.${batch}`, indices),
-    ones: gpu.writeInto(`prep.ones.${batch}`, new Float32Array(batch * tokens * dim).fill(1)),
+    ones: gpu.writeInto(`prep.ones.${batch}`, filled(1, batch * tokens * dim)),
     keyBias: gpu.writeInto(`prep.bias.${batch}`, bias),
-    inProjBiasRows: gpu.writeInto(`prep.inb.${batch}`, repeatRows(dit.inProjBias, batch * tokens)),
-    outProjBiasRows: gpu.writeInto(`prep.outb.${batch}`, repeatRows(dit.outProjBias, batch * tokens)),
+    inProjBiasRows: gpu.writeInto(`prep.inb.${batch}`, repeatRowsFor(dit.inProjBias, batch * tokens)),
+    outProjBiasRows: gpu.writeInto(`prep.outb.${batch}`, repeatRowsFor(dit.outProjBias, batch * tokens)),
   };
 }
 

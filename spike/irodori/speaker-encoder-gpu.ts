@@ -1,6 +1,7 @@
 import { ACTIVATION } from "web-xpu-ops/ops/activation";
 
 import { ROPE_THETA } from "./blocks.js";
+import { filled, halveFor as halve, repeatRowsFor as repeatRows } from "./dit-gpu.js";
 import type { Gpu, Tensor } from "./gpu.js";
 import type { ModelWeights } from "./model-weights.js";
 
@@ -68,18 +69,6 @@ export interface GpuSpeaker {
   frames: number;
 }
 
-function halve(source: Float32Array): Float32Array {
-  const out = new Float32Array(source.length);
-  for (let i = 0; i < source.length; i += 1) out[i] = source[i]! * 0.5;
-  return out;
-}
-
-function repeatRows(vector: Float32Array, rows: number): Float32Array {
-  const out = new Float32Array(rows * vector.length);
-  for (let row = 0; row < rows; row += 1) out.set(vector, row * vector.length);
-  return out;
-}
-
 /**
  * Upload the weights once and the per-clip shapes per call.
  *
@@ -114,11 +103,11 @@ export function prepareSpeaker(
     inProj: gpu.weight(speaker.inProjWeight),
     inProjBias: gpu.writeInto("spk.bias", repeatRows(speaker.inProjBias, frames)),
     outNorm: gpu.weight(speaker.outNorm),
-    ones: gpu.writeInto("spk.ones", new Float32Array(frames * dim).fill(1)),
+    ones: gpu.writeInto("spk.ones", filled(1, frames * dim)),
     keyBias: gpu.writeInto("spk.mask", Float32Array.from(keep, (k) => (k ? 0 : -Infinity))),
     // `x = x / 6.0` in the reference, on its own line, with no comment. As a
     // tensor because `elementwise` has no scalar form.
-    sixth: gpu.writeInto("spk.sixth", new Float32Array(frames * dim).fill(1 / 6)),
+    sixth: gpu.writeInto("spk.sixth", filled(1 / 6, frames * dim)),
     dim,
     heads: speaker.heads,
     mlpHidden: speaker.mlpHidden,

@@ -75,7 +75,8 @@ export class Gpu {
   private readonly pipelines = new Map<string, GPUComputePipeline>();
   private readonly resident = new WeakMap<Float32Array, Tensor>();
   private readonly owned: GPUBuffer[] = [];
-  private readonly pool = new Map<string, Tensor>();
+  /** slot -> the buffer backing it, and how many f32 it can hold. */
+  private readonly pool = new Map<string, { buffer: GPUBuffer; capacity: number; uid: number }>();
   private readonly groups = new Map<string, GPUBindGroup>();
   private readonly uniforms = new Map<string, GPUBuffer>();
   private nextUid = 1;
@@ -84,7 +85,7 @@ export class Gpu {
   private recorded = 0;
 
   /** Dispatch and submit counts, so "it is slow" can be attributed. */
-  readonly stats = { dispatches: 0, submits: 0, readbacks: 0, uploaded: 0 };
+  readonly stats = { dispatches: 0, submits: 0, readbacks: 0, uploaded: 0, buffers: 0, bytes: 0 };
 
   private constructor(
     readonly device: GPUDevice,
@@ -125,6 +126,8 @@ export class Gpu {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     this.owned.push(buffer);
+    this.stats.buffers += 1;
+    this.stats.bytes += Math.max(4, length * 4);
     this.nextUid += 1;
     return { buffer, length, uid: this.nextUid };
   }
@@ -138,14 +141,34 @@ export class Gpu {
    * visible at the call site.
    */
   scratch(slot: string, length: number): Tensor {
-    const key = `${slot}:${length}`;
-    let found = this.pool.get(key);
-    if (!found) {
-      found = this.alloc(length);
-      this.pool.set(key, found);
+    let held = this.pool.get(slot);
+    if (!held || held.capacity < length) {
+      // Grown, not added to. Pooling on `(slot, length)` instead meant every
+      // new utterance length allocated a fresh set and nothing was ever freed —
+      // the decoder's last block is 127.5 MB a slot, so a handful of different
+      // sentence lengths reached 25.7 GB of VRAM and took the machine's other
+      // work down with it.
+      if (held) {
+        // Anything already recorded names the buffer that is about to go, and
+        // a submit after `destroy()` is an error rather than a wrong answer —
+        // "used in submit while destroyed". Send it first.
+        this.flush();
+        held.buffer.destroy();
+        const at = this.owned.indexOf(held.buffer);
+        if (at >= 0) this.owned.splice(at, 1);
+        // The cached bind groups point at the buffer that just went away.
+        for (const key of [...this.groups.keys()]) {
+          if (key.includes(`#${held.uid}`)) this.groups.delete(key);
+        }
+      }
+      const grown = this.alloc(length);
+      held = { buffer: grown.buffer, capacity: length, uid: grown.uid };
+      this.pool.set(slot, held);
     }
-    return found;
+    // `length` is what gets bound and dispatched; the buffer may be larger.
+    return { buffer: held.buffer, length, uid: held.uid };
   }
+
 
   /** A tensor holding a copy of `data`, uploaded now. */
   upload(data: Float32Array): Tensor {
@@ -286,7 +309,7 @@ export class Gpu {
     workgroups: [number, number?, number?],
   ): void {
     const pipeline = this.pipelineFor(code);
-    const key = `${code.length}:${tensors.map((t) => t.uid).join(",")}|${words.join(",")}`;
+    const key = `${code.length}:${tensors.map((t) => `#${t.uid}@${t.offset ?? 0}+${t.length}`).join(",")}|${words.join(",")}`;
     let bindGroup = this.groups.get(key);
     if (!bindGroup) {
       const entries: GPUBindGroupEntry[] = tensors.map((tensor, binding) => ({
@@ -389,6 +412,59 @@ export class Gpu {
 
   begin(): void {
     this.device.pushErrorScope("validation");
+  }
+
+  /**
+   * Where the memory went, grouped by the first part of each slot name.
+   *
+   * Weights and pooled scratch are different problems — one is the model and
+   * the other is the shapes it has been asked for — so a total is not an
+   * answer. This separates them and names the biggest pools.
+   */
+  breakdown(): { weights: number; scratch: number; groups: [string, number, number][] } {
+    let scratch = 0;
+    const groups = new Map<string, [number, number]>();
+    for (const [slot, held] of this.pool) {
+      const bytes = held.capacity * 4;
+      scratch += bytes;
+      const key = slot.split(".").slice(0, 2).join(".");
+      const entry = groups.get(key) ?? [0, 0];
+      groups.set(key, [entry[0] + 1, entry[1] + bytes]);
+    }
+    const pooled = new Set([...this.pool.values()].map((h) => h.buffer));
+    let weights = 0;
+    for (const buffer of this.owned) if (!pooled.has(buffer)) weights += buffer.size;
+    return {
+      weights,
+      scratch,
+      groups: [...groups.entries()]
+        .map(([name, [count, bytes]]) => [name, count, bytes] as [string, number, number])
+        .sort((a, b) => b[2] - a[2]),
+    };
+  }
+
+  /**
+   * Drop every pooled buffer, keeping the uploaded weights.
+   *
+   * The codec's encoder holds the largest scratch in the process — a
+   * twenty-second clip needs 243 MB per activation and a residual unit has four
+   * — and it runs only when a voice arrives. Holding that between voices costs
+   * gigabytes for nothing.
+   */
+  releaseScratch(prefix?: string): number {
+    let freed = 0;
+    for (const [slot, held] of [...this.pool]) {
+      if (prefix !== undefined && !slot.startsWith(prefix)) continue;
+      freed += held.capacity * 4;
+      held.buffer.destroy();
+      const at = this.owned.indexOf(held.buffer);
+      if (at >= 0) this.owned.splice(at, 1);
+      this.pool.delete(slot);
+    }
+    // Cached bind groups name buffers that have gone. Dropping all of them
+    // costs a rebuild rather than a wrong answer.
+    this.groups.clear();
+    return freed;
   }
 
   destroy(): void {

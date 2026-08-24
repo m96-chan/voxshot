@@ -118,7 +118,20 @@ function applySnake(gpu: ResidentGpu, input: Shaped, prefix: string, slot: strin
   };
 }
 
-/** `snake -> conv(k=7, d) -> snake -> conv(k=1) -> + x`. */
+/**
+ * `snake -> conv(k=7, d) -> snake -> conv(k=1) -> + x`.
+ *
+ * The four intermediates are strictly sequential — each reads only the one
+ * before it — so they share two slots that alternate, and the three residual
+ * units of a block share the same two. Giving each its own name was 5 slots per
+ * unit and 15 per block; at 92 MB apiece in the last two blocks that was
+ * **1.4 GB a block** of buffers that are never live at the same moment.
+ *
+ * The two are shared across blocks as well as across units, because a block's
+ * working buffers do not outlive it. `input` must not be one of them: the
+ * shortcut is read at the end, which is why the caller alternates the unit
+ * outputs.
+ */
 function residualUnit(
   gpu: ResidentGpu,
   input: Shaped,
@@ -126,27 +139,31 @@ function residualUnit(
   slot: string,
   dilation: number,
 ): Shaped {
-  let x = applySnake(gpu, input, `${prefix}.block.0`, `${slot}.s0`);
-  x = applyConv(gpu, x, `${prefix}.block.1`, `${slot}.c1`, dilation);
-  x = applySnake(gpu, x, `${prefix}.block.2`, `${slot}.s2`);
-  x = applyConv(gpu, x, `${prefix}.block.3`, `${slot}.c3`, 1);
+  let x = applySnake(gpu, input, `${prefix}.block.0`, "work.a");
+  x = applyConv(gpu, x, `${prefix}.block.1`, "work.b", dilation);
+  x = applySnake(gpu, x, `${prefix}.block.2`, "work.a");
+  x = applyConv(gpu, x, `${prefix}.block.3`, "work.b", 1);
   if (x.length !== input.length) {
     throw new Error(
       `${prefix}: the shortcut needs a centre crop from ${input.length} to ${x.length}, ` +
         `which this path does not implement — see decoder.ts, where it is a no-op for this config`,
     );
   }
-  return { tensor: gpu.add(x.tensor, input.tensor, `${slot}.add`), channels: x.channels, length: x.length };
+  return { tensor: gpu.add(x.tensor, input.tensor, slot), channels: x.channels, length: x.length };
 }
 
 function decoderBlock(gpu: ResidentGpu, input: Shaped, index: number, rate: number): Shaped {
   const prefix = `decoder.model.${index}`;
   const slot = `d${index}`;
   let x = applySnake(gpu, input, `${prefix}.block.0`, `${slot}.s`);
-  x = applyTranspose(gpu, x, `${prefix}.block.1`, `${slot}.t`, rate);
-  x = residualUnit(gpu, x, `${prefix}.block.4`, `${slot}.r1`, 1);
-  x = residualUnit(gpu, x, `${prefix}.block.5`, `${slot}.r3`, 3);
-  x = residualUnit(gpu, x, `${prefix}.block.8`, `${slot}.r9`, 9);
+  // The transposed convolution's output *is* the first unit's input, so it goes
+  // straight into one of the two alternating unit slots rather than a third.
+  x = applyTranspose(gpu, x, `${prefix}.block.1`, `${slot}.u1`, rate);
+  // Unit outputs alternate: a unit's shortcut is its input, so it cannot write
+  // into the slot it is reading from.
+  x = residualUnit(gpu, x, `${prefix}.block.4`, `${slot}.u0`, 1);
+  x = residualUnit(gpu, x, `${prefix}.block.5`, `${slot}.u1`, 3);
+  x = residualUnit(gpu, x, `${prefix}.block.8`, `${slot}.u0`, 9);
   if (has(`${prefix}.block.9.block.0.alpha`)) {
     throw new Error(`${prefix}.block.9 is a residual unit in this checkpoint, which is unhandled`);
   }

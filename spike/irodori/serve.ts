@@ -217,7 +217,12 @@ async function main(): Promise<void> {
       ),
     );
     await gpu.check(`encoding ${label}`);
+    // The encoder's activations are the largest scratch in the process — 243 MB
+    // each for a twenty-second clip — and they are wanted only while a voice is
+    // arriving. Holding them between voices is gigabytes for nothing.
+    const freed = codecResident.releaseScratch();
     const withMean = prependMeanToken(state, patched.keep, config.speaker_dim);
+    void freed;
     return {
       id,
       label,
@@ -239,6 +244,23 @@ async function main(): Promise<void> {
     `built-in voice ready in ${(builtIn.ms / 1000).toFixed(1)}s — ` +
       `${builtIn.seconds.toFixed(1)}s of audio, ${builtIn.context.keep.length} speaker tokens`,
   );
+
+  const mb = (bytes: number) => `${(bytes / 1e6).toFixed(0)} MB`;
+  function vram(label: string): void {
+    const model = gpu.breakdown();
+    const codec = codecResident.breakdown();
+    console.log(
+      `\n[VRAM ${label}] model ${mb(model.weights)} weights + ${mb(model.scratch)} scratch, ` +
+        `codec ${mb(codec.weights)} weights + ${mb(codec.scratch)} scratch`,
+    );
+    for (const [name, engine] of [["model", model], ["codec", codec]] as const) {
+      for (const [slot, count, bytes] of engine.groups.slice(0, 4)) {
+        if (bytes < 50e6) continue;
+        console.log(`    ${name} ${slot.padEnd(14)} ${String(count).padStart(3)} slots  ${mb(bytes)}`);
+      }
+    }
+  }
+  vram("after startup");
 
   const captionDim = config.caption_dim ?? config.text_dim;
   const captionContext: Context = {
@@ -438,6 +460,7 @@ async function main(): Promise<void> {
             `"${text.slice(0, 30)}" as ${voice.label} -> ${result.frames} frames in ` +
               `${result.timings.total} ms (flow ${result.timings.flow}, decode ${result.timings.decode})`,
           );
+          if (url.searchParams.get("vram")) vram("after this request");
           send(200, "audio/wav", result.audio, {
             "content-length": String(result.audio.length),
             "x-timings": JSON.stringify(result.timings),

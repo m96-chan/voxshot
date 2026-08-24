@@ -1,5 +1,5 @@
 import type { Context } from "./dit.js";
-import { type Modulation, prepareGpu, velocityGpu } from "./dit-gpu.js";
+import { filled, type Modulation, prepareGpu, velocityGpu } from "./dit-gpu.js";
 import type { Gpu, Tensor } from "./gpu.js";
 import type { ModelWeights } from "./model-weights.js";
 import { linearSchedule, timestepEmbedding } from "./sampler.js";
@@ -79,6 +79,12 @@ export async function sampleGpu({
   prepared.set(guidedBatch, prepareGpu({ gpu, weights, contexts: guided, batch: guidedBatch, tokens }));
   prepared.set(1, prepareGpu({ gpu, weights, contexts: plain, batch: 1, tokens }));
 
+  // `prepareGpu`'s per-context temporaries are dead once the projections are
+  // concatenated — 357 MB of them, held for the rest of the process otherwise.
+  gpu.releaseScratch("prep.k");
+  gpu.releaseScratch("prep.kn");
+  gpu.releaseScratch("prep.v");
+
   const schedule = linearSchedule(steps);
 
   /**
@@ -119,7 +125,7 @@ export async function sampleGpu({
    * same standing-in-for-broadcast trick the DiT's AdaLN uses.
    */
   const refineAll = (batch: number, rows: number, cond: Tensor) => {
-    const ones = gpu.writeInto(`ada.ones.${batch}`, new Float32Array(rows * dim).fill(1));
+    const ones = gpu.writeInto(`ada.ones.${batch}`, filled(1, rows * dim));
     const zeros = gpu.writeIntsInto(`ada.zero.${batch}`, new Int32Array(rows));
     return dit.blocks.map((block, index) => {
       const one = (name: string, w: typeof block.attentionAdaLn) => {

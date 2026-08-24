@@ -1,6 +1,7 @@
 import { ACTIVATION } from "web-xpu-ops/ops/activation";
 
 import type { BertWeights } from "./bert-weights.js";
+import { filled } from "./dit-gpu.js";
 import type { Gpu, Tensor } from "./gpu.js";
 
 /**
@@ -108,7 +109,9 @@ export function prepareBert(gpu: Gpu, weights: BertWeights, ids: Int32Array, kee
     tokenEmbeddings: gpu.weight(weights.tokenEmbeddings),
     embeddingNorm: gpu.weight(weights.embeddingNorm),
     finalNorm: gpu.weight(weights.finalNorm),
-    zeroBias: gpu.weight(new Float32Array(config.hiddenSize)),
+    // Memoised: a fresh array here would miss `Gpu.weight`'s cache and upload
+    // again on every request.
+    zeroBias: gpu.weight(filled(0, config.hiddenSize)),
     fullMask: gpu.writeInto("bert.mask.full", maskFor(keep, null)),
     slidingMask: gpu.writeInto("bert.mask.slide", maskFor(keep, config.slidingWindow)),
     ids: gpu.writeIntsInto("bert.ids", ids),
